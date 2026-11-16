@@ -19,11 +19,27 @@ define DIET_USERS
 	nas -1 nas -1 * - - - DIET WebDAV
 endef
 
-# Applets busybox utilisés par les scripts, absents du busybox.config par défaut
+# Applets busybox utilisés par les scripts, absents du busybox.config par défaut.
+# Shell « standalone » : ash lance ses applets sans chercher dans le PATH, les
+# applets « nofork » (cat, echo, printf, test, mkdir…) sans fork ni exec et les
+# « noexec » (rm, mv…) sans exec. Sur ce SPARC, lancer busybox (dynamique) coûte
+# environ 60 ms : l'API et les scripts de démarrage en profitent. Le busybox
+# statique de l'initramfs (package/readynas-initramfs) n'est pas concerné.
 define DIET_BUSYBOX_CONFIG_FIXUPS
 	$(call KCONFIG_ENABLE_OPT,CONFIG_NTPD)
 	$(call KCONFIG_ENABLE_OPT,CONFIG_FEATURE_WGET_HTTPS)
+	$(call KCONFIG_ENABLE_OPT,CONFIG_FEATURE_PREFER_APPLETS)
+	$(call KCONFIG_ENABLE_OPT,CONFIG_FEATURE_SH_STANDALONE)
+	$(call KCONFIG_ENABLE_OPT,CONFIG_FEATURE_SH_NOFORK)
+	$(if $(BR2_PACKAGE_HDPARM),$(call KCONFIG_DISABLE_OPT,CONFIG_HDPARM))
+	$(if $(BR2_PACKAGE_E2FSPROGS),$(call KCONFIG_DISABLE_OPT,CONFIG_MKE2FS))
+	$(if $(BR2_PACKAGE_E2FSPROGS),$(call KCONFIG_DISABLE_OPT,CONFIG_CHATTR))
+	$(if $(BR2_PACKAGE_E2FSPROGS),$(call KCONFIG_DISABLE_OPT,CONFIG_LSATTR))
+	$(if $(BR2_PACKAGE_E2FSPROGS_FSCK),$(call KCONFIG_DISABLE_OPT,CONFIG_FSCK))
 endef
+# Avec ce shell, un applet passe avant le programme du même nom dans le PATH :
+# les applets doublés par un vrai programme de l'image (hdparm, e2fsprogs) sont
+# retirés, pour que les scripts gardent le vrai programme.
 
 # S50lighttpd et lighttpd.conf remplacent ceux de Buildroot : recopiés dans
 # DIET_FINALIZE, car avec les répertoires par paquet l'assemblage final de

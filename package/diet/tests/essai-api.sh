@@ -43,6 +43,8 @@ printf 'Inter-|\n face |\n  eth0: 1000 10 0 0 0 0 0 0 2000 20 0 0 0 0 0 0\n' > "
 printf '   8       0 sda 10 0 800 0 5 0 400 0 0 0 0\n   8      16 sdb 10 0 800 0 5 0 400 0 0 0 0\n' > "$R"/proc/diskstats
 printf '/dev/root / ext4 rw 0 0\n/dev/md0 /c ext4 rw 0 0\n' > "$R"/proc/mounts
 echo 8 > "$R"/proc/fs/nfsd/threads
+# processus en marche (l'API lit /proc/<pid>/comm)
+for p in 101:ksmbd.mountd 102:lighttpd 103:dropbear 104:sh; do mkdir -p "$R/proc/${p%%:*}"; echo "${p#*:}" > "$R/proc/${p%%:*}/comm"; done
 for d in sda:38000 sdb:41000; do
 	mkdir -p "$R/sys/block/${d%%:*}/device/hwmon/hwmon0"
 	echo "DISQUE-ESSAI ${d%%:*}" > "$R/sys/block/${d%%:*}/device/model"
@@ -112,7 +114,13 @@ api() {
 		HTTP_X_DIET=${4-1} REMOTE_ADDR=10.0.0.9 $SH "$SRC/www/cgi-bin/api")
 	ST=$(printf '%s\n' "$brut" | sed -n 's/^Status: \([0-9]*\).*/\1/p' | head -n 1); ST=${ST:-200}
 	OUT=$(printf '%s\n' "$brut" | tr -d '\r' | sed '1,/^$/d')
+	# toute réponse JSON doit être valide (pas de 00000000000, NaN, virgule en trop…)
+	case $brut in *"Content-Type: application/json"*)
+		NJSON=$((NJSON + 1)); printf '%s' "$OUT" | jsonok || JSONKO="$JSONKO $1:$2" ;;
+	esac
 }
+NJSON=0; JSONKO=
+jsonok() { python3 -I -c 'import json,sys; json.load(sys.stdin, parse_constant=lambda c: 1/0)' 2>/dev/null; }
 verifie() {	# verifie "description" condition-shell
 	N=$((N + 1))
 	if eval "$2"; then echo "ok   $1"; else echo "ÉCHEC $1"; ECHECS=$((ECHECS + 1)); fi
@@ -153,6 +161,23 @@ verifie "config : période > 240 s refusée" '[ "$ST" = 400 ]'
 # ---------- partages SMB ----------
 api GET a=shares
 verifie "shares : [c] seul, pas [global]" "json 'j==[{\"name\":\"c\",\"path\":\"/c\",\"ro\":0,\"guest\":0,\"exists\":1}]'"
+# format écrit par share_add (tabulations) et variantes : jamais de partage fantôme « c] »
+cp "$R"/etc/ksmbd/ksmbd.conf "$R"/ksmbd.bak
+cat >> "$R"/etc/ksmbd/ksmbd.conf <<'EOF'
+
+[photos]
+	path = /c/photos
+	create mask = 0666
+	writeable = yes
+	guest ok = yes
+  [Docs]   ; commentaire
+path=/c/docs
+read only = yes
+EOF
+api GET a=shares
+verifie "shares : nom sans « ] », chemin lu, droits (format de share_add)" "json '[(s[\"name\"],s[\"path\"],s[\"ro\"],s[\"guest\"]) for s in j]==[(\"c\",\"/c\",0,0),(\"photos\",\"/c/photos\",0,1),(\"Docs\",\"/c/docs\",1,0)]'"
+verifie "shares : lecture de ksmbd.conf sans substr/index (calculs flottants de l’awk du NAS)" '! sed -n "/^shares_list()/,/^}/p" "$SRC"/www/cgi-bin/api | grep -qE "substr|index\("'
+mv "$R"/ksmbd.bak "$R"/etc/ksmbd/ksmbd.conf
 api POST a=share_add 'name=photos'
 verifie "share_add : section, dossier, rechargement ksmbd" 'grep -q "^\[photos\]" "$R"/etc/ksmbd/ksmbd.conf && [ -d "$R"/c/photos ] && grep -q "ksmbd.control -r" "$R"/cmd.log'
 api POST a=share_add 'name=photos'
@@ -218,6 +243,13 @@ verifie "user_del : modules rsync et WebDAV retirés, dossier gardé" '! grep -q
 # ---------- NFS ----------
 api GET a=nfs
 verifie "nfs : lit /etc/exports" "json 'j[0][\"path\"]==\"/c\" and j[0][\"client\"]==\"10.0.0.0/8\" and j[0][\"ro\"]==0'"
+verifie "nfs : hôte et options séparés à la « ( » (pas de « 10.0.0.0/8( »)" "json 'j==[{\"path\":\"/c\",\"client\":\"10.0.0.0/8\",\"ro\":0,\"opts\":\"rw,no_subtree_check,fsid=0\",\"exists\":1}]'"
+cp "$R"/etc/exports "$R"/exports.bak
+printf '# commentaire\n\n  /c 10.0.0.0/8(rw,no_subtree_check,fsid=0)   192.168.1.0/24(ro,sync)\n/c/absent *\n' > "$R"/etc/exports
+api GET a=nfs
+verifie "nfs : deux clients sur une ligne, client sans options, dossier absent" "json '[(x[\"client\"],x[\"opts\"],x[\"ro\"],x[\"exists\"]) for x in j]==[(\"10.0.0.0/8\",\"rw,no_subtree_check,fsid=0\",0,1),(\"192.168.1.0/24\",\"ro,sync\",1,1),(\"*\",\"\",0,0)]'"
+verifie "nfs : lu par le shell, sans awk (calculs flottants de l’awk du NAS)" '! sed -n "/^nfs_get()/,/^}/p" "$SRC"/www/cgi-bin/api | grep -q awk'
+mv "$R"/exports.bak "$R"/etc/exports
 mkdir -p "$R"/c/films
 api POST a=nfs_add "path=$(enc /c/films)&client=$(enc 10.1.0.0/16)&ro=1"
 verifie "nfs_add : ligne ajoutée, exportfs -ra" 'grep -qx "/c/films 10.1.0.0/16(ro,no_subtree_check)" "$R"/etc/exports && grep -q "exportfs -ra" "$R"/cmd.log'
@@ -354,6 +386,52 @@ api GET 'a=log&f=stockage'
 verifie "log stockage : journal de nas-raid" '[ "$ST" = 200 ]'
 unset NAS_RAID_DISQUES
 
+# ---------- cache du collecteur (S95diet : l'API avec DIET_COLLECTE=1) ----------
+C=$R/var/run/diet
+DIET_COLLECTE=une $SH "$SRC"/www/cgi-bin/api
+ok_cache=1; for k in status all services shares nfs sys users config stockage; do [ -s "$C/$k.json" ] && jsonok < "$C/$k.json" || { ok_cache=; echo "  $k.json absent ou invalide"; }; done
+verifie "collecteur (un tour) : réponses JSON valides dans /var/run/diet" '[ -n "$ok_cache" ] && [ ! -e "$C"/.status.tmp ]'
+OUT=$(cat "$C"/all.json)
+verifie "collecteur : all = état + stockage + historique" "json 'j[\"status\"][\"host\"]==\"nas-essai\" or j[\"status\"][\"host\"]==\"readynas\"' && json 'j[\"stockage\"][\"mode\"]==\"xraid-rw\" and isinstance(j[\"hist\"], str)'"
+mkfifo "$C"/reveil; exec 3<> "$C"/reveil
+echo $$ > "$C"/pid	# collecteur « en marche » : ce shell
+echo cache-essai > "$R"/proc/sys/kernel/hostname
+api GET a=status
+verifie "cache présent : lu tel quel (pas recalculé)" "json 'j[\"host\"]==\"readynas\"'"
+verifie "cache : demande notée, collecteur réveillé (vu)" '[ -s "$C"/vu ] && [ "$(timeout 2 head -n 1 <&3)" = vu ]'
+: > "$C"/actif
+api GET a=all
+verifie "cache : ?a=all lu, pas de réveil si le collecteur est actif" "json 'j[\"status\"][\"host\"]==\"readynas\" and \"mode\" in j[\"stockage\"]' && ! timeout 1 head -n 1 <&3 >/dev/null"
+rm -f "$C"/status.json
+api GET a=status
+verifie "cache absent : calcul direct" "json 'j[\"host\"]==\"cache-essai\"'"
+DIET_COLLECTE=une $SH "$SRC"/www/cgi-bin/api
+echo 99999999 > "$C"/pid
+api GET a=status
+verifie "collecteur arrêté : cache ignoré, calcul direct" "json 'j[\"host\"]==\"cache-essai\"'"
+echo $$ > "$C"/pid
+echo readynas > "$R"/proc/sys/kernel/hostname
+api POST a=share_add 'name=cache'
+verifie "POST : cache vidé, marque inval, collecteur réveillé (tout)" '[ "$ST" = 200 ] && ! ls "$C"/*.json >/dev/null 2>&1 && [ -e "$C"/inval ] && [ "$(timeout 2 head -n 1 <&3)" = tout ]'
+api GET a=shares
+verifie "après POST : lecture directe à jour" "json 'any(s[\"name\"]==\"cache\" for s in j)'"
+DIET_COLLECTE=une $SH "$SRC"/www/cgi-bin/api
+verifie "collecteur : un tour après le POST efface inval et remplit le cache" '[ ! -e "$C"/inval ] && grep -q "\"cache\"" "$C"/shares.json'
+api POST a=share_del 'name=cache'
+exec 3>&-
+# vraie boucle (read -t de ash) : busybox de l'hôte s'il est là
+if command -v busybox >/dev/null 2>&1; then
+	rm -f "$C"/*.json "$C"/pid "$C"/vu "$C"/actif
+	DIET_COLLECTE=1 busybox sh "$SRC"/www/cgi-bin/api & CP=$!
+	i=0; while [ $i -lt 50 ] && [ ! -s "$C"/all.json ]; do sleep 0.2; i=$((i + 1)); done
+	verifie "collecteur (boucle busybox ash) : cache rempli, pid noté" '[ -s "$C"/all.json ] && [ "$(cat "$C"/pid)" = "$CP" ] && jsonok < "$C"/status.json'
+	rm -f "$C"/shares.json; echo tout 1<> "$C"/reveil
+	i=0; while [ $i -lt 50 ] && [ ! -s "$C"/shares.json ]; do sleep 0.2; i=$((i + 1)); done
+	verifie "collecteur (boucle) : réveillé par « tout », cache recalculé" '[ -s "$C"/shares.json ]'
+	kill $CP; i=0; while [ $i -lt 25 ] && kill -0 $CP 2>/dev/null; do sleep 0.2; i=$((i + 1)); done
+	verifie "collecteur (boucle) : arrêt propre (TERM), cache effacé" '! kill -0 $CP 2>/dev/null && [ ! -e "$C"/pid ] && ! ls "$C"/*.json >/dev/null 2>&1'
+fi
+
 # ---------- divers ----------
 api POST a=reboot '' ''
 verifie "POST sans X-Diet refusé (403)" '[ "$ST" = 403 ]'
@@ -375,6 +453,7 @@ sleep 1
 verifie "diet-hwmon : historique écrit" 'grep -q " 45 1800 120$" "$R"/var/run/hwmon.hist'
 verifie "diet-hwmon : alerte notée et envoyée" 'grep -q "RAID dégradé" "$R"/var/run/alert.last && grep -q "ALERTE" "$R"/var/log/diet.log && grep -q "wget .*sendMessage" "$R"/cmd.log'
 
+verifie "toutes les réponses JSON de l’API sont valides ($NJSON)" '[ -z "$JSONKO" ] || { echo "  invalides :$JSONKO"; false; }'
 echo "$((N - ECHECS))/$N essais réussis (racine : $R)"
 [ $ECHECS -eq 0 ] && rm -rf "$R"
 [ $ECHECS -eq 0 ]

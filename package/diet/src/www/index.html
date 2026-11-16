@@ -521,9 +521,9 @@ function spark(vals, color){
   vals.forEach((y,i)=>{ if(y==null){ pen=false; return; } d += (pen?'L':'M')+(100*i/(n-1)).toFixed(2)+' '+(22-20*(y-lo)/span).toFixed(2); pen=true; });
   return `<svg viewBox="0 0 100 24" preserveAspectRatio="none" style="width:100%;height:28px;display:block"><path d="${d}" fill="none" stroke="${color}" stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg>`;
 }
-async function loadHist(){
+async function loadHist(txt){
   try{
-    const rows = (await get('hist', true)).trim().split('\n').map(l=>l.split(' ')).filter(r=>r.length>=3);
+    const rows = (txt ?? await get('hist', true)).trim().split('\n').map(l=>l.split(' ')).filter(r=>r.length>=3);
     if(rows.length<2){ $('#hist').innerHTML=''; return; }
     const temps = rows.map(r=>r[1]==='-'?null:+r[1]), f = rows.map(r=>+r[2]);
     const rng = a=>{ const v=a.filter(x=>x!=null); return v.length ? Math.min(...v)+'–'+Math.max(...v) : '–'; };
@@ -567,16 +567,20 @@ function render(s){
   warnText = smartAl.length ? t('Disque à surveiller : {0}', smartAl.join(', ')) : '';
   banner();
 
-  // Raten aus Zaehlern
-  const now = performance.now();
-  if(prev){
-    const dt = (now - prev.t)/1000, c = s.cnt, p = prev.cnt;
-    const cpu = (c.tot-p.tot) > 0 ? 100*(c.busy-p.busy)/(c.tot-p.tot) : 0;
-    $('#cpu').textContent = Math.round(cpu)+' %';
-    $('#rx').textContent = rate((c.rx-p.rx)/dt); $('#tx').textContent = rate((c.tx-p.tx)/dt);
-    $('#rd').textContent = rate((c.rd-p.rd)*512/dt); $('#wr').textContent = rate((c.wr-p.wr)*512/dt);
+  // Débits : compteurs du NAS datés par son uptime (s.t, centièmes) ; l'état vient
+  // du cache du collecteur, deux réponses identiques ne donnent pas de nouveau débit.
+  const now = s.t!=null ? s.t/100 : performance.now()/1000;
+  if(prev && now < prev.t) prev = null;   // NAS redémarré
+  if(!prev || now > prev.t){
+    if(prev){
+      const dt = now - prev.t, c = s.cnt, p = prev.cnt;
+      const cpu = (c.tot-p.tot) > 0 ? 100*(c.busy-p.busy)/(c.tot-p.tot) : 0;
+      $('#cpu').textContent = Math.round(cpu)+' %';
+      $('#rx').textContent = rate((c.rx-p.rx)/dt); $('#tx').textContent = rate((c.tx-p.tx)/dt);
+      $('#rd').textContent = rate((c.rd-p.rd)*512/dt); $('#wr').textContent = rate((c.wr-p.wr)*512/dt);
+    }
+    prev = {t: now, cnt: s.cnt};
   }
-  prev = {t: now, cnt: s.cnt};
 
   $('#tmp').textContent = (s.temp??'–')+' °C';
   $('#fan').textContent = s.fan!=null ? s.fan : '–';
@@ -620,8 +624,8 @@ function render(s){
 // Stockage : X-RAID (compatibilité) ou md, cohérence du miroir, assistants (nas-raid)
 let stk = null;
 const XRM = {'xraid-rw':'X-RAID, lecture et écriture', 'xraid-ro':'X-RAID, lecture seule', 'md':'RAID md', 'aucun':'aucun volume'};
-async function loadStk(){
-  try{ stk = await get('stockage'); }catch(e){ return; }
+async function loadStk(d){
+  try{ stk = d !== undefined ? d : await get('stockage'); }catch(e){ return; }
   if(!stk || stk.mode==='absent'){ $('#xr').innerHTML=''; $('#xrb').innerHTML=''; return; }
   const x = stk.xraid || {}, v = stk.verif || {}, m = stk.migration || {};
   const ok = stk.mode==='md' || stk.mode==='xraid-rw';
@@ -683,7 +687,13 @@ $('#xrb').onclick = async ev=>{
 
 async function poll(){
   clearTimeout(timer);
-  try { last = await get('status'); render(last); if(polls++ % 12 === 0){ loadHist(); loadStk(); } }
+  try {
+    // premier passage : une seule requête (état, stockage, historique) ; ensuite l'état,
+    // et l'historique et le stockage toutes les 12 fois
+    if(!polls){ const a = await get('all'); last = a.status; render(last); loadHist(a.hist); loadStk(a.stockage); }
+    else { last = await get('status'); render(last); if(polls % 12 === 0){ loadHist(); loadStk(); } }
+    polls++;
+  }
   catch(e){ $('#upd').textContent = t('pas de connexion'); }
   if(document.visibilityState==='visible') timer = setTimeout(poll, 5000);
 }

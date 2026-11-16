@@ -13,6 +13,29 @@
 R=${DIET_RACINE:-}
 export PATH=${R:+$R/bin:}/bin:/sbin:/usr/bin:/usr/sbin
 
+# Cache du collecteur (ce même script lancé par S95diet avec DIET_COLLECTE=1, voir
+# collecte plus bas) : réponses JSON prêtes, écrites par fichier temporaire puis mv.
+# Lecture rapide ici, avant que ash ait à lire le reste du script : uniquement des
+# commandes internes du shell (et cat, applet « nofork » de busybox), aucun processus.
+C=$R/var/run/diet
+if [ "$REQUEST_METHOD" = GET ] && [ -z "${DIET_COLLECTE:-}" ]; then
+  q="&$QUERY_STRING&"; A=${q#*&a=}; [ "$A" = "$q" ] && A= || A=${A%%&*}; A=${A:-status}
+  case $A in status|all|services|shares|nfs|sys|users|config|stockage)
+    if read -r P 2>/dev/null < "$C/pid" && kill -0 "$P" 2>/dev/null; then
+      # demande vue : le collecteur passe au rythme rapide (et se réveille s'il dormait)
+      read -r UP _ < "$R/proc/uptime" && echo "${UP%.*}" > "$C/vu"
+      [ -e "$C/actif" ] || { [ -p "$C/reveil" ] && echo vu 1<> "$C/reveil"; }
+      if [ -r "$C/$A.json" ]; then
+        printf 'Content-Type: application/json\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n'
+        exec cat "$C/$A.json"
+      fi
+    fi ;;
+  hist)	# historique de diet-hwmon, déjà un fichier
+    printf 'Content-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n'
+    exec cat "$R/var/run/hwmon.hist" 2>/dev/null ;;
+  esac
+fi
+
 CONF=$R/etc/diet.conf
 VCONF=$R/etc/ventilateur.conf
 KCONF=$R/etc/ksmbd/ksmbd.conf
@@ -30,103 +53,179 @@ KEYS="SPINDOWN_MIN $VKEYS"
 hdr() { printf 'Content-Type: %s\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n' "$1"; }
 fail() { printf 'Status: %s\r\n' "$1"; hdr 'text/plain; charset=utf-8'; echo "$2"; exit 0; }
 ok() { hdr application/json; echo "{\"ok\":true,\"msg\":\"$(printf '%s' "$1" | esc)\"}"; }
-qp() { echo "&$QUERY_STRING&" | sed -n "s/.*&$1=\([A-Za-z0-9_]*\)&.*/\1/p"; }
-case "$(qp l)" in fr) L=fr;; de) L=de;; *) L=en;; esac
+# qp nom : paramètre de la requête dans $QP ([A-Za-z0-9_] seulement, sinon vide)
+qp() {
+  QP="&$QUERY_STRING&"
+  case $QP in *"&$1="*) QP=${QP#*&$1=}; QP=${QP%%&*};; *) QP=;; esac
+  case $QP in *[!A-Za-z0-9_]*) QP=;; esac
+}
+qp l; case $QP in fr) L=fr;; de) L=de;; *) L=en;; esac
 tx() { case $L in fr) printf '%s' "$1";; de) printf '%s' "$2";; *) printf '%s' "$3";; esac; }
 esc() { sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\000-\037'; }
+# je texte : texte prêt pour une chaîne JSON dans $J (sed seulement s'il y a " \ ou un caractère de contrôle)
+je() { case $1 in *[\"\\]*|*[[:cntrl:]]*) J=$(printf '%s' "$1" | esc);; *) J=$1;; esac; }
+# nb VAR… : remet à 0 une variable qui n'est pas un entier positif (JSON toujours valide)
+nb() { for v; do eval "case \${$v} in ''|*[!0-9]*) $v=0;; esac"; done; }
 bg() { setsid sh -c "$1" </dev/null >/dev/null 2>&1 & }
 note() { echo "[$(date '+%F %T')] $1 (${REMOTE_ADDR:-?})" >> "$LOG" 2>/dev/null; }
-# décodage application/x-www-form-urlencoded (octets, sans dépendre de httpd -d)
+# décodage application/x-www-form-urlencoded (octets, sans dépendre de httpd -d).
+# En shell pur, sans awk : l'awk du NAS calcule en flottants (émulés par le noyau).
+# Chaque octet devient un échappement octal \NNN pour un seul printf final.
 urldec() {
-  printf '%s' "$1" | LC_ALL=C awk 'BEGIN { h = "0123456789abcdef"; RS = "\001" } {
-    s = $0; gsub(/\+/, " ", s); o = ""
-    while ((i = index(s, "%")) > 0) {
-      o = o substr(s, 1, i - 1); x = tolower(substr(s, i + 1, 2))
-      if (x ~ /^[0-9a-f][0-9a-f]$/) { o = o sprintf("%c", (index(h, substr(x, 1, 1)) - 1) * 16 + index(h, substr(x, 2, 1)) - 1); s = substr(s, i + 3) }
-      else { o = o "%"; s = substr(s, i + 1) }
-    }
-    printf "%s", o s }'
+  s=$1; f=
+  while [ -n "$s" ]; do
+    r=${s#?}; c=${s%"$r"}
+    case $c in
+      +) f="$f " ;;
+      %) case $r in
+           [0-9A-Fa-f][0-9A-Fa-f]*) h=${r%"${r#??}"}; r=${r#??}; o=$((0x$h)); f="$f\\$((o / 64))$((o / 8 % 8))$((o % 8))" ;;
+           *) f="$f%%" ;;
+         esac ;;
+      \\) f="$f\\\\" ;;
+      *) f="$f$c" ;;
+    esac
+    s=$r
+  done
+  printf "$f"
 }
-alive() { [ -r "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
-isip() { echo "$1" | awk -F. 'NF!=4 { exit 1 } { for (i=1; i<=4; i++) if ($i !~ /^[0-9]+$/ || $i > 255) exit 1 }'; }
+alive() { P=; read -r P 2>/dev/null < "$1" && [ -n "$P" ] && kill -0 "$P" 2>/dev/null; }
+isip() {
+  case $1 in *[!0-9.]*|.*|*.|*..*) return 1;; esac
+  ( IFS=.; set -- $1; [ $# = 4 ] || exit 1; for o; do [ ${#o} -le 3 ] && [ "$o" -le 255 ] || exit 1; done )
+}
 # disques SATA (libata) : sda, sdb… ; la baie vient du port ata (ata1 = baie 1)
 disks() { for b in "$R"/sys/block/sd*; do [ -d "$b" ] && echo "${b##*/}"; done; }
-bay() {
-  n=$(readlink -f "$R/sys/block/$1/device" 2>/dev/null | sed -n 's#.*/ata\([0-9]*\)/.*#\1#p')
-  [ -n "$n" ] && { echo "$n"; return; }
-  disks | awk -v d="$1" '$0 == d { print NR; exit }'
-}
-dtemp() { for f in "$R/sys/block/$1"/device/hwmon/hwmon*/temp1_input; do [ -r "$f" ] && { echo $(($(cat "$f") / 1000)); return; }; done; }
+# dtemp disque : température drivetemp en °C dans $DT (vide si inconnue)
+dtemp() { DT=; for f in "$R/sys/block/$1"/device/hwmon/hwmon*/temp1_input; do t=; read -r t 2>/dev/null < "$f"; case $t in ''|*[!0-9]*) ;; *) DT=$((t / 1000)); return;; esac; done; }
 mds() { awk '/^md[0-9]+ :/ { print $1 }' "$R/proc/mdstat" 2>/dev/null; }
-mounted() { awk -v m="$1" '$2 == m { f = 1 } END { exit !f }' "$R/proc/mounts" 2>/dev/null; }
+mounted() {
+  [ -r "$R/proc/mounts" ] || return 1
+  while read -r _ m _; do [ "$m" = "$1" ] && return 0; done < "$R/proc/mounts"
+  return 1
+}
+NL='
+'
 
+# État général. Tout est lu par le shell (read, développements de variables, $((…))
+# en entiers 64 bits) : deux processus seulement (ifconfig, df), aucun flottant.
 status() {
   read -r H < "$R/proc/sys/kernel/hostname"
   read -r UP _ < "$R/proc/uptime"
   read -r L1 L5 L15 _ < "$R/proc/loadavg"
-  VER=$(cat "$ETC/diet-version" 2>/dev/null)
+  VER=; read -r VER 2>/dev/null < "$ETC/diet-version"
   # état de padre-ventilateur : « temp=.. disques=.. fan=.. pwm=.. »
-  temp=; fan=; pwm=
-  for kv in $(cat "$RUN/ventilateur.etat" 2>/dev/null); do
+  temp=; fan=; pwm=; E=
+  read -r E 2>/dev/null < "$RUN/ventilateur.etat"
+  for kv in $E; do
     v=${kv#*=}; case "$v" in ''|*[!0-9]*) continue;; esac
     case "${kv%%=*}" in temp) temp=$v;; fan) fan=$v;; pwm) pwm=$v;; esac
   done
   [ "$temp" = 0 ] && temp=
-  MODEL=$(awk '$1=="model:" { sub(/^[^ \t]+[ \t]+/, ""); print; exit }' "$R/proc/sys/dev/boot/info" 2>/dev/null | esc)
-  IP=$(ifconfig eth0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
-  SVC=""
-  for p in ksmbd.mountd:ksmbd lighttpd:web dropbear:ssh ntpd:ntpd; do
-    pidof "${p%%:*}" >/dev/null 2>&1 && s=1 || s=0; SVC="$SVC\"${p#*:}\":$s,"
+  MODEL=
+  [ -r "$R/proc/sys/dev/boot/info" ] && while read -r k v; do [ "$k" = model: ] && { MODEL=$v; break; }; done < "$R/proc/sys/dev/boot/info"
+  je "$MODEL"; MODEL=$J; je "$H"; H=$J; je "$VER"; VER=$J
+  I=$(ifconfig eth0 2>/dev/null); IP=
+  case $I in *"inet addr:"*) IP=${I#*inet addr:}; IP=${IP%%[!0-9.]*};; esac
+  # services : un passage sur /proc/<pid>/comm (au lieu d'un pidof par service)
+  ks=0; web=0; ssh=0; ntp=0
+  for p in "$R"/proc/[0-9]*; do
+    c=; read -r c 2>/dev/null < "$p/comm" || continue
+    case $c in ksmbd.mountd) ks=1;; lighttpd) web=1;; dropbear) ssh=1;; ntpd) ntp=1;; esac
   done
+  SVC="\"ksmbd\":$ks,\"web\":$web,\"ssh\":$ssh,\"ntpd\":$ntp,"
   alive "$RUN/ventilateur.pid" && s=1 || s=0; SVC="$SVC\"fan\":$s,"
   alive "$RUN/diet-hwmon.pid" && s=1 || s=0; SVC="$SVC\"hwmon\":$s"
-  if grep -q '^/' "$EXPORTS" 2>/dev/null; then
-    n=$(cat "$R/proc/fs/nfsd/threads" 2>/dev/null); [ "${n:-0}" -gt 0 ] 2>/dev/null && s=1 || s=0; SVC="$SVC,\"nfs\":$s"
+  if [ -r "$EXPORTS" ]; then
+    x=; while read -r l; do case $l in /*) x=1; break;; esac; done < "$EXPORTS"
+    if [ -n "$x" ]; then
+      n=0; read -r n 2>/dev/null < "$R/proc/fs/nfsd/threads"; nb n
+      [ "$n" -gt 0 ] && s=1 || s=0; SVC="$SVC,\"nfs\":$s"
+    fi
   fi
-  # disques marqués (F) dans un RAID md
-  FAULTY=$(awk '/^md[0-9]+ :/ { for (i = 5; i <= NF; i++) if ($i ~ /\(F\)/) { d = $i; sub(/[0-9]*\[.*/, "", d); printf " %s ", d } }' "$R/proc/mdstat" 2>/dev/null)
-  DSK=""
-  for d in $(disks); do
-    M=$(cat "$R/sys/block/$d/device/model" 2>/dev/null | esc); S=$(cat "$R/sys/block/$d/size" 2>/dev/null)
-    t=$(dtemp "$d"); case "$FAULTY" in *" $d "*) f=1;; *) f=0;; esac
+  # RAID md : nom, état, niveau, carte [UU], synchronisation ; disques marqués (F)
+  MD=; FAULTY=" "; name=
+  mdflush() { [ -n "$name" ] && MD="$MD${MD:+,}{\"name\":\"$name\",\"state\":\"$st\",\"level\":\"$lvl\",\"map\":\"$map\",\"sync\":\"$sy\"}"; name=; }
+  if [ -r "$R/proc/mdstat" ]; then
+    set -f
+    while read -r l; do
+      case $l in
+        md[0-9]*" : "*)
+          mdflush; set -- $l; name=$1; st=$3; lvl=; map=; sy=; shift 3
+          for w; do
+            case $w in
+              raid*|linear*) [ -n "$lvl" ] || lvl=$w ;;
+              *"(F)"*) w=${w%%\[*}; FAULTY="$FAULTY${w%%[0-9]*} " ;;
+            esac
+          done ;;
+        *resync*%*|*recovery*%*|*reshape*%*|*check*%*)
+          [ -n "$name" ] || continue
+          for k in resync recovery reshape check; do case $l in *"$k"*) sy=$k${l#*"$k"}; break;; esac; done
+          je "$sy"; sy=$J ;;
+        *\[[U_]*\]*)
+          [ -n "$name" ] || continue
+          for w in $l; do
+            case $w in \[*\]) w=${w#\[}; w=${w%\]}; case $w in ''|*[!U_]*) ;; *) map=$w;; esac;; esac
+          done ;;
+      esac
+    done < "$R/proc/mdstat"
+    set +f
+  fi
+  mdflush
+  DSK=; i=0
+  for b in "$R"/sys/block/sd*; do
+    [ -d "$b" ] || continue
+    d=${b##*/}; i=$((i + 1))
+    M=; read -r M 2>/dev/null < "$b/device/model"; je "$M"; M=$J
+    S=0; read -r S 2>/dev/null < "$b/size"; nb S
+    dtemp "$d"; case "$FAULTY" in *" $d "*) f=1;; *) f=0;; esac
+    # baie = numéro du port ata dans le chemin physique du disque, sinon le rang
+    n=; if cd -P "$b/device" 2>/dev/null; then case $PWD in */ata[0-9]*/*) n=${PWD#*/ata}; n=${n%%/*};; esac; cd /; fi
+    case $n in ''|*[!0-9]*) n=$i;; esac
     SM=null; health=""; realloc=0; pending=0; uncorr=0; hours=0
-    if [ -r "$RUN/smart.$d" ]; then . "$RUN/smart.$d"
+    if [ -r "$RUN/smart.$d" ]; then . "$RUN/smart.$d"; nb realloc pending uncorr hours
       SM="{\"health\":\"$health\",\"realloc\":$realloc,\"pending\":$pending,\"uncorr\":$uncorr,\"hours\":$hours}"; fi
-    DSK="$DSK{\"dev\":\"$d\",\"bay\":$(bay "$d"),\"model\":\"$M\",\"gb\":$((${S:-0} / 1953125)),\"temp\":${t:-null},\"faulty\":$f,\"smart\":$SM},"
+    DSK="$DSK{\"dev\":\"$d\",\"bay\":$n,\"model\":\"$M\",\"gb\":$((S / 1953125)),\"temp\":${DT:-null},\"faulty\":$f,\"smart\":$SM},"
   done
-  hdr application/json
-  printf '{"host":"%s","ver":"%s","model":"%s","bays":2,"ip":"%s","uptime":%s,"now":%s,"load":[%s,%s,%s],' \
-    "$H" "$VER" "$MODEL" "$IP" "${UP%.*}" "$(date +%s)" "$L1" "$L5" "$L15"
+  # mémoire, CPU (et heure de démarrage), réseau, disques : compteurs bruts,
+  # sommes en entiers du shell, jamais de printf %f
+  mt=; mf=; mb=; mc=; ma=; swt=; swf=
+  while read -r k v _; do
+    case $k in MemTotal:) mt=$v;; MemFree:) mf=$v;; Buffers:) mb=$v;; Cached:) mc=$v;; MemAvailable:) ma=$v;; SwapTotal:) swt=$v;; SwapFree:) swf=$v;; esac
+  done < "$R/proc/meminfo"
+  nb mt mf mb mc ma swt swf
+  busy=0; tot=0; bt=
+  while read -r k a1 a2 a3 a4 a5 a6 a7 _; do
+    case $k in
+      cpu) nb a1 a2 a3 a4 a5 a6 a7; busy=$((a1 + a2 + a3 + a6 + a7)); tot=$((busy + a4 + a5)) ;;
+      btime) bt=$a1; break ;;
+    esac
+  done < "$R/proc/stat"
+  rx=0; txb=0
+  while read -r l; do case $l in eth0:*) set -- ${l#eth0:}; rx=$1; txb=$9; break;; esac; done < "$R/proc/net/dev"
+  rd=0; wr=0
+  while read -r _ _ dv _ _ r _ _ _ w _; do
+    case $dv in sd[a-z]|sd[a-z][a-z]) nb r w; rd=$((rd + r)); wr=$((wr + w));; esac
+  done < "$R/proc/diskstats"
+  nb rx txb
+  cs=0; cu=0; cf=0
+  if mounted "$DATA"; then
+    D=$(df -P -k "$DATA" 2>/dev/null); set -- ${D##*"$NL"}; cs=${2:-0}; cu=${3:-0}; cf=${4:-0}; nb cs cu cf
+  fi
+  # heure : démarrage (btime) + uptime, sans lancer date ; t = uptime en centièmes (débits)
+  up=${UP%.*}; nb up
+  case $bt in ''|*[!0-9]*) now=$(date +%s);; *) now=$((bt + up));; esac
+  cent=${UP#*.}; case $cent in [0-9][0-9]) t=$((up * 100 + 1$cent - 100));; *) t=$((up * 100));; esac
+  printf '{"host":"%s","ver":"%s","model":"%s","bays":2,"ip":"%s","uptime":%s,"now":%s,"t":%s,"load":[%s,%s,%s],' \
+    "$H" "$VER" "$MODEL" "$IP" "$up" "$now" "$t" "${L1:-0}" "${L5:-0}" "${L15:-0}"
   printf '"temp":%s,"fan":%s,"pwm":%s,"svc":{%s},"disks":[%s],' "${temp:-null}" "${fan:-null}" "${pwm:-null}" "$SVC" "${DSK%,}"
-  # RAM, /c, RAID md, compteurs (CPU, réseau, disques) en un passage d'awk
-  DF=$RUN/.df.$$
-  if mounted "$DATA"; then df -P -k "$DATA" 2>/dev/null | tail -n 1 > "$DF"; else : > "$DF"; fi
-  awk -v df="$DF" '
-    FILENAME ~ /meminfo$/ { m[$1] = $2; next }
-    FILENAME ~ /stat$/ && $1 == "cpu" { busy = $2+$3+$4+$7+$8; tot = busy+$5+$6; next }
-    FILENAME ~ /net\/dev$/ && /eth0:/ { sub(/.*eth0:/, ""); rx = $1; tx = $9; next }
-    FILENAME ~ /diskstats$/ && $3 ~ /^sd[a-z]+$/ { rd += $6; wr += $10; next }
-    FILENAME ~ /mdstat$/ {
-      if ($0 ~ /^md[0-9]+ :/) { n++; name[n] = $1; st[n] = $3; for (i = 4; i <= NF; i++) if ($i ~ /^(raid|linear)/) { lvl[n] = $i; break } next }
-      if (n && match($0, /\[[U_]+\]/)) { map[n] = substr($0, RSTART+1, RLENGTH-2); next }
-      if (n && match($0, /(resync|recovery|reshape|check) *= *[0-9.]+%.*/)) { sy[n] = substr($0, RSTART); gsub(/"/, "", sy[n]); next }
-      next
-    }
-    FILENAME == df { csize = $2; cused = $3; cfree = $4; next }
-    END {
-      printf "\"mem\":{\"total\":%d,\"free\":%d,\"buf\":%d,\"cache\":%d,\"avail\":%d,\"swap\":%d},", m["MemTotal:"], m["MemFree:"], m["Buffers:"], m["Cached:"], m["MemAvailable:"], m["SwapTotal:"]-m["SwapFree:"]
-      printf "\"c\":{\"size\":%.0f,\"used\":%.0f,\"free\":%.0f},", csize, cused, cfree
-      printf "\"cnt\":{\"busy\":%.0f,\"tot\":%.0f,\"rx\":%.0f,\"tx\":%.0f,\"rd\":%.0f,\"wr\":%.0f},", busy, tot, rx, tx, rd, wr
-      printf "\"md\":["
-      for (i = 1; i <= n; i++) printf "%s{\"name\":\"%s\",\"state\":\"%s\",\"level\":\"%s\",\"map\":\"%s\",\"sync\":\"%s\"}", (i>1?",":""), name[i], st[i], lvl[i], map[i], sy[i]
-      printf "]}\n"
-    }' "$R/proc/meminfo" "$R/proc/stat" "$R/proc/net/dev" "$R/proc/diskstats" "$R/proc/mdstat" "$DF" 2>/dev/null
-  rm -f "$DF"
+  printf '"mem":{"total":%s,"free":%s,"buf":%s,"cache":%s,"avail":%s,"swap":%s},' "$mt" "$mf" "$mb" "$mc" "$ma" "$((swt - swf))"
+  printf '"c":{"size":%s,"used":%s,"free":%s},' "$cs" "$cu" "$cf"
+  printf '"cnt":{"busy":%s,"tot":%s,"rx":%s,"tx":%s,"rd":%s,"wr":%s},' "$busy" "$tot" "$rx" "$txb" "$rd" "$wr"
+  printf '"md":[%s]}\n' "$MD"
 }
 
 # --- Réglages matériels : veille des disques (diet.conf) et courbe de padre-ventilateur (ventilateur.conf)
 config_get() {
-  hdr application/json
   awk -F'[= \t]+' -v keys="$KEYS" 'BEGIN { n = split(keys, k, " "); for (i = 1; i <= n; i++) want[k[i]] = 1 }
     $1 in want { v[$1] = $2 }
     END { printf "{"; for (i = 1; i <= n; i++) printf "%s\"%s\":%d", (i>1?",":""), k[i], v[k[i]]; print "}" }' "$CONF" "$VCONF"
@@ -169,32 +268,37 @@ shdr() { awk -v n="[$1]" '{ l = tolower($0); gsub(/^[ \t]+|[ \t]+$/, "", l) } l 
 
 shares_list() {	# une ligne par partage : nom|chemin|lecture seule|sans mot de passe
   # ksmbd : sans indication, un partage est en lecture seule et demande un compte
+  # Expressions régulières seulement, valeurs « 0 »/« 1 » en chaînes : aucune
+  # position ni longueur calculée (l'awk du NAS calcule en flottants émulés, ce qui
+  # a déjà donné un partage « c] » sans chemin).
+  [ -r "$KCONF" ] || return 0
   awk '
     function yes(v) { return tolower(v) ~ /^(1|yes|true)$/ }
     function flush() { if (name != "" && tolower(name) != "global") print name "|" path "|" ro "|" guest }
     /^[ \t]*[#;]/ { next }
-    /^[ \t]*\[/ { flush(); s = $0; sub(/^[ \t]*\[/, "", s); name = substr(s, 1, index(s, "]") - 1); path = ""; ro = 1; guest = 0; next }
-    index($0, "=") {
-      k = tolower(substr($0, 1, index($0, "=") - 1)); gsub(/^[ \t]+|[ \t]+$/, "", k)
-      v = substr($0, index($0, "=") + 1); gsub(/^[ \t"]+|[ \t"]+$/, "", v)
+    /^[ \t]*\[/ { flush(); name = $0; sub(/^[ \t]*\[/, "", name); sub(/\].*$/, "", name); path = ""; ro = "1"; guest = "0"; next }
+    /=/ {
+      k = $0; sub(/=.*$/, "", k); gsub(/^[ \t]+|[ \t]+$/, "", k); k = tolower(k)
+      v = $0; sub(/^[^=]*=/, "", v); gsub(/^[ \t"]+|[ \t"]+$/, "", v)
       if (k == "path") path = v
-      else if (k == "writeable" || k == "writable" || k == "write ok") ro = !yes(v)
-      else if (k == "read only") ro = yes(v)
-      else if (k == "guest ok" || k == "public") guest = yes(v)
+      else if (k == "writeable" || k == "writable" || k == "write ok") ro = yes(v) ? "0" : "1"
+      else if (k == "read only") ro = yes(v) ? "1" : "0"
+      else if (k == "guest ok" || k == "public") guest = yes(v) ? "1" : "0"
     }
-    END { flush() }' "$KCONF" 2>/dev/null
+    END { flush() }' "$KCONF"
 }
 
 shares_get() {
-  hdr application/json
-  shares_list | {
-    printf '['; sep=""
-    while IFS='|' read -r n p r g; do
-      [ -d "$R$p" ] && e=1 || e=0
-      printf '%s{"name":"%s","path":"%s","ro":%d,"guest":%d,"exists":%d}' "$sep" "$(printf '%s' "$n" | esc)" "$(printf '%s' "$p" | esc)" "$r" "$g" "$e"; sep=","
-    done
-    echo ']'
-  }
+  LS=$(shares_list); O=; set -f
+  while IFS='|' read -r n p r g; do
+    [ -n "$n" ] || continue
+    [ -d "$R$p" ] && e=1 || e=0; nb r g
+    je "$n"; n=$J; je "$p"
+    O="$O${O:+,}{\"name\":\"$n\",\"path\":\"$J\",\"ro\":$r,\"guest\":$g,\"exists\":$e}"
+  done <<EOF
+$LS
+EOF
+  set +f; printf '[%s]\n' "$O"
 }
 
 ksmbd_reload() { ksmbd.control -r >/dev/null 2>&1; }
@@ -244,7 +348,7 @@ shares_change() {
       MSG="$(tx "Partage $name mis à jour" "Freigabe $name geändert" "Share $name updated")" ;;
   esac
   ksmbd_reload
-  comptes_maj || MSG="$MSG ($DAVKO)"
+  comptes_maj || MSG="$MSG ($(davko))"
   note "$MSG"; ok "$MSG"
 }
 
@@ -259,7 +363,7 @@ HTUSERS=$ETC/lighttpd/htpasswd-users
 SECRETS=$ETC/rsyncd.secrets
 RSCONF=$ETC/rsyncd.conf
 DAVCONF=$ETC/lighttpd/webdav.conf
-DAVKO="$(tx "conf WebDAV refusée par lighttpd -tt, ancienne gardée" "WebDAV-Konfiguration von lighttpd -tt abgelehnt, alte bleibt" "WebDAV configuration rejected by lighttpd -tt, old one kept")"
+davko() { tx "conf WebDAV refusée par lighttpd -tt, ancienne gardée" "WebDAV-Konfiguration von lighttpd -tt abgelehnt, alte bleibt" "WebDAV configuration rejected by lighttpd -tt, old one kept"; }
 ckey() { sed -n "s/^$1=\([0-9]*\).*/\1/p" "$CONF" 2>/dev/null | tail -n 1; }
 
 ligne() {	# ligne fichier nom valeur mode : remplace « nom:… » (valeur vide = retire)
@@ -349,13 +453,18 @@ comptes_maj() {
 
 # --- Utilisateurs SMB (compte Unix sans shell + base ksmbdpwd.db) ---------------
 users_get() {
-  hdr application/json
   # smb : mot de passe ksmbd ; dav : mot de passe WebDAV/rsync (absent pour un
-  # compte créé avant : à redéfinir)
-  { sed 's/^/S:/' "$PWDDB"; sed 's/^/D:/' "$HTUSERS"; sed 's/^/P:/' "$PASSWD"; } 2>/dev/null |
-  awk -F: '$1 != "P" { if ($2 !~ /^#/ && $2 != "") k[$1 $2] = 1; next }
-    ($4 >= 1000 && $4 < 65534) { printf "%s{\"name\":\"%s\",\"uid\":%d,\"smb\":%d,\"dav\":%d}", sep, $2, $4, (("S" $2) in k), (("D" $2) in k); sep = "," }
-    BEGIN { printf "[" } END { print "]" }'
+  # compte créé avant : à redéfinir). Un seul awk, fichiers absents remplacés par
+  # /dev/null (l'awk de busybox s'arrête sur un fichier introuvable).
+  S=$PWDDB; [ -r "$S" ] || S=/dev/null
+  D=$HTUSERS; [ -r "$D" ] || D=/dev/null
+  P=$PASSWD; [ -r "$P" ] || P=/dev/null
+  awk -F: -v s="$S" -v d="$D" 'BEGIN { printf "[" }
+    FILENAME == s && FILENAME != d { if ($1 !~ /^#/ && $1 != "") k["S" $1] = 1; next }
+    FILENAME == d && FILENAME != s { if ($1 !~ /^#/ && $1 != "") k["D" $1] = 1; next }
+    FILENAME == s || FILENAME == d { next }
+    $3 ~ /^[0-9]+$/ && ($3 >= 1000 && $3 < 65534) { printf "%s{\"name\":\"%s\",\"uid\":%s,\"smb\":%s,\"dav\":%s}", sep, $1, $3, (("S" $1) in k) ? "1" : "0", (("D" $1) in k) ? "1" : "0"; sep = "," }
+    END { print "]" }' "$S" "$D" "$P"
 }
 
 users_change() {
@@ -421,23 +530,31 @@ users_change() {
       MSG="$(tx "Utilisateur $name supprimé (ses fichiers sont conservés)" "Benutzer $name gelöscht (seine Dateien bleiben erhalten)" "User $name deleted (their files are kept)")" ;;
   esac
   ksmbd_reload
-  comptes_maj || MSG="$MSG ($DAVKO)"
+  comptes_maj || MSG="$MSG ($(davko))"
   note "$MSG"; ok "$MSG"
 }
 
 # --- Exports NFS (/etc/exports, une ligne par dossier et par client) ------------
 nfs_get() {
-  hdr application/json
-  awk '/^[ \t]*#/ || NF < 1 { next }
-    { p = $1; for (i = 2; i <= NF; i++) { c = $i; o = ""; if ((j = index(c, "(")) > 0) { o = substr(c, j + 1); sub(/\)$/, "", o); c = substr(c, 1, j - 1) }
-        print p "|" c "|" (("," o ",") ~ /,ro,/ ? 1 : 0) "|" o } }' "$EXPORTS" 2>/dev/null | {
-    printf '['; sep=""
-    while IFS='|' read -r p c r o; do
-      [ -d "$R$p" ] && e=1 || e=0
-      printf '%s{"path":"%s","client":"%s","ro":%d,"opts":"%s","exists":%d}' "$sep" "$(printf '%s' "$p" | esc)" "$(printf '%s' "$c" | esc)" "$r" "$(printf '%s' "$o" | esc)" "$e"; sep=","
-    done
-    echo ']'
-  }
+  # « dossier client(options) client2(options)… », lu par le shell (aucun processus) ;
+  # client = avant la première « ( », options = entre « ( » et la « ) » finale
+  O=
+  if [ -r "$EXPORTS" ]; then
+    set -f
+    while read -r p rest; do
+      case $p in ''|\#*) continue;; esac
+      [ -d "$R$p" ] && e=1 || e=0; je "$p"; jp=$J
+      for w in $rest; do
+        c=${w%%\(*}; o=
+        case $w in *\(*) o=${w#*\(}; o=${o%\)};; esac
+        case ",$o," in *,ro,*) r=1;; *) r=0;; esac
+        je "$c"; c=$J; je "$o"
+        O="$O${O:+,}{\"path\":\"$jp\",\"client\":\"$c\",\"ro\":$r,\"opts\":\"$J\",\"exists\":$e}"
+      done
+    done < "$EXPORTS"
+    set +f
+  fi
+  printf '[%s]\n' "$O"
 }
 
 nfs_change() {
@@ -482,22 +599,42 @@ IFACES=$ETC/network/interfaces
 sys_get() {
   TG_TOKEN=""; TG_CHAT=""
   [ -r "$ETC/diet-notify.conf" ] && . "$ETC/diet-notify.conf"
-  # eth0 dans /etc/network/interfaces (ifupdown de busybox)
-  set -- $(awk '$1 == "iface" { e = ($2 == "eth0"); if (e) m = $4; next }
-    e && $1 == "address" { a = $2 } e && $1 == "netmask" { n = $2 } e && $1 == "gateway" { g = $2 }
-    e && $1 == "up" && $2 == "printf" { for (i = 5; i <= NF && $i != ">"; i++) d = d (d ? "," : "") $i }
-    END { print (m ? m : "dhcp"), (a ? a : "-"), (n ? n : "-"), (g ? g : "-"), (d ? d : "-") }' "$IFACES" 2>/dev/null)
-  NET=$1; IPADDR=${2#-}; NETMASK=${3#-}; GATEWAY=${4#-}; DNS=$(echo "${5#-}" | tr ',' ' ')
+  # eth0 dans /etc/network/interfaces (ifupdown de busybox), lu par le shell
+  NET=; IPADDR=; NETMASK=; GATEWAY=; DNS=; e=
+  set -f
+  [ -r "$IFACES" ] && while read -r k a b c rest; do
+    case $k in
+      iface) if [ "$a" = eth0 ]; then e=1; NET=$c; else e=; fi ;;
+      address) [ -n "$e" ] && IPADDR=$a ;;
+      netmask) [ -n "$e" ] && NETMASK=$a ;;
+      gateway) [ -n "$e" ] && GATEWAY=$a ;;
+      # up printf 'nameserver %s\n' a b > /etc/resolv.conf
+      up) if [ -n "$e" ] && [ "$a" = printf ]; then
+            DNS=; for w in $rest; do [ "$w" = ">" ] && break; DNS="$DNS${DNS:+ }$w"; done
+          fi ;;
+    esac
+  done < "$IFACES"
+  NET=${NET:-dhcp}
   # valeurs actuelles en suggestion si rien n'est fixé
-  CIP=$(ifconfig eth0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
-  CMASK=$(ifconfig eth0 2>/dev/null | sed -n 's/.*Mask:\([0-9.]*\).*/\1/p')
-  CGW=$(route -n 2>/dev/null | awk '$1 == "0.0.0.0" { print $2; exit }')
-  CDNS=$(awk '$1 == "nameserver" { printf "%s%s", s, $2; s = " " }' "$ETC/resolv.conf" 2>/dev/null)
-  SL=$(cat "$ETC/diet-lang" 2>/dev/null); case "$SL" in fr|de|en) ;; *) SL=en ;; esac
-  hdr application/json
+  I=$(ifconfig eth0 2>/dev/null); CIP=; CMASK=
+  case $I in *"inet addr:"*) CIP=${I#*inet addr:}; CIP=${CIP%%[!0-9.]*};; esac
+  case $I in *"Mask:"*) CMASK=${I#*Mask:}; CMASK=${CMASK%%[!0-9.]*};; esac
+  G=$(route -n 2>/dev/null); CGW=
+  while read -r a b _; do [ "$a" = 0.0.0.0 ] && { CGW=$b; break; }; done <<EOF
+$G
+EOF
+  CDNS=
+  [ -r "$ETC/resolv.conf" ] && while read -r a b _; do [ "$a" = nameserver ] && CDNS="$CDNS${CDNS:+ }$b"; done < "$ETC/resolv.conf"
+  set +f
+  SL=; read -r SL 2>/dev/null < "$ETC/diet-lang"; case "$SL" in fr|de|en) ;; *) SL=en ;; esac
+  HN=; read -r HN 2>/dev/null < "$ETC/hostname"; je "$HN"; HN=$J
+  TZV=; read -r TZV 2>/dev/null < "$ETC/TZ"; je "$TZV"; TZV=$J
+  je "$TG_CHAT"; TGC=$J
+  [ -n "$TG_TOKEN" ] && tg=1 || tg=0
+  for v in NET IPADDR NETMASK GATEWAY DNS CIP CMASK CGW CDNS; do eval "je \"\$$v\"; $v=\$J"; done
   printf '{"host":"%s","lang":"%s","tz":"%s","net":"%s","ip":"%s","mask":"%s","gw":"%s","dns":"%s","tgset":%d,"tgchat":"%s"}\n' \
-    "$(cat "$ETC/hostname" 2>/dev/null | esc)" "$SL" "$(cat "$ETC/TZ" 2>/dev/null | esc)" "$NET" "${IPADDR:-$CIP}" "${NETMASK:-$CMASK}" \
-    "${GATEWAY:-$CGW}" "${DNS:-$CDNS}" "$([ -n "$TG_TOKEN" ] && echo 1 || echo 0)" "$(printf '%s' "$TG_CHAT" | esc)"
+    "$HN" "$SL" "$TZV" "$NET" "${IPADDR:-$CIP}" "${NETMASK:-$CMASK}" \
+    "${GATEWAY:-$CGW}" "${DNS:-$CDNS}" "$tg" "$TGC"
 }
 
 sys_set() {
@@ -578,25 +715,44 @@ notify_test() {
 DLNACONF=$ETC/minidlna.conf
 AVSVC=$ETC/avahi/services
 svc_on() { ! grep -qs "^SVC_$1=0" "$CONF"; }
-b() { "$@" && echo 1 || echo 0; }
-dv() { sed -n "s/^$1=//p" "$DLNACONF" 2>/dev/null | tail -n 1; }
+# b commande… : 1 si la commande réussit, sinon 0, dans $B (sans sous-shell)
+b() { if "$@"; then B=1; else B=0; fi; }
 
 services_get() {
-  DBD=$(dv db_dir); PORT=$(dv port); case "$PORT" in ''|*[!0-9]*) PORT=8200;; esac
-  DIRS=$(sed -n 's/^media_dir=//p' "$DLNACONF" 2>/dev/null | while IFS= read -r l; do printf '%s"%s"' "$sep" "$(printf '%s' "$l" | esc)"; sep=,; done)
-  DB=null; f=$R${DBD:-/var/lib/minidlna}/files.db; [ -r "$f" ] && DB=$(wc -c < "$f" | tr -d ' ')
+  # minidlna.conf, diet.conf et rsyncd.secrets lus par le shell (dernière valeur gardée)
+  DBD=; PORT=; DNAME=; DIRS=
+  [ -r "$DLNACONF" ] && while IFS= read -r l; do
+    case $l in
+      db_dir=*) DBD=${l#*=} ;; port=*) PORT=${l#*=} ;; friendly_name=*) DNAME=${l#*=} ;;
+      media_dir=*) je "${l#*=}"; DIRS="$DIRS${DIRS:+,}\"$J\"" ;;
+    esac
+  done < "$DLNACONF"
+  case "$PORT" in ''|*[!0-9]*) PORT=8200;; esac
+  om=1; oa=1; or=1; ow=1; rc=0
+  [ -r "$CONF" ] && while IFS= read -r l; do
+    case $l in
+      SVC_MINIDLNA=0*) om=0 ;; SVC_AVAHI=0*) oa=0 ;; SVC_RSYNC=0*) or=0 ;; SVC_WEBDAV=0*) ow=0 ;;
+      RSYNC_C=*) case ${l#RSYNC_C=} in 1|1[!0-9]*) rc=1;; *) rc=0;; esac ;;
+    esac
+  done < "$CONF"
+  pw=0; [ -r "$SECRETS" ] && while IFS= read -r l; do case $l in sauvegarde:*) pw=1; break;; esac; done < "$SECRETS"
+  DB=null; f=$R${DBD:-/var/lib/minidlna}/files.db
+  if [ -r "$f" ]; then set -- $(wc -c < "$f"); DB=${1:-0}; nb DB; fi
   # pas de sqlite3 sur le NAS : nombres de fichiers lus sur la page d'état de minidlnad
-  FILES=null; RUNDLNA=$(b alive "$RUN/minidlna/minidlna.pid")
+  FILES=null; b alive "$RUN/minidlna/minidlna.pid"; RUNDLNA=$B
   if [ "$RUNDLNA" = 1 ]; then
-    FILES=$(wget -q -T 3 -O - "http://127.0.0.1:$PORT/status" 2>/dev/null | tr -d '\r\n' |
-      sed -n 's#.*Audio files</td><td>\([0-9]*\)<.*Video files</td><td>\([0-9]*\)<.*Image files</td><td>\([0-9]*\)<.*#[\1,\2,\3]#p')
+    W=$(wget -q -T 3 -O - "http://127.0.0.1:$PORT/status" 2>/dev/null)
+    case $W in *"Audio files</td><td>"*"Video files</td><td>"*"Image files</td><td>"*)
+      fa=${W#*Audio files</td><td>}; fa=${fa%%<*}; fv=${W#*Video files</td><td>}; fv=${fv%%<*}; fim=${W#*Image files</td><td>}; fim=${fim%%<*}
+      case "$fa$fv$fim" in *[!0-9]*) ;; *) [ -n "$fa" ] && [ -n "$fv" ] && [ -n "$fim" ] && FILES="[$fa,$fv,$fim]";; esac ;;
+    esac
   fi
-  hdr application/json
+  HN=; read -r HN 2>/dev/null < "$ETC/hostname"; je "$HN"; HN=$J; je "$DNAME"
+  b alive "$RUN/avahi-daemon/pid"; ra=$B; b alive "$RUN/rsyncd.pid"; rr=$B; b alive "$RUN/lighttpd-webdav.pid"; rw=$B
   printf '{"host":"%s","minidlna":{"on":%d,"run":%d,"name":"%s","dirs":[%s],"db":%s,"files":%s},' \
-    "$(cat "$ETC/hostname" 2>/dev/null | esc)" "$(b svc_on MINIDLNA)" "$RUNDLNA" "$(dv friendly_name | esc)" "$DIRS" "$DB" "${FILES:-null}"
+    "$HN" "$om" "$RUNDLNA" "$J" "$DIRS" "$DB" "$FILES"
   printf '"avahi":{"on":%d,"run":%d},"rsync":{"on":%d,"run":%d,"c":%d,"pw":%d},"webdav":{"on":%d,"run":%d}}\n' \
-    "$(b svc_on AVAHI)" "$(b alive "$RUN/avahi-daemon/pid")" "$(b svc_on RSYNC)" "$(b alive "$RUN/rsyncd.pid")" \
-    "$(b test "$(ckey RSYNC_C)" = 1)" "$(b grep -qs '^sauvegarde:' "$SECRETS")" "$(b svc_on WEBDAV)" "$(b alive "$RUN/lighttpd-webdav.pid")"
+    "$oa" "$ra" "$or" "$rr" "$rc" "$pw" "$ow" "$rw"
 }
 
 svc_set() {
@@ -684,7 +840,6 @@ rsync_pw() {
 # --- Stockage : X-RAID (compatibilité) ou md, par nas-raid (paquet xraid-compat) ---
 [ -n "$R" ] && export NAS_RAID_RACINE="$R"
 stockage_get() {
-  hdr application/json
   if command -v nas-raid >/dev/null 2>&1; then nas-raid etat --json 2>/dev/null || echo '{"mode":"erreur"}'
   else echo '{"mode":"absent"}'; fi
 }
@@ -717,7 +872,85 @@ raid_do() {
   ok "$(tx "Lancé : suivre l’avancement dans le journal du stockage" "Gestartet: Fortschritt im Speicherprotokoll" "Started: follow the progress in the storage log")"
 }
 
-A=$(qp a)
+# --- Réponses en lecture et collecteur ------------------------------------------
+hist_json() { [ -r "$RUN/hwmon.hist" ] && awk '{ printf "%s\\n", $0 }' "$RUN/hwmon.hist"; }
+calc() {	# calc clé : corps JSON de la réponse GET (sans en-tête)
+  case $1 in
+    status) status ;; config) config_get ;; shares) shares_get ;; users) users_get ;;
+    nfs) nfs_get ;; sys) sys_get ;; stockage) stockage_get ;; services) services_get ;;
+    # chargement de la page en une requête : état, stockage, historique
+    all) printf '{"status":'; status; printf ',"stockage":'; stockage_get; printf ',"hist":"'; hist_json; printf '"}\n' ;;
+  esac
+}
+
+# Collecteur (DIET_COLLECTE=1, lancé par S95diet) : recalcule les réponses dans
+# $C, fichier temporaire puis mv. Rythme : état toutes les 5 s et le reste toutes
+# les 60 s tant que l'interface est ouverte (requête vue depuis moins de 2 min,
+# fichier vu écrit par la lecture rapide) ; sinon 60 s et 5 min. Réveil immédiat
+# par une ligne dans la FIFO reveil : « vu » (interface rouverte) ou « tout »
+# (POST : réglages changés) → tout est recalculé. Un POST pose aussi inval : un
+# calcul en cours, commencé avant, est jeté au lieu d'écraser le cache vidé.
+LENTS="stockage services shares nfs sys users config"
+ecrit() {	# ecrit clé
+  if calc "$1" > "$C/.$1.tmp" 2>/dev/null && [ -s "$C/.$1.tmp" ] && [ ! -e "$C/inval" ]; then
+    mv -f "$C/.$1.tmp" "$C/$1.json"
+  else rm -f "$C/.$1.tmp"; fi
+}
+assemble() {	# all.json à partir des fichiers du cache (même contenu que calc all)
+  { printf '{"status":'; cat "$C/status.json"; printf ',"stockage":'; cat "$C/stockage.json" 2>/dev/null || printf null
+    printf ',"hist":"'; cat "$C/hist.frag" 2>/dev/null; printf '"}\n'; } > "$C/.all.tmp" && [ ! -e "$C/inval" ] \
+    && mv -f "$C/.all.tmp" "$C/all.json" || rm -f "$C/.all.tmp"
+}
+collecte() {
+  mkdir -p "$C" || exit 1
+  if read -r P 2>/dev/null < "$C/pid" && [ "$P" != $$ ] && kill -0 "$P" 2>/dev/null; then exit 0; fi	# déjà lancé
+  [ -p "$C/reveil" ] || { rm -f "$C/reveil"; mkfifo -m 600 "$C/reveil"; } || exit 1
+  exec 3<> "$C/reveil"
+  echo $$ > "$C/pid"
+  trap 'rm -f "$C"/*.json "$C"/.*.tmp "$C/pid" "$C/actif"; exit 0' TERM INT HUP
+  _ct=1; _cl=0; _cs=0; _ca=
+  while :; do
+    read -r UP _ < "$R/proc/uptime"; _cn=${UP%.*}
+    _cv=0; read -r _cv 2>/dev/null < "$C/vu"; nb _cv
+    if [ $((_cn - _cv)) -lt 120 ]; then
+      [ -n "$_ca" ] || { : > "$C/actif"; _ca=1; }
+    elif [ -n "$_ca" ]; then rm -f "$C/actif"; _ca=; fi
+    if [ -n "$_ct" ] || [ "$_cn" -ge "$_cl" ]; then
+      rm -f "$C/inval"
+      ecrit status
+      hist_json > "$C/.hist.tmp" && mv -f "$C/.hist.tmp" "$C/hist.frag"
+      for _ck in $LENTS; do ecrit "$_ck"; done
+      [ -n "$_ca" ] && _cl=$((_cn + 60)) || _cl=$((_cn + 300))
+      _cs=$_cn
+    elif [ "$_cn" -ge "$_cs" ]; then
+      ecrit status
+    fi
+    [ -r "$C/status.json" ] && assemble
+    [ -n "$_ca" ] && _cs=$((_cn + 5)) || _cs=$((_cn + 60))
+    _ct=; _cw=$((_cs < _cl ? _cs - _cn : _cl - _cn)); [ "$_cw" -ge 1 ] || _cw=1
+    # attente sans processus : lecture de la FIFO avec délai (read -t de ash)
+    if read -t "$_cw" -r _cm <&3; then
+      _ct=1; _cd=0; while [ $_cd -lt 50 ] && read -t 0.05 -r _cm <&3; do _cd=$((_cd + 1)); done
+    fi
+  done
+}
+# collecte une : un seul tour complet (essais sur le PC, sans FIFO ni attente)
+if [ -n "${DIET_COLLECTE:-}" ]; then
+  if [ "$DIET_COLLECTE" = une ]; then
+    mkdir -p "$C"; rm -f "$C/inval"; ecrit status; hist_json > "$C/hist.frag"
+    for _ck in $LENTS; do ecrit "$_ck"; done; assemble; exit 0
+  fi
+  collecte
+fi
+
+# POST : réglages changés → cache vidé, collecteur réveillé (tout recalculé)
+invalide() {
+  [ -d "$C" ] || return 0
+  : > "$C/inval"; rm -f "$C"/*.json
+  [ -p "$C/reveil" ] && echo tout 1<> "$C/reveil"
+}
+
+qp a; A=$QP
 if [ "$REQUEST_METHOD" = "POST" ]; then
   # protection CSRF : un formulaire d'un autre site ne peut pas poser cet en-tête
   [ "$HTTP_X_DIET" = "1" ] || fail "403 Forbidden" "$(tx "Action réservée à l’interface" "Aktion nur über die Oberfläche" "Action only through the web interface")"
@@ -766,22 +999,17 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
     raid_plan|raid_lancer) raid_do "$A" ;;
     *) fail "400 Bad Request" "$(tx "action inconnue" "unbekannte Aktion" "unknown action")" ;;
   esac
+  invalide
   exit 0
 fi
 
+# lecture sans cache (collecteur arrêté, ou cache vidé par un POST) : calcul direct
 case "$A" in
-  status|"") status ;;
-  config) config_get ;;
-  shares) shares_get ;;
-  users) users_get ;;
-  nfs) nfs_get ;;
-  sys) sys_get ;;
+  ""|status|all|config|shares|users|nfs|sys|stockage|services) hdr application/json; calc "${A:-status}" ;;
   hist) hdr 'text/plain; charset=utf-8'; cat "$RUN/hwmon.hist" 2>/dev/null ;;
-  stockage) stockage_get ;;
-  services) services_get ;;
   log)
     hdr 'text/plain; charset=utf-8'
-    case "$(qp f)" in
+    qp f; case $QP in
       diet)     tail -n 300 "$LOG" 2>/dev/null ;;
       messages) tail -n 300 "$R/var/log/messages" 2>/dev/null ;;
       dmesg)    dmesg | tail -n 300 ;;
@@ -789,18 +1017,18 @@ case "$A" in
       *) tx "journal inconnu" "unbekanntes Protokoll" "unknown log"; echo ;;
     esac ;;
   smart)
-    d=$(qp d)
+    qp d; d=$QP
     disks | grep -qx "$d" || fail "400 Bad Request" "$(tx "disque inconnu" "unbekannte Platte" "unknown disk")"
     hdr 'text/plain; charset=utf-8'
     if [ -x "$R/usr/sbin/smartctl" ]; then "$R/usr/sbin/smartctl" -H -i -A /dev/$d 2>&1
     else
       # pas de smartctl (chaîne sans C++) : modèle, température drivetemp et messages du noyau
       echo "$(tx "smartctl absent de ce système ; informations disponibles :" "smartctl fehlt auf diesem System; verfügbare Angaben:" "smartctl is not on this system; available information:")"
-      echo "  /dev/$d : $(cat "$R/sys/block/$d/device/model" 2>/dev/null), $(($(cat "$R/sys/block/$d/size" 2>/dev/null || echo 0) / 1953125)) GB, $(dtemp "$d" || echo '?') °C (drivetemp)"
+      echo "  /dev/$d : $(cat "$R/sys/block/$d/device/model" 2>/dev/null), $(($(cat "$R/sys/block/$d/size" 2>/dev/null || echo 0) / 1953125)) GB, $(dtemp "$d"; echo "${DT:-?}") °C (drivetemp)"
       echo; dmesg | grep -w "$d" | tail -n 50
     fi ;;
   md)
-    d=$(qp d)
+    qp d; d=$QP
     mds | grep -qx "$d" || fail "400 Bad Request" "$(tx "volume RAID inconnu" "unbekanntes RAID-Volume" "unknown RAID volume")"
     hdr 'text/plain; charset=utf-8'
     mdadm --detail /dev/$d 2>&1 ;;

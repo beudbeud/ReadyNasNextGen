@@ -136,6 +136,37 @@ que son uid si libre) ; un compte créé avant y passe quand son mot de passe
 est redéfini. Noms refusés : ceux d'un groupe système (`audio`, `video`,
 `users`…), `sauvegarde`, `nas`, `c`, `home`, `webdav`, `root`.
 
+## Rapidité : collecteur et cache
+
+Lancer un programme coûte ~60 ms sur ce SPARC et les flottants sont émulés par
+le noyau. Donc :
+
+- **Collecteur** : `S95diet` lance l'API elle-même en tâche de fond
+  (`DIET_COLLECTE=1 /www/cgi-bin/api`, pid dans `/var/run/diet/pid`). Elle écrit
+  les réponses JSON prêtes dans `/var/run/diet/<clé>.json` (fichier temporaire
+  puis `mv`) : `status` toutes les 5 s et le reste (`stockage services shares nfs
+  sys users config`) toutes les 60 s quand l'interface est ouverte (requête vue
+  depuis moins de 2 min) ; sinon 60 s et 5 min. `all.json` = état + stockage +
+  historique, lu en une requête au chargement de la page.
+- **Lecture** : en tête de l'API, avant le reste du script, un GET de ces clés
+  fait `exec cat` du fichier si le collecteur tourne (commandes internes du
+  shell seulement). Sans collecteur ou sans fichier : calcul direct, comme avant.
+- **Réveil** : FIFO `/var/run/diet/reveil` (attente par `read -t`, sans
+  processus). La lecture y écrit `vu` quand le collecteur est au repos (pas de
+  fichier `actif`) ; un POST réussi vide le cache, pose `inval` (un calcul
+  commencé avant est jeté) et écrit `tout` : tout est recalculé aussitôt.
+- **Calcul** : `/proc`, `/sys` et les fichiers de configuration sont lus par le
+  shell (`read`, développements de variables, `$((…))` en entiers 64 bits) :
+  `status` lance 2 programmes (`ifconfig`, `df`) au lieu d'une soixantaine ;
+  pas de `printf %f` ni de calcul dans awk.
+- **busybox** : `FEATURE_SH_STANDALONE`, `FEATURE_PREFER_APPLETS` et
+  `FEATURE_SH_NOFORK` (dans `DIET_BUSYBOX_CONFIG_FIXUPS`) : ash lance ses applets
+  sans les chercher dans le `PATH` et les applets « nofork » (`cat`, `echo`,
+  `printf`, `test`…) sans créer de processus. Un programme de même nom qu'un
+  applet n'est lancé que par son chemin complet.
+
+`/etc/init.d/S95diet restart-collecte` relance le collecteur.
+
 ## Paquets et applets utilisés
 
 lighttpd (avec mbedTLS ; seuls `gen_key` et `cert_write` sont gardés parmi

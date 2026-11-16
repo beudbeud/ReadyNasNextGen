@@ -1,6 +1,7 @@
 #!/bin/sh
 # DIET : bouton d'alimentation (assistant /sbin/hotplug), veille des disques,
-# voyants, mise à l'heure (ntpd) et surveillance (diet-hwmon). La régulation du
+# voyants, mise à l'heure (ntpd), surveillance (diet-hwmon) et collecteur de
+# l'interface (l'API en tâche de fond, réponses prêtes dans /var/run/diet). La régulation du
 # ventilateur est S45ventilateur, les partages S60nfs et S70ksmbd, l'interface
 # web S50lighttpd.
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
@@ -15,6 +16,13 @@ hwmon_start() {
 }
 hwmon_stop() {
 	start-stop-daemon -K -q -p $PID && rm -f $PID
+}
+# collecteur : /www/cgi-bin/api avec DIET_COLLECTE=1 (pid dans /var/run/diet/pid)
+collecte_start() {
+	DIET_COLLECTE=1 start-stop-daemon -S -b -x /www/cgi-bin/api
+}
+collecte_stop() {
+	start-stop-daemon -K -q -p /var/run/diet/pid
 }
 
 start() {
@@ -36,10 +44,12 @@ start() {
 	# heure : premier réglage puis ntpd en tâche de fond
 	start-stop-daemon -S -b -x /usr/sbin/ntpd -- -p pool.ntp.org
 	hwmon_start
+	collecte_start
 	log "$(tx "prêt" "bereit" "ready")"
 }
 
 stop() {
+	collecte_stop
 	hwmon_stop
 	killall ntpd 2>/dev/null
 	echo 2 > /proc/sys/dev/led/power 2>/dev/null	# clignote pendant l'arrêt
@@ -52,6 +62,7 @@ case "$1" in
 	stop) stop ;;
 	restart) stop; start ;;
 	restart-hwmon) hwmon_stop; hwmon_start ;;
-	*) echo "Usage : $0 {start|stop|restart|restart-hwmon}"; exit 1 ;;
+	restart-collecte) collecte_stop; sleep 1; collecte_start ;;
+	*) echo "Usage : $0 {start|stop|restart|restart-hwmon|restart-collecte}"; exit 1 ;;
 esac
 exit 0
