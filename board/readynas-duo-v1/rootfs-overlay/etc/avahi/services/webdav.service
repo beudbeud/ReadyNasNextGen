@@ -1,0 +1,11 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!-- WebDAV sur /webdav (HTTPS) -->
+<service-group>
+  <name replace-wildcards="yes">%h</name>
+  <service>
+    <type>_webdavs._tcp</type>
+    <port>443</port>
+    <txt-record>path=/webdav/</txt-record>
+  </service>
+</service-group>

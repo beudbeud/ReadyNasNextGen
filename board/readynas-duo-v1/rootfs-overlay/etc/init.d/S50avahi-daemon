@@ -1,0 +1,14 @@
+#!/bin/sh
+# avahi-daemon (mDNS/DNS-SD : <nom>.local et /etc/avahi/services). Remplace le
+# script de Buildroot pour ne pas démarrer si SVC_AVAHI=0 dans /etc/diet.conf
+# (arrêté depuis l'interface DIET).
+DAEMON=/usr/sbin/avahi-daemon
+case "$1" in
+	start)
+		grep -qs '^SVC_AVAHI=0' /etc/diet.conf && { echo "avahi-daemon: disabled (/etc/diet.conf)"; exit 0; }
+		$DAEMON -c || $DAEMON -D ;;
+	stop) $DAEMON -c && $DAEMON -k ;;
+	reload) $DAEMON -c && $DAEMON -r ;;
+	restart) "$0" stop; sleep 1; "$0" start ;;
+	*) echo "Usage: $0 {start|stop|restart|reload}" >&2; exit 1 ;;
+esac

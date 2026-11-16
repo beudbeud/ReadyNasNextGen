@@ -1,0 +1,10 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!-- Démon rsync -->
+<service-group>
+  <name replace-wildcards="yes">%h</name>
+  <service>
+    <type>_rsync._tcp</type>
+    <port>873</port>
+  </service>
+</service-group>

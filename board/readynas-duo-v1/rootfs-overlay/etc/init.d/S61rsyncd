@@ -1,0 +1,16 @@
+#!/bin/sh
+# Démon rsync (voir /etc/rsyncd.conf ; accès refusé tant que /etc/rsyncd.secrets n'existe pas).
+# Pas de démarrage si SVC_RSYNC=0 dans /etc/diet.conf (arrêté depuis l'interface DIET).
+case "$1" in
+	start)
+		grep -qs '^SVC_RSYNC=0' /etc/diet.conf && { echo "rsyncd: disabled (/etc/diet.conf)"; exit 0; }
+		printf "Starting rsyncd: "
+		start-stop-daemon -S -q -p /var/run/rsyncd.pid -x /usr/bin/rsync -- --daemon \
+			&& echo OK || echo FAIL ;;
+	stop)
+		printf "Stopping rsyncd: "
+		start-stop-daemon -K -q -p /var/run/rsyncd.pid && echo OK || echo FAIL
+		rm -f /var/run/rsyncd.pid ;;
+	restart|reload) "$0" stop; sleep 1; "$0" start ;;
+	*) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac
