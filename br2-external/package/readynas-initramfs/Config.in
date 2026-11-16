@@ -1,0 +1,8 @@
+config BR2_PACKAGE_READYNAS_INITRAMFS
+	bool "readynas-initramfs"
+	depends on BR2_LINUX_KERNEL
+	help
+	  Initramfs minimal intégré au noyau du ReadyNAS Duo v1 :
+	  busybox statique SANS flottant (le Padre n'a pas de FPU) et
+	  petits tests (fenetres, charge, flottant). Les binaires vont
+	  dans $(BINARIES_DIR)/readynas-initramfs, pas dans la cible.

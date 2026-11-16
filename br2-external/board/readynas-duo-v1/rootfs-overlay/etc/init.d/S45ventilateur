@@ -1,0 +1,18 @@
+#!/bin/sh
+# Lance la régulation du ventilateur (padre-ventilateur).
+case "$1" in
+start)
+	printf "Régulation du ventilateur : "
+	start-stop-daemon -S -b -m -p /var/run/ventilateur.pid -x /usr/sbin/padre-ventilateur && echo OK || echo ÉCHEC
+	;;
+stop)
+	start-stop-daemon -K -p /var/run/ventilateur.pid && rm -f /var/run/ventilateur.pid
+	echo 255 > /proc/sys/dev/hwmon/fan0_speed_control	# plein régime sans régulation
+	;;
+restart)
+	"$0" stop; "$0" start
+	;;
+*)
+	echo "Usage : $0 {start|stop|restart}"; exit 1
+	;;
+esac

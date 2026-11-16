@@ -1,0 +1,61 @@
+# NETGEAR ReadyNAS Duo v1 (Infrant IT3107 « Padre », SPARC v8 sans FPU,
+# sdiv faux) : noyau Linux 6.18 porté, ksmbd et NFS du noyau.
+# Chaîne interne uClibc-ng en SPARC v7 (patch patches/buildroot/0001),
+# threads NPTL, WCHAR, bibliothèques partagées.
+#   make            (Makefile racine : Buildroot, patch, defconfig, build)
+
+BR2_sparc=y
+BR2_sparc_v7=y
+BR2_DL_DIR="$(BR2_EXTERNAL_READYNAS_NG_PATH)/../dl"
+# Correctifs par paquet : linux/ (plateforme Padre), e2fsprogs/ (fuse2fs)
+BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_READYNAS_NG_PATH)/board/readynas-duo-v1/patches"
+# Cache de compilation hors de output/ (survit à « make clean ») et
+# répertoires par paquet (construction parallèle au niveau Buildroot, make -jN)
+BR2_CCACHE=y
+BR2_CCACHE_DIR="$(HOME)/.buildroot-ccache"
+BR2_PER_PACKAGE_DIRECTORIES=y
+
+BR2_TOOLCHAIN_BUILDROOT=y
+BR2_TOOLCHAIN_BUILDROOT_UCLIBC=y
+BR2_PTHREADS_NATIVE=y
+BR2_TOOLCHAIN_BUILDROOT_WCHAR=y
+BR2_KERNEL_HEADERS_AS_KERNEL=y
+BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_18=y
+BR2_SHARED_LIBS=y
+BR2_OPTIMIZE_S=y
+
+BR2_TARGET_GENERIC_HOSTNAME="readynas"
+BR2_TARGET_GENERIC_ISSUE="ReadyNAS Duo v1 - Linux 6.18 (ReadyNasNextGen)"
+BR2_INIT_BUSYBOX=y
+BR2_SYSTEM_BIN_SH_BUSYBOX=y
+BR2_TARGET_GENERIC_GETTY=y
+BR2_TARGET_GENERIC_GETTY_PORT="ttyS1"
+BR2_TARGET_GENERIC_GETTY_BAUDRATE_9600=y
+BR2_SYSTEM_DHCP="eth0"
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_READYNAS_NG_PATH)/board/readynas-duo-v1/rootfs-overlay"
+
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.18.63"
+BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="$(BR2_EXTERNAL_READYNAS_NG_PATH)/board/readynas-duo-v1/linux-padre.config"
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_READYNAS_NG_PATH)/board/readynas-duo-v1/linux-padre-nas.fragment"
+BR2_LINUX_KERNEL_VMLINUX=y
+
+# Initramfs minimal intégré au noyau (busybox statique sans flottant + tests)
+BR2_PACKAGE_READYNAS_INITRAMFS=y
+
+# Services de fichiers
+BR2_PACKAGE_KSMBD_TOOLS=y
+BR2_PACKAGE_NFS_UTILS=y
+BR2_PACKAGE_NFS_UTILS_NFSV4=y
+# Disques : RAID1 md, ext4 ; fuse2fs pour les ext3 à blocs de 16 Ko (X-RAID)
+BR2_PACKAGE_MDADM=y
+BR2_PACKAGE_E2FSPROGS=y
+BR2_PACKAGE_E2FSPROGS_FUSE2FS=y
+BR2_PACKAGE_DROPBEAR=y
+
+# Racine : rootfs.tar à extraire dans /rootfs-6.18 d'une clé USB ext3/ext4 ;
+# l'initramfs du noyau cherche ce dossier et y bascule (voir README.md).
+BR2_TARGET_ROOTFS_TAR=y
+BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_READYNAS_NG_PATH)/board/readynas-duo-v1/post-image.sh"

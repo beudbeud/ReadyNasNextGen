@@ -1,0 +1,151 @@
+#!/bin/busybox sh
+# /init de l'initramfs du noyau 6.18 (ReadyNAS Duo v1).
+# Cherche, sur les disques USB SEULEMENT (les disques SATA internes ne sont
+# jamais sondés), la partition ext2/3/4 qui contient $DOSSIER/sbin/init
+# (aujourd'hui /rootfs-6.18 sur la clé), monte ce dossier comme racine et lui
+# passe la main. Repli : shell sur la console.
+# Ligne de commande : racine=/dev/sdXN (sans recherche), dossier=/autre
+/bin/busybox --install -s /bin
+export PATH=/bin
+mount -t devtmpfs devtmpfs /dev
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+
+DOSSIER=/rootfs-6.18
+RACINE=
+for a in $(cat /proc/cmdline); do
+	case "$a" in
+	racine=*) RACINE="${a#racine=}" ;;
+	dossier=*) DOSSIER="${a#dossier=}" ;;
+	esac
+done
+
+t() { cut -d' ' -f1 /proc/uptime; }
+
+# partitions des disques dont le chemin sysfs passe par l'USB
+candidats() {
+	if [ -n "$RACINE" ]; then
+		echo "$RACINE"
+		return
+	fi
+	for b in /sys/block/sd*; do
+		[ -e "$b" ] || continue
+		case "$(readlink -f "$b")" in
+		*/usb*) ;;
+		*) continue ;;
+		esac
+		d=${b##*/}
+		for p in /sys/block/$d/$d[0-9]*; do
+			[ -e "$p" ] && echo "/dev/${p##*/}"
+		done
+	done
+}
+
+trouver() {
+	for p in $(candidats); do
+		[ -b "$p" ] || continue
+		echo "init [$(t)] sonde $p" > /dev/console
+		# lecture seule sans rejouer le journal : rien n'est écrit en sondant
+		mount -t ext4 -o ro,noload "$p" /mnt 2>/dev/null || continue
+		if [ -x "/mnt$DOSSIER/sbin/init" ]; then
+			umount /mnt
+			echo "$p"
+			return 0
+		fi
+		umount /mnt
+	done
+	return 1
+}
+
+# centièmes de seconde depuis le boot (sans fork : read est interne au shell)
+cs() { read u _ < /proc/uptime; echo $(( ${u%.*} * 100 + 1${u#*.} - 100 )); }
+
+# attente active de $1 secondes, bornée en tours si /proc/uptime n'avance plus
+attente_active() {
+	fin=$(( $(cs) + ${1:-1} * 100 )); i=0
+	while [ "$(cs)" -lt "$fin" ] && [ $i -lt 200000 ]; do i=$((i + 1)); done
+}
+
+etat() {
+	echo "init [$(t)] $1 : $(grep timer /proc/interrupts | tr -s ' ')"
+	grep -E '^ *(TIMER|HRTIMER|RCU):' /proc/softirqs 2>/dev/null | tr -s ' ' | sed 's/^/    softirq /'
+	sed 's/^/    padre_tic /' /proc/padre_tic 2>/dev/null
+}
+
+# Émulation FPU, test gradué (essai charge : seul le sleep FLOTTANT de busybox
+# arrêtait tout). La dernière ligne « flottant tN ... » sans OK désigne
+# l'instruction fatale. La busybox de cet initramfs est désormais construite
+# sans FLOAT_DURATION (sleep en entiers) : le reste de /init n'utilise plus le
+# flottant.
+echo "init [$(t)] flottant"
+/bin/flottant
+
+# Fenêtres de registres + sommeil (9e essai) : chacun doit afficher « fenetres OK n »
+for f in 1 2 3; do
+	echo "init [$(t)] fenetres $f"
+	/bin/fenetres $f
+done
+
+# Reproducteur (essai A) : c = fork sans dormeur (témoin), b = dormeur + fautes
+# de page, a = dormeur + fork, e = dormeur + fork/exec. Chacun : « charge x OK ».
+for c in c b a e; do
+	echo "init [$(t)] charge $c"
+	/bin/charge $c
+done
+
+# Le sommeil marche-t-il ? sleep 1 en arrière-plan, puis 2 s d'attente active.
+etat "AVANT sleep 1"
+echo "init [$(t)] usleep 100000 (nanosleep 0,1 s) ..."
+usleep 100000
+echo "init [$(t)] usleep OK"
+sleep 1 &
+spid=$!
+attente_active 2
+etat "APRES 2 s d'attente active"
+st=Z
+read _ _ st _ 2>/dev/null < /proc/$spid/stat	# Z (zombie) ou absent = terminé
+if [ "$st" != Z ]; then
+	echo "init [$(t)] sleep 1 ne revient pas : sommeil cassé, attente active à la place"
+	kill $spid 2>/dev/null
+	DORMIR=attente_active
+else
+	echo "init [$(t)] sleep 1 est revenu : le sommeil marche"
+	DORMIR=sleep
+fi
+
+# EHCI : espace de configuration PCI (COMMAND en 0x04 : 0x0006 attendu =
+# mémoire + maître du bus) ; les registres USBCMD/USBSTS/ASYNC/PORTSC
+# sortent dans les traces [ehci] du noyau à chaque expiration d'URB.
+pci_ehci() {
+	echo "init [$(t)] config PCI 0000:00:17.2 ($1) :"
+	hexdump -C -n 64 /sys/bus/pci/devices/0000:00:17.2/config 2>&1 | sed 's/^/    /'
+}
+pci_ehci "avant la recherche"
+
+echo "init [$(t)] : recherche de $DOSSIER/sbin/init sur les disques USB (30 essais)"
+n=0
+P=
+while [ $n -lt 30 ]; do
+	n=$((n + 1))
+	echo "init [$(t)] essai $n : disques $(ls /sys/block 2>/dev/null | tr '\n' ' ')"
+	grep -E 'ehci|timer|padre' /proc/interrupts 2>/dev/null | tr -s ' ' | sed 's/^/    irq /'
+	if P=$(trouver); then
+		break
+	fi
+	P=
+	$DORMIR 1
+done
+
+if [ -n "$P" ] && mount -t ext4 -o rw,noatime "$P" /mnt; then
+	echo "init [$(t)] : racine $P:$DOSSIER"
+	mount --bind "/mnt$DOSSIER" /newroot
+	mount --move /dev /newroot/dev
+	umount /proc /sys
+	exec switch_root /newroot /sbin/init
+fi
+
+echo "init [$(t)] : racine introuvable ou montage impossible, shell de secours"
+echo "       (disques : $(ls /sys/block 2>/dev/null | tr '\n' ' '))"
+pci_ehci "après échec"
+dmesg | grep -E 'ehci|usb|padre: DMA' | tail -20 | sed 's/^/    /'
+exec /bin/sh </dev/console >/dev/console 2>&1

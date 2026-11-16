@@ -1,0 +1,142 @@
+diff --git a/arch/Config.in.sparc b/arch/Config.in.sparc
+index f5f4bd67..c57324a0 100644
+--- a/arch/Config.in.sparc
++++ b/arch/Config.in.sparc
+@@ -6,6 +6,14 @@ choice
+ 	help
+ 	  Specific CPU variant to use
+ 
++config BR2_sparc_v7
++	bool "v7"
++	depends on BR2_sparc
++	help
++	  SPARC V7: no hardware multiply/divide instructions (smul,
++	  umul, sdiv, udiv). Use this for CPUs whose divide unit is
++	  missing or broken, e.g. the Infrant IT3107 "Padre" of the
++	  NETGEAR ReadyNAS NV+/Duo v1, where sdiv gives wrong results.
+ config BR2_sparc_v8
+ 	bool "v8"
+ 	depends on BR2_sparc
+@@ -30,6 +38,7 @@ config BR2_ENDIAN
+ 
+ config BR2_GCC_TARGET_CPU
+ 	default "leon3"		if BR2_sparc_leon3
++	default "v7"		if BR2_sparc_v7
+ 	default "v8"		if BR2_sparc_v8
+ 	default "ultrasparc"	if BR2_sparc_v9
+ 
+diff --git a/package/gcc/gcc.mk b/package/gcc/gcc.mk
+index c183bf88..c4e4d936 100644
+--- a/package/gcc/gcc.mk
++++ b/package/gcc/gcc.mk
+@@ -121,7 +121,7 @@ HOST_GCC_COMMON_CONF_ENV += LDFLAGS_FOR_TARGET="$(GCC_COMMON_TARGET_LDFLAGS)"
+ HOST_GCC_COMMON_CONF_ENV += AR_FOR_TARGET=gcc-ar NM_FOR_TARGET=gcc-nm RANLIB_FOR_TARGET=gcc-ranlib
+ 
+ # libitm needs sparc V9+
+-ifeq ($(BR2_sparc_v8)$(BR2_sparc_leon3),y)
++ifeq ($(BR2_sparc_v7)$(BR2_sparc_v8)$(BR2_sparc_leon3),y)
+ HOST_GCC_COMMON_CONF_OPTS += --disable-libitm
+ endif
+ 
+diff --git a/package/haveged/haveged.mk b/package/haveged/haveged.mk
+index bf3209cf..72542fb2 100644
+--- a/package/haveged/haveged.mk
++++ b/package/haveged/haveged.mk
+@@ -21,7 +21,7 @@ HAVEGED_CONF_OPTS = \
+ 	--enable-threads \
+ 	--enable-tune
+ 
+-ifeq ($(BR2_sparc_v8)$(BR2_sparc_leon3),y)
++ifeq ($(BR2_sparc_v7)$(BR2_sparc_v8)$(BR2_sparc_leon3),y)
+ HAVEGED_CONF_OPTS += --enable-clock_gettime
+ endif
+ 
+diff --git a/package/libatomic_ops/libatomic_ops.mk b/package/libatomic_ops/libatomic_ops.mk
+index c68a4b78..c4cebb90 100644
+--- a/package/libatomic_ops/libatomic_ops.mk
++++ b/package/libatomic_ops/libatomic_ops.mk
+@@ -19,7 +19,7 @@ LIBATOMIC_OPS_CPE_ID_VALID = YES
+ 
+ LIBATOMIC_OPS_INSTALL_STAGING = YES
+ 
+-ifeq ($(BR2_sparc_v8)$(BR2_sparc_leon3),y)
++ifeq ($(BR2_sparc_v7)$(BR2_sparc_v8)$(BR2_sparc_leon3),y)
+ LIBATOMIC_OPS_CONF_ENV = CFLAGS="$(TARGET_CFLAGS) -DAO_NO_SPARC_V9"
+ endif
+ 
+diff --git a/package/libdrm/libdrm.mk b/package/libdrm/libdrm.mk
+index 6a23746d..485b2015 100644
+--- a/package/libdrm/libdrm.mk
++++ b/package/libdrm/libdrm.mk
+@@ -23,7 +23,7 @@ LIBDRM_LDFLAGS = $(TARGET_LDFLAGS)
+ 
+ ifeq ($(BR2_PACKAGE_LIBATOMIC_OPS),y)
+ LIBDRM_DEPENDENCIES += libatomic_ops
+-ifeq ($(BR2_sparc_v8)$(BR2_sparc_leon3),y)
++ifeq ($(BR2_sparc_v7)$(BR2_sparc_v8)$(BR2_sparc_leon3),y)
+ LIBDRM_CFLAGS = $(TARGET_CFLAGS) -DAO_NO_SPARC_V9
+ endif
+ endif
+diff --git a/package/nginx/Config.in b/package/nginx/Config.in
+index 1c74f6e1..14ef6921 100644
+--- a/package/nginx/Config.in
++++ b/package/nginx/Config.in
+@@ -1,7 +1,7 @@
+ menuconfig BR2_PACKAGE_NGINX
+ 	bool "nginx"
+ 	depends on BR2_USE_MMU # fork()
+-	select BR2_PACKAGE_LIBATOMIC_OPS if BR2_sparc_v8 || BR2_sparc_leon3
++	select BR2_PACKAGE_LIBATOMIC_OPS if BR2_sparc_v7 || BR2_sparc_v8 || BR2_sparc_leon3
+ 	select BR2_PACKAGE_LIBXCRYPT if BR2_TOOLCHAIN_USES_GLIBC
+ 	help
+ 	  nginx is an HTTP and reverse proxy server, as well as a mail
+diff --git a/package/nginx/nginx.mk b/package/nginx/nginx.mk
+index ad61ef61..31212a74 100644
+--- a/package/nginx/nginx.mk
++++ b/package/nginx/nginx.mk
+@@ -73,7 +73,7 @@ ifeq ($(BR2_PACKAGE_LIBATOMIC_OPS),y)
+ NGINX_DEPENDENCIES += libatomic_ops
+ NGINX_CONF_OPTS += --with-libatomic
+ NGINX_CONF_ENV += ngx_force_have_libatomic=yes
+-ifeq ($(BR2_sparc_v8)$(BR2_sparc_leon3),y)
++ifeq ($(BR2_sparc_v7)$(BR2_sparc_v8)$(BR2_sparc_leon3),y)
+ NGINX_CFLAGS += "-DAO_NO_SPARC_V9"
+ endif
+ else
+diff --git a/package/pulseaudio/pulseaudio.mk b/package/pulseaudio/pulseaudio.mk
+index 254e0534..6fe7b272 100644
+--- a/package/pulseaudio/pulseaudio.mk
++++ b/package/pulseaudio/pulseaudio.mk
+@@ -69,7 +69,7 @@ endif
+ 
+ ifeq ($(BR2_PACKAGE_LIBATOMIC_OPS),y)
+ PULSEAUDIO_DEPENDENCIES += libatomic_ops
+-ifeq ($(BR2_sparc_v8)$(BR2_sparc_leon3),y)
++ifeq ($(BR2_sparc_v7)$(BR2_sparc_v8)$(BR2_sparc_leon3),y)
+ PULSEAUDIO_CFLAGS = $(TARGET_CFLAGS) -DAO_NO_SPARC_V9
+ endif
+ endif
+diff --git a/package/uclibc/Config.in b/package/uclibc/Config.in
+index 6b8b0d86..4d542a8c 100644
+--- a/package/uclibc/Config.in
++++ b/package/uclibc/Config.in
+@@ -160,6 +160,7 @@ config BR2_UCLIBC_SH_TYPE
+ 
+ config BR2_UCLIBC_SPARC_TYPE
+ 	string
++	default "V7"	if BR2_sparc_v7
+ 	default "V8"	if BR2_sparc_v8
+ 	depends on BR2_UCLIBC_TARGET_ARCH = "sparc"
+ 
+diff --git a/toolchain/Config.in b/toolchain/Config.in
+index 128f8fae..dcdb343c 100644
+--- a/toolchain/Config.in
++++ b/toolchain/Config.in
+@@ -91,6 +91,7 @@ config BR2_TOOLCHAIN_SUPPORTS_ALWAYS_LOCKFREE_ATOMIC_INTS
+ 	default y
+ 	depends on !BR2_ARM_CPU_ARMV4
+ 	depends on !BR2_ARM_CPU_ARMV5
++	depends on !BR2_sparc_v7
+ 	depends on !BR2_sparc_v8
+ 	depends on !BR2_m68k_cf5208
+ 	depends on !(BR2_arc && !BR2_ARC_ATOMIC_EXT)
