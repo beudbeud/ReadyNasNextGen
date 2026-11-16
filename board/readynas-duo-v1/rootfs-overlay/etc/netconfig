@@ -1,0 +1,20 @@
+# ReadyNasNextGen : noyau sans IPv6, donc sans udp6/tcp6 (sinon rpc.mountd
+# et rpcbind affichent « svc_tli_create: could not open connection for udp6 »).
+# Remettre les deux lignes inet6 si IPv6 est activé dans le noyau.
+#
+# The network configuration file. This file is currently only used in
+# conjunction with the TI-RPC code in the libtirpc library.
+#
+# Entries consist of:
+#
+#       <network_id> <semantics> <flags> <protofamily> <protoname> \
+#               <device> <nametoaddr_libs>
+#
+# The <device> and <nametoaddr_libs> fields are always empty in this
+# implementation.
+#
+udp        tpi_clts      v     inet     udp     -       -
+tcp        tpi_cots_ord  v     inet     tcp     -       -
+rawip      tpi_raw       -     inet      -      -       -
+local      tpi_cots_ord  -     loopback  -      -       -
+unix       tpi_cots_ord  -     loopback  -      -       -
