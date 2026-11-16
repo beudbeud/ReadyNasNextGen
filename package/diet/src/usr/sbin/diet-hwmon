@@ -1,0 +1,43 @@
+#!/bin/sh
+# Surveillance DIET (une mesure par minute) : historique température/ventilateur
+# pour l'interface web, résumé SMART (si smartctl existe), alertes Telegram au
+# changement d'état. La régulation du ventilateur et l'arrêt d'urgence restent à
+# padre-ventilateur (/etc/ventilateur.conf), dont on lit /var/run/ventilateur.etat.
+# DIET_RACINE et DIET_UNE_FOIS=1 ne servent qu'aux essais sur PC.
+R=${DIET_RACINE:-}
+[ -r $R/etc/diet-lang.sh ] && . $R/etc/diet-lang.sh || tx() { printf "%s" "$3"; }
+RUN=$R/var/run
+LOG=$R/var/log/diet.log
+log() { echo "[$(date '+%F %T')] hwmon: $*" >> $LOG; }
+N=0
+while true; do
+	temp=0; fan=; pwm=
+	for kv in $(cat $RUN/ventilateur.etat 2>/dev/null); do
+		v=${kv#*=}; case "$v" in ''|*[!0-9]*) continue;; esac
+		case "${kv%%=*}" in temp) temp=$v;; fan) fan=$v;; pwm) pwm=$v;; esac
+	done
+	# SMART toutes les 5 minutes, sans réveiller un disque en veille
+	if [ $((N % 5)) -eq 0 ] && [ -x $R/usr/sbin/smartctl ]; then
+		for b in $R/sys/block/sd*; do
+			d=${b##*/}; [ -d "$b" ] || continue
+			out=$($R/usr/sbin/smartctl -n standby -H -A /dev/$d 2>/dev/null)
+			echo "$out" | grep -q STANDBY && continue
+			sh=$(echo "$out" | sed -n 's/.*self-assessment test result: //p' | tr -cd 'A-Za-z')
+			echo "$out" | awk -v h="$sh" '$1==5{r=$10} $1==9{p=$10} $1==197{c=$10} $1==198{u=$10}
+				END{printf "health=%s realloc=%d pending=%d uncorr=%d hours=%d\n", h, r, c, u, p}' > $RUN/smart.$d
+		done
+	fi
+	# historique : heure, température (- = inconnue), tr/min, consigne ; environ 12 h
+	echo "$(date +%s) $([ "$temp" -gt 0 ] && echo $temp || echo -) ${fan:-0} ${pwm:-0}" >> $RUN/hwmon.hist
+	[ $((N % 60)) -eq 59 ] && tail -n 720 $RUN/hwmon.hist > $RUN/hwmon.hist.tmp && mv $RUN/hwmon.hist.tmp $RUN/hwmon.hist
+	# alertes : notification seulement quand la ligne change
+	AL=$(diet-alerts 2>/dev/null)
+	[ -n "$fan" ] && [ "${pwm:-0}" -gt 0 ] && [ "$fan" -lt 300 ] && AL="${AL:+$AL ; }$(tx "ventilateur à ${fan} tr/min" "Lüfter bei ${fan} U/min" "fan at ${fan} rpm")"
+	if [ "$AL" != "$(cat $RUN/alert.last 2>/dev/null)" ]; then
+		echo "$AL" > $RUN/alert.last
+		if [ -n "$AL" ]; then M="$(tx "ALERTE : $AL" "ALARM: $AL" "ALERT: $AL")"; else M="$(tx "Retour à la normale" "Wieder normal" "Back to normal")"; fi
+		log "$M"; diet-notify "$M" >/dev/null 2>&1 &
+	fi
+	[ -n "$DIET_UNE_FOIS" ] && break
+	N=$((N + 1)); sleep 60
+done

@@ -1,0 +1,58 @@
+#!/bin/sh
+# lighttpd : interface web DIET en HTTPS (443 ; 80 redirige). Remplace le
+# S50lighttpd de Buildroot pour créer le certificat au premier démarrage :
+# aucune clé privée dans l'image. ECDSA P-256 auto-signé, 10 ans,
+# subjectAltName = adresse d'eth0 + nom d'hôte (outils gen_key/cert_write de mbedTLS).
+NAME=lighttpd
+DAEMON=/usr/sbin/$NAME
+PID_FILE=/var/run/$NAME.pid
+CONF_FILE=/etc/$NAME/$NAME.conf
+SSL_DIR=/etc/$NAME/ssl
+KEY=$SSL_DIR/server.key
+CRT=$SSL_DIR/server.pem
+
+make_cert() {
+	host=$(hostname)
+	ip=$(ifconfig eth0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
+	san="DNS:$host"
+	[ -n "$ip" ] && san="IP:$ip;$san"
+	# horloge encore en 1970 : le certificat expirerait en 1980
+	now=$(date -u +%Y%m%d%H%M%S)
+	[ "${now%??????????}" -lt 2026 ] && now=20260101000000
+	end=$((${now%??????????} + 10))${now#????}
+	mkdir -p -m 0700 "$SSL_DIR" || return 1
+	umask 077
+	gen_key type=ec ec_curve=secp256r1 format=pem filename="$KEY.new" >/dev/null &&
+	cert_write selfsign=1 issuer_key="$KEY.new" \
+		issuer_name="CN=$host" subject_name="CN=$host" \
+		not_before="$now" not_after="$end" serial="$(date +%s)" \
+		is_ca=0 max_pathlen=0 md=SHA256 version=3 \
+		key_usage=digital_signature ext_key_usage=serverAuth \
+		san="$san" output_file="$CRT.new" >/dev/null &&
+	mv "$CRT.new" "$CRT" && mv "$KEY.new" "$KEY" && return 0
+	rm -f "$KEY.new" "$CRT.new"
+	return 1
+}
+
+start() {
+	if [ ! -s "$KEY" ] || [ ! -s "$CRT" ]; then
+		printf "Certificat HTTPS : "
+		make_cert && echo OK || { echo ÉCHEC; return 1; }
+	fi
+	[ -s /etc/lighttpd/htpasswd ] || echo "Interface web : aucun mot de passe, lancer diet-webpass"
+	printf "Démarrage de lighttpd : "
+	start-stop-daemon -S -q -p $PID_FILE -x $DAEMON -- -f $CONF_FILE && echo OK || echo ÉCHEC
+}
+stop() {
+	printf "Arrêt de lighttpd : "
+	start-stop-daemon -K -q -p $PID_FILE
+	echo OK
+}
+
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart|reload) stop; sleep 1; start ;;
+	newcert) rm -f "$KEY" "$CRT"; make_cert ;;	# nouveau nom ou adresse, puis restart
+	*) echo "Usage : $0 {start|stop|restart|newcert}"; exit 1 ;;
+esac

@@ -1,0 +1,23 @@
+config BR2_PACKAGE_DIET
+	bool "diet (tableau de bord web du ReadyNAS Duo v1)"
+	depends on BR2_USE_MMU # lighttpd
+	depends on !BR2_STATIC_LIBS # lighttpd
+	depends on BR2_PACKAGE_KSMBD_TOOLS
+	depends on BR2_PACKAGE_NFS_UTILS
+	select BR2_PACKAGE_LIGHTTPD
+	select BR2_PACKAGE_LIGHTTPD_MBEDTLS
+	select BR2_PACKAGE_MBEDTLS_PROGRAMS # gen_key, cert_write
+	select BR2_PACKAGE_MDADM
+	help
+	  Tableau de bord DIET porté sur Linux 6.18 : page /www et API
+	  CGI (shell et awk de busybox) servies par lighttpd en HTTPS
+	  (certificat auto-signé créé au premier démarrage), partages
+	  ksmbd, exports NFS, utilisateurs, disques (libata,
+	  drivetemp), RAID md (/proc/mdstat, mdadm), affichage et
+	  réglage de padre-ventilateur, notifications Telegram,
+	  réseau, langue, heure (ntpd), extinction.
+	  Active dans busybox : ntpd, wget HTTPS.
+	  Voir docs/DIET.md.
+
+comment "diet needs ksmbd-tools, nfs-utils and shared libraries"
+	depends on !BR2_PACKAGE_KSMBD_TOOLS || !BR2_PACKAGE_NFS_UTILS || BR2_STATIC_LIBS

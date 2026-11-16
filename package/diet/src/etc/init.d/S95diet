@@ -1,0 +1,57 @@
+#!/bin/sh
+# DIET : bouton d'alimentation (assistant /sbin/hotplug), veille des disques,
+# voyants, mise à l'heure (ntpd) et surveillance (diet-hwmon). La régulation du
+# ventilateur est S45ventilateur, les partages S60nfs et S70ksmbd, l'interface
+# web S50lighttpd.
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+[ -r /etc/diet-lang.sh ] && . /etc/diet-lang.sh || tx() { printf "%s" "$3"; }
+LOG=/var/log/diet.log
+PID=/var/run/diet-hwmon.pid
+log() { echo "[$(date '+%F %T')] $*" >> $LOG; }
+SPINDOWN_MIN=0; [ -r /etc/diet.conf ] && . /etc/diet.conf
+
+hwmon_start() {
+	start-stop-daemon -S -b -m -p $PID -x /usr/sbin/diet-hwmon
+}
+hwmon_stop() {
+	start-stop-daemon -K -q -p $PID && rm -f $PID
+}
+
+start() {
+	log "$(tx "==== DIET $(cat /etc/diet-version) démarre ====" "==== DIET $(cat /etc/diet-version) startet ====" "==== DIET $(cat /etc/diet-version) starting ====")"
+	# bouton : padre_hwmon appelle /sbin/hotplug (CONFIG_UEVENT_HELPER_PATH)
+	echo /sbin/hotplug > /proc/sys/kernel/hotplug 2>/dev/null
+	[ -e /proc/sys/dev/hwmon/POWER_SWITCH ] && echo 1 > /proc/sys/dev/hwmon/POWER_SWITCH
+	if [ "$SPINDOWN_MIN" -gt 0 ]; then
+		if [ $SPINDOWN_MIN -le 20 ]; then S=$((SPINDOWN_MIN * 12)); else S=$((240 + SPINDOWN_MIN / 30)); fi
+		for b in /sys/block/sd*; do [ -d "$b" ] && hdparm -S $S /dev/${b##*/} >/dev/null 2>&1; done
+		log "$(tx "Veille des disques après $SPINDOWN_MIN min" "Platten-Standby nach $SPINDOWN_MIN min" "Disk spin-down after $SPINDOWN_MIN min")"
+	fi
+	# voyants : disque présent = voyant de la baie allumé ; alimentation fixe
+	for b in /sys/block/sd*; do
+		n=$(readlink -f $b/device 2>/dev/null | sed -n 's#.*/ata\([0-9]*\)/.*#\1#p')
+		[ -n "$n" ] && echo 1 > /proc/sys/dev/led/disk_${n}_fault 2>/dev/null
+	done
+	echo 1 > /proc/sys/dev/led/power 2>/dev/null
+	# heure : premier réglage puis ntpd en tâche de fond
+	start-stop-daemon -S -b -x /usr/sbin/ntpd -- -p pool.ntp.org
+	hwmon_start
+	log "$(tx "prêt" "bereit" "ready")"
+}
+
+stop() {
+	hwmon_stop
+	killall ntpd 2>/dev/null
+	echo 2 > /proc/sys/dev/led/power 2>/dev/null	# clignote pendant l'arrêt
+	[ -f /var/run/poweroff ] && M=poweroff || M=reboot
+	log "$(tx "Arrêt du système ($M)" "Herunterfahren ($M)" "Shutting down ($M)")"
+}
+
+case "$1" in
+	start) printf "DIET : "; start; echo OK ;;
+	stop) stop ;;
+	restart) stop; start ;;
+	restart-hwmon) hwmon_stop; hwmon_start ;;
+	*) echo "Usage : $0 {start|stop|restart|restart-hwmon}"; exit 1 ;;
+esac
+exit 0

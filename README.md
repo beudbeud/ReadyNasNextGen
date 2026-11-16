@@ -20,6 +20,7 @@ GPL du noyau 2.6.17 publiées par NETGEAR (voir [FAISABILITE.md](FAISABILITE.md)
 | Ethernet, voyants, bouton, ventilateur/température (`drivers/platform/padre`) | portés, à valider |
 | **USB EHCI** | **en cours** : le contrôleur tourne mais chaque accès maître PCI vers la DDR finit en *Master Abort* (HSE) ; la racine sur clé USB n'est donc pas encore atteinte et `/init` finit sur un shell de secours |
 | ksmbd, NFS v3/v4, mdadm, fuse2fs (ext3 X-RAID à blocs de 16 Ko) | construits, non testés |
+| Tableau de bord web [DIET](#tableau-de-bord-web-diet) (lighttpd HTTPS) | porté, testé en simulation |
 
 ## Construire
 
@@ -115,6 +116,23 @@ de récupération.
 | `padre.ehci=le-haut/be-haut/le-bas/be-bas` | ordre des octets des descripteurs EHCI, place du DMA cohérent |
 | `padre.pcibus=<hex>`, `padre.pcifeat=<hex>`, `padre.pciswap=<hex>`, `padre.ahbarb=<n>` | réglages du pont PCI (mise au point de l'USB) |
 
+## Tableau de bord web (DIET)
+
+Le système embarque une adaptation du tableau de bord web de
+[DIET](https://github.com/mfe-/ReadyNASDuoSparc), le système léger pour les ReadyNAS SPARC qui
+remplace le firmware RAIDiator (écrit par davemmi ; support du Duo v1 :
+[mfe-/ReadyNASDuoSparc#16](https://github.com/mfe-/ReadyNASDuoSparc/pull/16)). Ici il est porté sur Linux 6.18 : ksmbd au lieu de Samba 3.6,
+md/RAID1 au lieu de X-RAID, export NFS, régulation du ventilateur par `padre-ventilateur`.
+Interface en HTTPS (lighttpd, certificat auto-signé créé au premier démarrage), en français,
+allemand et anglais. Détails et différences avec DIET : [docs/DIET.md](docs/DIET.md).
+
+Essai sur le PC, sans le NAS, avec des données simulées :
+
+```sh
+sh package/diet/tests/essai-api.sh             # tests de l'API
+sh package/diet/tests/essai-api.sh --servir    # interface sur http://127.0.0.1:8080/
+```
+
 ## Arborescence
 
 ```
@@ -126,6 +144,8 @@ configs/readynas_ng_defconfig            système complet, chaîne construite
 configs/readynas_ng_rapide_defconfig     même système, chaîne précompilée (make rapide)
 configs/readynas_ng_toolchain_defconfig  chaîne seule (make toolchain-sdk)
 package/readynas-initramfs/      busybox statique sans flottant + tests, pour l'initramfs
+package/diet/                    tableau de bord web DIET porté sur 6.18 (+ tests/essai-api.sh)
+docs/DIET.md                     ce qui change par rapport à DIET
 board/readynas-duo-v1/
   linux-padre.config, linux-padre-nas.fragment
   patches/linux/                 plateforme Padre pour Linux 6.18.63 (arch/sparc, pilotes)
@@ -144,6 +164,9 @@ tools/                           iboot-cmd.py (console série), tftp-serveur.sh
   coprocesseur LP (`arch/sparc/kernel/padre_lpram.c`) proviennent de ces mêmes sources GPL
   (`lpram.c`).
 * `readynas_crypto` : GPL-2.0+ (Henrik Nordström) ; `des.c` : LGPL-2.1 (Christophe Devine).
+* `package/diet/src/` : dérivé de [DIET](https://github.com/mfe-/ReadyNASDuoSparc) (davemmi),
+  dont le dépôt d'origine ne déclare aucune licence à ce jour ; ce code n'est donc **pas** sous
+  la GPL-2.0 de ce dépôt (voir [docs/DIET.md](docs/DIET.md#origine-et-licence)).
 * Buildroot, Linux et les paquets construits gardent leurs propres licences.
 
 Aucun binaire ni code propriétaire Infrant/NETGEAR n'est inclus.

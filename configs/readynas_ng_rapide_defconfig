@@ -66,6 +66,13 @@ BR2_PACKAGE_MDADM=y
 BR2_PACKAGE_E2FSPROGS=y
 BR2_PACKAGE_E2FSPROGS_FUSE2FS=y
 BR2_PACKAGE_DROPBEAR=y
+# Tableau de bord web DIET (package/diet, docs/DIET.md) : lighttpd en HTTPS
+# avec mbedTLS (gen_key/cert_write pour le certificat du premier démarrage)
+BR2_PACKAGE_DIET=y
+BR2_PACKAGE_LIGHTTPD=y
+BR2_PACKAGE_LIGHTTPD_MBEDTLS=y
+BR2_PACKAGE_MBEDTLS=y
+BR2_PACKAGE_MBEDTLS_PROGRAMS=y
 
 # Racine : rootfs.tar à extraire dans /rootfs-6.18 d'une clé USB ext3/ext4 ;
 # l'initramfs du noyau cherche ce dossier et y bascule (voir README.md).

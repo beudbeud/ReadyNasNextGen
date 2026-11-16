@@ -1,0 +1,507 @@
+#!/bin/sh
+# API web de DIET (CGI lancé par lighttpd), ReadyNAS Duo v1 sous Linux 6.18.
+#   GET  ?a=status | config | shares | users | nfs | sys | hist
+#        ?a=log&f=diet|messages|dmesg   ?a=smart&d=sda   ?a=md&d=md0
+#   POST ?a=spindown|ksmbd|nfsd|ntp|reboot|poweroff|config|share_add|share_del|share_set
+#        |user_set|user_del|nfs_add|nfs_del|sys_set|notify_test   (en-tête X-Diet: 1 obligatoire)
+# Langue des messages : &l=fr|de|en.
+# Essai sur PC : DIET_RACINE=/chemin/racine-factice préfixe tous les fichiers lus
+# ou écrits (/proc, /sys, /etc, /var) et place $DIET_RACINE/bin en tête du PATH
+# (commandes simulées) ; voir package/diet/tests/.
+R=${DIET_RACINE:-}
+export PATH=${R:+$R/bin:}/bin:/sbin:/usr/bin:/usr/sbin
+
+CONF=$R/etc/diet.conf
+VCONF=$R/etc/ventilateur.conf
+KCONF=$R/etc/ksmbd/ksmbd.conf
+PWDDB=$R/etc/ksmbd/ksmbdpwd.db
+EXPORTS=$R/etc/exports
+PASSWD=$R/etc/passwd
+ETC=$R/etc
+RUN=$R/var/run
+LOG=$R/var/log/diet.log
+INITD=$R/etc/init.d
+DATA=/c
+VKEYS="FAN_PWM_MIN FAN_PWM_MAX TEMP_LOW TEMP_HIGH DISK_HIGH DISK_CRIT PERIODE"
+KEYS="SPINDOWN_MIN $VKEYS"
+
+hdr() { printf 'Content-Type: %s\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n' "$1"; }
+fail() { printf 'Status: %s\r\n' "$1"; hdr 'text/plain; charset=utf-8'; echo "$2"; exit 0; }
+ok() { hdr application/json; echo "{\"ok\":true,\"msg\":\"$(printf '%s' "$1" | esc)\"}"; }
+qp() { echo "&$QUERY_STRING&" | sed -n "s/.*&$1=\([A-Za-z0-9_]*\)&.*/\1/p"; }
+case "$(qp l)" in fr) L=fr;; de) L=de;; *) L=en;; esac
+tx() { case $L in fr) printf '%s' "$1";; de) printf '%s' "$2";; *) printf '%s' "$3";; esac; }
+esc() { sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\000-\037'; }
+bg() { setsid sh -c "$1" </dev/null >/dev/null 2>&1 & }
+note() { echo "[$(date '+%F %T')] $1 (${REMOTE_ADDR:-?})" >> "$LOG" 2>/dev/null; }
+# décodage application/x-www-form-urlencoded (octets, sans dépendre de httpd -d)
+urldec() {
+  printf '%s' "$1" | LC_ALL=C awk 'BEGIN { h = "0123456789abcdef"; RS = "\001" } {
+    s = $0; gsub(/\+/, " ", s); o = ""
+    while ((i = index(s, "%")) > 0) {
+      o = o substr(s, 1, i - 1); x = tolower(substr(s, i + 1, 2))
+      if (x ~ /^[0-9a-f][0-9a-f]$/) { o = o sprintf("%c", (index(h, substr(x, 1, 1)) - 1) * 16 + index(h, substr(x, 2, 1)) - 1); s = substr(s, i + 3) }
+      else { o = o "%"; s = substr(s, i + 1) }
+    }
+    printf "%s", o s }'
+}
+alive() { [ -r "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
+isip() { echo "$1" | awk -F. 'NF!=4 { exit 1 } { for (i=1; i<=4; i++) if ($i !~ /^[0-9]+$/ || $i > 255) exit 1 }'; }
+# disques SATA (libata) : sda, sdb… ; la baie vient du port ata (ata1 = baie 1)
+disks() { for b in "$R"/sys/block/sd*; do [ -d "$b" ] && echo "${b##*/}"; done; }
+bay() {
+  n=$(readlink -f "$R/sys/block/$1/device" 2>/dev/null | sed -n 's#.*/ata\([0-9]*\)/.*#\1#p')
+  [ -n "$n" ] && { echo "$n"; return; }
+  disks | awk -v d="$1" '$0 == d { print NR; exit }'
+}
+dtemp() { for f in "$R/sys/block/$1"/device/hwmon/hwmon*/temp1_input; do [ -r "$f" ] && { echo $(($(cat "$f") / 1000)); return; }; done; }
+mds() { awk '/^md[0-9]+ :/ { print $1 }' "$R/proc/mdstat" 2>/dev/null; }
+mounted() { awk -v m="$1" '$2 == m { f = 1 } END { exit !f }' "$R/proc/mounts" 2>/dev/null; }
+
+status() {
+  read -r H < "$R/proc/sys/kernel/hostname"
+  read -r UP _ < "$R/proc/uptime"
+  read -r L1 L5 L15 _ < "$R/proc/loadavg"
+  VER=$(cat "$ETC/diet-version" 2>/dev/null)
+  # état de padre-ventilateur : « temp=.. disques=.. fan=.. pwm=.. »
+  temp=; fan=; pwm=
+  for kv in $(cat "$RUN/ventilateur.etat" 2>/dev/null); do
+    v=${kv#*=}; case "$v" in ''|*[!0-9]*) continue;; esac
+    case "${kv%%=*}" in temp) temp=$v;; fan) fan=$v;; pwm) pwm=$v;; esac
+  done
+  [ "$temp" = 0 ] && temp=
+  MODEL=$(awk '$1=="model:" { sub(/^[^ \t]+[ \t]+/, ""); print; exit }' "$R/proc/sys/dev/boot/info" 2>/dev/null | esc)
+  IP=$(ifconfig eth0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
+  SVC=""
+  for p in ksmbd.mountd:ksmbd lighttpd:web dropbear:ssh ntpd:ntpd; do
+    pidof "${p%%:*}" >/dev/null 2>&1 && s=1 || s=0; SVC="$SVC\"${p#*:}\":$s,"
+  done
+  alive "$RUN/ventilateur.pid" && s=1 || s=0; SVC="$SVC\"fan\":$s,"
+  alive "$RUN/diet-hwmon.pid" && s=1 || s=0; SVC="$SVC\"hwmon\":$s"
+  if grep -q '^/' "$EXPORTS" 2>/dev/null; then
+    n=$(cat "$R/proc/fs/nfsd/threads" 2>/dev/null); [ "${n:-0}" -gt 0 ] 2>/dev/null && s=1 || s=0; SVC="$SVC,\"nfs\":$s"
+  fi
+  # disques marqués (F) dans un RAID md
+  FAULTY=$(awk '/^md[0-9]+ :/ { for (i = 5; i <= NF; i++) if ($i ~ /\(F\)/) { d = $i; sub(/[0-9]*\[.*/, "", d); printf " %s ", d } }' "$R/proc/mdstat" 2>/dev/null)
+  DSK=""
+  for d in $(disks); do
+    M=$(cat "$R/sys/block/$d/device/model" 2>/dev/null | esc); S=$(cat "$R/sys/block/$d/size" 2>/dev/null)
+    t=$(dtemp "$d"); case "$FAULTY" in *" $d "*) f=1;; *) f=0;; esac
+    SM=null; health=""; realloc=0; pending=0; uncorr=0; hours=0
+    if [ -r "$RUN/smart.$d" ]; then . "$RUN/smart.$d"
+      SM="{\"health\":\"$health\",\"realloc\":$realloc,\"pending\":$pending,\"uncorr\":$uncorr,\"hours\":$hours}"; fi
+    DSK="$DSK{\"dev\":\"$d\",\"bay\":$(bay "$d"),\"model\":\"$M\",\"gb\":$((${S:-0} / 1953125)),\"temp\":${t:-null},\"faulty\":$f,\"smart\":$SM},"
+  done
+  hdr application/json
+  printf '{"host":"%s","ver":"%s","model":"%s","bays":2,"ip":"%s","uptime":%s,"now":%s,"load":[%s,%s,%s],' \
+    "$H" "$VER" "$MODEL" "$IP" "${UP%.*}" "$(date +%s)" "$L1" "$L5" "$L15"
+  printf '"temp":%s,"fan":%s,"pwm":%s,"svc":{%s},"disks":[%s],' "${temp:-null}" "${fan:-null}" "${pwm:-null}" "$SVC" "${DSK%,}"
+  # RAM, /c, RAID md, compteurs (CPU, réseau, disques) en un passage d'awk
+  DF=$RUN/.df.$$
+  if mounted "$DATA"; then df -P -k "$DATA" 2>/dev/null | tail -n 1 > "$DF"; else : > "$DF"; fi
+  awk -v df="$DF" '
+    FILENAME ~ /meminfo$/ { m[$1] = $2; next }
+    FILENAME ~ /stat$/ && $1 == "cpu" { busy = $2+$3+$4+$7+$8; tot = busy+$5+$6; next }
+    FILENAME ~ /net\/dev$/ && /eth0:/ { sub(/.*eth0:/, ""); rx = $1; tx = $9; next }
+    FILENAME ~ /diskstats$/ && $3 ~ /^sd[a-z]+$/ { rd += $6; wr += $10; next }
+    FILENAME ~ /mdstat$/ {
+      if ($0 ~ /^md[0-9]+ :/) { n++; name[n] = $1; st[n] = $3; for (i = 4; i <= NF; i++) if ($i ~ /^(raid|linear)/) { lvl[n] = $i; break } next }
+      if (n && match($0, /\[[U_]+\]/)) { map[n] = substr($0, RSTART+1, RLENGTH-2); next }
+      if (n && match($0, /(resync|recovery|reshape|check) *= *[0-9.]+%.*/)) { sy[n] = substr($0, RSTART); gsub(/"/, "", sy[n]); next }
+      next
+    }
+    FILENAME == df { csize = $2; cused = $3; cfree = $4; next }
+    END {
+      printf "\"mem\":{\"total\":%d,\"free\":%d,\"buf\":%d,\"cache\":%d,\"avail\":%d,\"swap\":%d},", m["MemTotal:"], m["MemFree:"], m["Buffers:"], m["Cached:"], m["MemAvailable:"], m["SwapTotal:"]-m["SwapFree:"]
+      printf "\"c\":{\"size\":%.0f,\"used\":%.0f,\"free\":%.0f},", csize, cused, cfree
+      printf "\"cnt\":{\"busy\":%.0f,\"tot\":%.0f,\"rx\":%.0f,\"tx\":%.0f,\"rd\":%.0f,\"wr\":%.0f},", busy, tot, rx, tx, rd, wr
+      printf "\"md\":["
+      for (i = 1; i <= n; i++) printf "%s{\"name\":\"%s\",\"state\":\"%s\",\"level\":\"%s\",\"map\":\"%s\",\"sync\":\"%s\"}", (i>1?",":""), name[i], st[i], lvl[i], map[i], sy[i]
+      printf "]}\n"
+    }' "$R/proc/meminfo" "$R/proc/stat" "$R/proc/net/dev" "$R/proc/diskstats" "$R/proc/mdstat" "$DF" 2>/dev/null
+  rm -f "$DF"
+}
+
+# --- Réglages matériels : veille des disques (diet.conf) et courbe de padre-ventilateur (ventilateur.conf)
+config_get() {
+  hdr application/json
+  awk -F'[= \t]+' -v keys="$KEYS" 'BEGIN { n = split(keys, k, " "); for (i = 1; i <= n; i++) want[k[i]] = 1 }
+    $1 in want { v[$1] = $2 }
+    END { printf "{"; for (i = 1; i <= n; i++) printf "%s\"%s\":%d", (i>1?",":""), k[i], v[k[i]]; print "}" }' "$CONF" "$VCONF"
+}
+
+setkey() {	# setkey fichier clé valeur : remplace la valeur en gardant le commentaire
+  if grep -q "^$2=" "$1"; then sed -i "s/^$2=[0-9]*/$2=$3/" "$1"; else echo "$2=$3" >> "$1"; fi
+}
+
+config_set() {
+  SPINDOWN_MIN=0; . "$VCONF"; [ -r "$CONF" ] && . "$CONF"; GOT=0
+  for kv in $(echo "$BODY" | tr '&' ' '); do
+    k=${kv%%=*}; v=${kv#*=}
+    case " $KEYS " in *" $k "*) ;; *) continue;; esac
+    case "$v" in ''|*[!0-9]*) fail "400 Bad Request" "$(tx "$k : pas un nombre entier" "$k: keine ganze Zahl" "$k: not a whole number")";; esac
+    [ ${#v} -le 5 ] || fail "400 Bad Request" "$(tx "$k : trop grand" "$k: zu groß" "$k: too large")"
+    eval "$k=\$v"; GOT=$((GOT + 1))
+  done
+  [ $GOT -gt 0 ] || fail "400 Bad Request" "$(tx "aucune valeur reçue" "keine Werte erhalten" "no values received")"
+  [ "$FAN_PWM_MIN" -le "$FAN_PWM_MAX" ] && [ "$FAN_PWM_MAX" -le 255 ] || fail "400 Bad Request" "$(tx "Ventilateur : 0 <= min <= max <= 255" "Lüfter: 0 <= Min <= Max <= 255" "Fan: 0 <= min <= max <= 255")"
+  [ "$FAN_PWM_MIN" -ge 20 ] || fail "400 Bad Request" "$(tx "Un minimum de ventilateur sous 20 est trop risqué" "Lüfter-Minimum unter 20 ist zu riskant" "A fan minimum below 20 is too risky")"
+  [ "$TEMP_LOW" -ge 20 ] && [ "$TEMP_LOW" -lt "$TEMP_HIGH" ] && [ "$TEMP_HIGH" -le 70 ] || fail "400 Bad Request" "$(tx "Température : 20 <= minimal < pleine vitesse <= 70" "Temperatur: 20 <= Ruhig < Voll <= 70" "Temperature: 20 <= minimum < full speed <= 70")"
+  [ "$DISK_HIGH" -ge 30 ] && [ "$DISK_HIGH" -lt "$DISK_CRIT" ] && [ "$DISK_CRIT" -le 70 ] || fail "400 Bad Request" "$(tx "Disques : 30 <= pleine vitesse < arrêt d’urgence <= 70" "Platten: 30 <= Voll < Notaus <= 70" "Disks: 30 <= full speed < emergency shutdown <= 70")"
+  # padre_hwmon repasse à plein régime sans consigne pendant 5 min
+  [ "$PERIODE" -ge 10 ] && [ "$PERIODE" -le 240 ] || fail "400 Bad Request" "$(tx "Période : 10..240 secondes" "Intervall: 10..240 Sekunden" "Period: 10..240 seconds")"
+  [ "$SPINDOWN_MIN" -le 330 ] || fail "400 Bad Request" "$(tx "Veille : 0..330 minutes" "Standby: 0..330 Minuten" "Spin-down: 0..330 minutes")"
+  [ -f "$CONF" ] || : > "$CONF"
+  for k in $VKEYS; do eval "setkey \"\$VCONF\" $k \$$k"; done
+  setkey "$CONF" SPINDOWN_MIN "$SPINDOWN_MIN"
+  # appliquer : veille des disques et régulation
+  if [ "$SPINDOWN_MIN" -le 20 ]; then S=$((SPINDOWN_MIN * 12)); else S=$((240 + SPINDOWN_MIN / 30)); fi
+  for d in $(disks); do hdparm -S $S /dev/$d >/dev/null 2>&1; done
+  "$INITD/S45ventilateur" restart >/dev/null 2>&1
+  note "Réglages matériels modifiés depuis l’interface web"
+  ok "$(tx "Enregistré et appliqué" "Gespeichert und angewendet" "Saved and applied")"
+}
+
+# --- Partages SMB (ksmbd.conf, même syntaxe que smb.conf) ---------------------
+shdr() { awk -v n="[$1]" '{ l = tolower($0); gsub(/^[ \t]+|[ \t]+$/, "", l) } l == n { print 1; exit }' "$KCONF" 2>/dev/null; }
+
+shares_get() {
+  hdr application/json
+  # ksmbd : sans indication, un partage est en lecture seule et demande un compte
+  awk '
+    function yes(v) { return tolower(v) ~ /^(1|yes|true)$/ }
+    function flush() { if (name != "" && tolower(name) != "global") print name "|" path "|" ro "|" guest }
+    /^[ \t]*[#;]/ { next }
+    /^[ \t]*\[/ { flush(); s = $0; sub(/^[ \t]*\[/, "", s); name = substr(s, 1, index(s, "]") - 1); path = ""; ro = 1; guest = 0; next }
+    index($0, "=") {
+      k = tolower(substr($0, 1, index($0, "=") - 1)); gsub(/^[ \t]+|[ \t]+$/, "", k)
+      v = substr($0, index($0, "=") + 1); gsub(/^[ \t"]+|[ \t"]+$/, "", v)
+      if (k == "path") path = v
+      else if (k == "writeable" || k == "writable" || k == "write ok") ro = !yes(v)
+      else if (k == "read only") ro = yes(v)
+      else if (k == "guest ok" || k == "public") guest = yes(v)
+    }
+    END { flush() }' "$KCONF" 2>/dev/null | {
+    printf '['; sep=""
+    while IFS='|' read -r n p r g; do
+      [ -d "$R$p" ] && e=1 || e=0
+      printf '%s{"name":"%s","path":"%s","ro":%d,"guest":%d,"exists":%d}' "$sep" "$(printf '%s' "$n" | esc)" "$(printf '%s' "$p" | esc)" "$r" "$g" "$e"; sep=","
+    done
+    echo ']'
+  }
+}
+
+ksmbd_reload() { ksmbd.control -r >/dev/null 2>&1; }
+
+shares_change() {
+  name=""; ro=""; guest=""
+  for kv in $(echo "$BODY" | tr '&' ' '); do
+    k=${kv%%=*}; v=${kv#*=}
+    case "$k" in name|ro|guest) ;; *) continue;; esac
+    case "$v" in ''|*[!A-Za-z0-9_-]*) fail "400 Bad Request" "$(tx "Valeur invalide : lettres, chiffres, - et _ uniquement" "Ungültiger Wert: nur Buchstaben, Ziffern, - und _" "Invalid value: letters, digits, - and _ only")";; esac
+    eval "$k=\$v"
+  done
+  case "$name" in ''|-*) fail "400 Bad Request" "$(tx "Nom de partage invalide" "Ungültiger Freigabename" "Invalid share name")";; esac
+  [ ${#name} -le 32 ] || fail "400 Bad Request" "$(tx "Nom de partage trop long (32 caractères au plus)" "Freigabename zu lang (höchstens 32 Zeichen)" "Share name too long (32 characters max.)")"
+  lname=$(echo "$name" | tr 'A-Z' 'a-z')
+  case "$lname" in global|homes|printers|ipc|home|lost-found|aquota*) fail "400 Bad Request" "$(tx "Ce nom est réservé" "Dieser Name ist reserviert" "This name is reserved")";; esac
+  [ -f "$KCONF" ] || printf '[global]\n\tnetbios name = READYNAS\n' > "$KCONF"
+  have=$(shdr "$lname")
+  case "$1" in
+    share_add)
+      [ -z "$have" ] || fail "409 Conflict" "$(tx "Le partage $name existe déjà" "Die Freigabe $name gibt es schon" "The share $name already exists")"
+      mounted "$DATA" || fail "500 Internal Server Error" "$(tx "Le volume de données $DATA n’est pas monté" "Das Datenvolume $DATA ist nicht eingehängt" "The data volume $DATA is not mounted")"
+      if [ ! -d "$R$DATA/$name" ]; then
+        mkdir "$R$DATA/$name" || fail "500 Internal Server Error" "$(tx "Impossible de créer $DATA/$name" "$DATA/$name kann nicht angelegt werden" "Cannot create $DATA/$name")"
+        chown nobody:nobody "$R$DATA/$name" 2>/dev/null; chmod 1777 "$R$DATA/$name"
+      fi
+      cp "$KCONF" "$KCONF.bak"
+      printf '\n[%s]\n\tpath = %s\n\tcreate mask = 0666\n\tdirectory mask = 1777\n\tforce create mode = 0666\n\tforce directory mode = 1777\n\twriteable = yes\n\tguest ok = yes\n' "$name" "$DATA/$name" >> "$KCONF"
+      MSG="$(tx "Partage $name créé" "Freigabe $name angelegt" "Share $name created")" ;;
+    share_del)
+      [ -n "$have" ] || fail "404 Not Found" "$(tx "Partage $name introuvable" "Freigabe $name nicht gefunden" "Share $name not found")"
+      awk -v n="[$lname]" '/^[ \t]*\[/ { l = tolower($0); gsub(/^[ \t]+|[ \t]+$/, "", l); skip = (l == n) } !skip' "$KCONF" > "$KCONF.tmp" || fail "500 Internal Server Error" "$(tx "Écriture impossible" "Schreiben nicht möglich" "Cannot write")"
+      cp "$KCONF" "$KCONF.bak"; mv "$KCONF.tmp" "$KCONF"
+      MSG="$(tx "Partage $name retiré (le dossier et son contenu sont conservés)" "Freigabe $name entfernt (Ordner und Inhalt bleiben erhalten)" "Share $name removed (the folder and its contents are kept)")" ;;
+    share_set)
+      [ -n "$have" ] || fail "404 Not Found" "$(tx "Partage $name introuvable" "Freigabe $name nicht gefunden" "Share $name not found")"
+      case "$ro$guest" in 00|01|10|11) ;; *) fail "400 Bad Request" "$(tx "Réglage invalide" "Ungültige Einstellung" "Invalid setting")";; esac
+      [ "$ro" = 1 ] && w=no || w=yes; [ "$guest" = 1 ] && g=yes || g=no
+      awk -v n="[$lname]" -v w="$w" -v g="$g" '
+        /^[ \t]*\[/ { l = tolower($0); gsub(/^[ \t]+|[ \t]+$/, "", l); insec = (l == n); print; if (insec) { print "\twriteable = " w; print "\tguest ok = " g } next }
+        insec { k = tolower(substr($0, 1, index($0, "=") - 1)); gsub(/^[ \t]+|[ \t]+$/, "", k)
+                if (k == "writeable" || k == "writable" || k == "write ok" || k == "read only" || k == "guest ok" || k == "public") next }
+        { print }' "$KCONF" > "$KCONF.tmp" || fail "500 Internal Server Error" "$(tx "Écriture impossible" "Schreiben nicht möglich" "Cannot write")"
+      cp "$KCONF" "$KCONF.bak"; mv "$KCONF.tmp" "$KCONF"
+      MSG="$(tx "Partage $name mis à jour" "Freigabe $name geändert" "Share $name updated")" ;;
+  esac
+  ksmbd_reload
+  note "$MSG"; ok "$MSG"
+}
+
+# --- Utilisateurs SMB (compte Unix sans shell + base ksmbdpwd.db) ---------------
+users_get() {
+  hdr application/json
+  awk -F: 'FILENAME == ARGV[1] { if ($1 !~ /^#/ && $1 != "") smb[$1] = 1; next }
+    ($3 >= 1000 && $3 < 65534) { printf "%s{\"name\":\"%s\",\"uid\":%d,\"smb\":%d}", sep, $1, $3, ($1 in smb); sep = "," }
+    BEGIN { printf "[" } END { print "]" }' "$PWDDB" "$PASSWD" 2>/dev/null
+}
+
+users_change() {
+  set -f   # un mot de passe peut contenir * ? [
+  name=""; pw=""
+  for kv in $(echo "$BODY" | tr '&' ' '); do
+    k=${kv%%=*}; v=${kv#*=}
+    case "$k" in
+      name) case "$v" in ''|-*|*[!A-Za-z0-9_-]*) fail "400 Bad Request" "$(tx "Nom d’utilisateur invalide : lettres, chiffres, - et _ uniquement" "Ungültiger Benutzername: nur Buchstaben, Ziffern, - und _" "Invalid user name: letters, digits, - and _ only")";; esac; name=$v ;;
+      pw)   pw=$(urldec "$v") ;;
+    esac
+  done
+  [ -n "$name" ] && [ ${#name} -le 31 ] || fail "400 Bad Request" "$(tx "Nom d’utilisateur invalide" "Ungültiger Benutzername" "Invalid user name")"
+  uid=$(awk -F: -v n="$name" '$1 == n { print $3; exit }' "$PASSWD")
+  case "$1" in
+    user_set)
+      [ ${#pw} -ge 6 ] || fail "400 Bad Request" "$(tx "Mot de passe trop court (6 caractères au moins)" "Passwort zu kurz (mindestens 6 Zeichen)" "Password too short (6 characters min.)")"
+      [ ${#pw} -le 128 ] && [ "$(printf '%s' "$pw" | wc -l)" -eq 0 ] || fail "400 Bad Request" "$(tx "Mot de passe invalide" "Ungültiges Passwort" "Invalid password")"
+      NEW=""
+      if [ -z "$uid" ]; then
+        case "$name" in [a-z]*) ;; *) fail "400 Bad Request" "$(tx "Un nouveau nom doit commencer par une minuscule" "Ein neuer Name muss mit einem Kleinbuchstaben beginnen" "A new name must start with a lowercase letter")";; esac
+        case "$name" in *[A-Z]*) fail "400 Bad Request" "$(tx "Un nouveau nom ne doit pas contenir de majuscules" "Ein neuer Name darf keine Großbuchstaben enthalten" "A new name must not contain uppercase letters")";; esac
+        uid=$(awk -F: '$3 >= 1000 && $3 < 65534 && $3 > m { m = $3 } END { print (m ? m + 1 : 1000) }' "$PASSWD")
+        gid=$(awk -F: '$1 == "users" { print $3; exit }' "$ETC/group" 2>/dev/null); gid=${gid:-65534}
+        cp "$PASSWD" "$PASSWD.bak"
+        echo "$name:x:$uid:$gid::$DATA/home/$name:/bin/false" >> "$PASSWD"
+        NEW=1
+      elif [ "$uid" -lt 1000 ] || [ "$uid" -ge 65534 ]; then
+        fail "403 Forbidden" "$(tx "$name est un compte système" "$name ist ein Systemkonto" "$name is a system account")"
+      fi
+      # mot de passe sur l'entrée standard (deux fois), jamais sur la ligne de commande
+      if ! printf '%s\n%s\n' "$pw" "$pw" | ksmbd.adduser -P "$PWDDB" -C "$KCONF" "$name" >/dev/null 2>&1; then
+        [ -n "$NEW" ] && cp "$PASSWD.bak" "$PASSWD"
+        fail "500 Internal Server Error" "$(tx "ksmbd.adduser a refusé le mot de passe de $name" "ksmbd.adduser hat das Passwort von $name abgelehnt" "ksmbd.adduser refused the password of $name")"
+      fi
+      [ -n "$NEW" ] && MSG="$(tx "Utilisateur $name créé" "Benutzer $name angelegt" "User $name created")" || MSG="$(tx "Mot de passe de $name modifié" "Passwort von $name geändert" "Password of $name changed")" ;;
+    user_del)
+      [ -n "$uid" ] || fail "404 Not Found" "$(tx "Utilisateur $name introuvable" "Benutzer $name nicht gefunden" "User $name not found")"
+      [ "$uid" -ge 1000 ] && [ "$uid" -lt 65534 ] || fail "403 Forbidden" "$(tx "$name est un compte système" "$name ist ein Systemkonto" "$name is a system account")"
+      ksmbd.adduser -P "$PWDDB" -C "$KCONF" -d "$name" >/dev/null 2>&1
+      awk -F: -v n="$name" '$1 != n' "$PASSWD" > "$PASSWD.tmp" || fail "500 Internal Server Error" "$(tx "Écriture impossible" "Schreiben nicht möglich" "Cannot write")"
+      cp "$PASSWD" "$PASSWD.bak"; cat "$PASSWD.tmp" > "$PASSWD"; rm -f "$PASSWD.tmp"
+      MSG="$(tx "Utilisateur $name supprimé (ses fichiers sont conservés)" "Benutzer $name gelöscht (seine Dateien bleiben erhalten)" "User $name deleted (their files are kept)")" ;;
+  esac
+  ksmbd_reload
+  note "$MSG"; ok "$MSG"
+}
+
+# --- Exports NFS (/etc/exports, une ligne par dossier et par client) ------------
+nfs_get() {
+  hdr application/json
+  awk '/^[ \t]*#/ || NF < 1 { next }
+    { p = $1; for (i = 2; i <= NF; i++) { c = $i; o = ""; if ((j = index(c, "(")) > 0) { o = substr(c, j + 1); sub(/\)$/, "", o); c = substr(c, 1, j - 1) }
+        print p "|" c "|" (("," o ",") ~ /,ro,/ ? 1 : 0) "|" o } }' "$EXPORTS" 2>/dev/null | {
+    printf '['; sep=""
+    while IFS='|' read -r p c r o; do
+      [ -d "$R$p" ] && e=1 || e=0
+      printf '%s{"path":"%s","client":"%s","ro":%d,"opts":"%s","exists":%d}' "$sep" "$(printf '%s' "$p" | esc)" "$(printf '%s' "$c" | esc)" "$r" "$(printf '%s' "$o" | esc)" "$e"; sep=","
+    done
+    echo ']'
+  }
+}
+
+nfs_change() {
+  path=""; client=""; ro=0
+  for kv in $(echo "$BODY" | tr '&' ' '); do
+    k=${kv%%=*}; v=$(urldec "${kv#*=}")
+    case "$k" in path) path=$v;; client) client=$v;; ro) ro=$v;; esac
+  done
+  case "$path" in /c|/c/*) ;; *) fail "400 Bad Request" "$(tx "Dossier invalide : /c ou /c/nom" "Ungültiger Ordner: /c oder /c/name" "Invalid folder: /c or /c/name")";; esac
+  case "${path#/c}" in *[!A-Za-z0-9/_-]*|*//*|*/) fail "400 Bad Request" "$(tx "Dossier invalide : /c ou /c/nom" "Ungültiger Ordner: /c oder /c/name" "Invalid folder: /c or /c/name")";; esac
+  case "$client" in
+    '*') ;;
+    */*) isip "${client%/*}" && case "${client#*/}" in ''|*[!0-9]*) false;; *) [ "${client#*/}" -le 32 ];; esac \
+           || fail "400 Bad Request" "$(tx "Client invalide : *, adresse IP ou réseau a.b.c.d/nn" "Ungültiger Client: *, IP-Adresse oder Netz a.b.c.d/nn" "Invalid client: *, IP address or network a.b.c.d/nn")" ;;
+    *) isip "$client" || fail "400 Bad Request" "$(tx "Client invalide : *, adresse IP ou réseau a.b.c.d/nn" "Ungültiger Client: *, IP-Adresse oder Netz a.b.c.d/nn" "Invalid client: *, IP address or network a.b.c.d/nn")" ;;
+  esac
+  have=$(awk -v p="$path" -v c="$client" '$1 == p { for (i = 2; i <= NF; i++) { x = $i; sub(/\(.*/, "", x); if (x == c) { print 1; exit } } }' "$EXPORTS" 2>/dev/null)
+  [ -f "$EXPORTS" ] || : > "$EXPORTS"
+  case "$1" in
+    nfs_add)
+      [ -z "$have" ] || fail "409 Conflict" "$(tx "$path est déjà exporté vers $client" "$path ist schon für $client freigegeben" "$path is already exported to $client")"
+      [ -d "$R$path" ] || fail "404 Not Found" "$(tx "Dossier $path introuvable" "Ordner $path nicht gefunden" "Folder $path not found")"
+      [ "$ro" = 1 ] && o=ro || o=rw
+      cp "$EXPORTS" "$EXPORTS.bak"
+      echo "$path $client($o,no_subtree_check)" >> "$EXPORTS"
+      MSG="$(tx "Export NFS de $path ajouté" "NFS-Freigabe von $path angelegt" "NFS export of $path added")" ;;
+    nfs_del)
+      [ -n "$have" ] || fail "404 Not Found" "$(tx "Export introuvable" "Freigabe nicht gefunden" "Export not found")"
+      # retire ce client de la ligne ; la ligne disparaît s'il n'en reste aucun
+      awk -v p="$path" -v c="$client" '$1 != p { print; next }
+        { o = $1; for (i = 2; i <= NF; i++) { x = $i; sub(/\(.*/, "", x); if (x != c) o = o " " $i } if (o != $1) print o }' "$EXPORTS" > "$EXPORTS.tmp" \
+        || fail "500 Internal Server Error" "$(tx "Écriture impossible" "Schreiben nicht möglich" "Cannot write")"
+      cp "$EXPORTS" "$EXPORTS.bak"; mv "$EXPORTS.tmp" "$EXPORTS"
+      MSG="$(tx "Export NFS de $path vers $client retiré" "NFS-Freigabe von $path für $client entfernt" "NFS export of $path to $client removed")" ;;
+  esac
+  exportfs -ra >/dev/null 2>&1 || MSG="$MSG ($(tx "exportfs a échoué, voir le journal" "exportfs fehlgeschlagen, siehe Protokoll" "exportfs failed, see the log"))"
+  note "$MSG"; ok "$MSG"
+}
+
+# --- Réglages système (nom, fuseau, réseau, Telegram) -----------------------------
+IFACES=$ETC/network/interfaces
+sys_get() {
+  TG_TOKEN=""; TG_CHAT=""
+  [ -r "$ETC/diet-notify.conf" ] && . "$ETC/diet-notify.conf"
+  # eth0 dans /etc/network/interfaces (ifupdown de busybox)
+  set -- $(awk '$1 == "iface" { e = ($2 == "eth0"); if (e) m = $4; next }
+    e && $1 == "address" { a = $2 } e && $1 == "netmask" { n = $2 } e && $1 == "gateway" { g = $2 }
+    e && $1 == "up" && $2 == "printf" { for (i = 5; i <= NF && $i != ">"; i++) d = d (d ? "," : "") $i }
+    END { print (m ? m : "dhcp"), (a ? a : "-"), (n ? n : "-"), (g ? g : "-"), (d ? d : "-") }' "$IFACES" 2>/dev/null)
+  NET=$1; IPADDR=${2#-}; NETMASK=${3#-}; GATEWAY=${4#-}; DNS=$(echo "${5#-}" | tr ',' ' ')
+  # valeurs actuelles en suggestion si rien n'est fixé
+  CIP=$(ifconfig eth0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
+  CMASK=$(ifconfig eth0 2>/dev/null | sed -n 's/.*Mask:\([0-9.]*\).*/\1/p')
+  CGW=$(route -n 2>/dev/null | awk '$1 == "0.0.0.0" { print $2; exit }')
+  CDNS=$(awk '$1 == "nameserver" { printf "%s%s", s, $2; s = " " }' "$ETC/resolv.conf" 2>/dev/null)
+  SL=$(cat "$ETC/diet-lang" 2>/dev/null); case "$SL" in fr|de|en) ;; *) SL=en ;; esac
+  hdr application/json
+  printf '{"host":"%s","lang":"%s","tz":"%s","net":"%s","ip":"%s","mask":"%s","gw":"%s","dns":"%s","tgset":%d,"tgchat":"%s"}\n' \
+    "$(cat "$ETC/hostname" 2>/dev/null | esc)" "$SL" "$(cat "$ETC/TZ" 2>/dev/null | esc)" "$NET" "${IPADDR:-$CIP}" "${NETMASK:-$CMASK}" \
+    "${GATEWAY:-$CGW}" "${DNS:-$CDNS}" "$([ -n "$TG_TOKEN" ] && echo 1 || echo 0)" "$(printf '%s' "$TG_CHAT" | esc)"
+}
+
+sys_set() {
+  set -f
+  host=""; lang=""; tz=""; net=""; ip=""; mask=""; gw=""; dns=""; tgtoken=""; tgchat=""
+  for kv in $(echo "$BODY" | tr '&' ' '); do
+    k=${kv%%=*}
+    case "$k" in host|lang|tz|net|ip|mask|gw|dns|tgtoken|tgchat) v=$(urldec "${kv#*=}"); eval "$k=\$v";; esac
+  done
+  case "$host" in ''|-*|*[!a-z0-9-]*) fail "400 Bad Request" "$(tx "Nom du NAS invalide : minuscules, chiffres et tirets" "Ungültiger NAS-Name: Kleinbuchstaben, Ziffern und Bindestriche" "Invalid NAS name: lowercase letters, digits and dashes")";; esac
+  [ ${#host} -le 15 ] || fail "400 Bad Request" "$(tx "Nom du NAS trop long (15 caractères au plus)" "NAS-Name zu lang (höchstens 15 Zeichen)" "NAS name too long (15 characters max.)")"
+  case "$lang" in ''|fr|de|en) ;; *) fail "400 Bad Request" "$(tx "Langue du système invalide" "Ungültige Systemsprache" "Invalid system language")";; esac
+  case "$tz" in ''|*[!A-Za-z0-9,./+:\<\>-]*) fail "400 Bad Request" "$(tx "Fuseau horaire invalide" "Ungültige Zeitzone" "Invalid time zone")";; esac
+  [ ${#tz} -le 60 ] || fail "400 Bad Request" "$(tx "Fuseau horaire invalide" "Ungültige Zeitzone" "Invalid time zone")"
+  case "$net" in
+    dhcp) ;;
+    static)
+      isip "$ip" || fail "400 Bad Request" "$(tx "Adresse IP invalide" "Ungültige IP-Adresse" "Invalid IP address")"
+      isip "$mask" || fail "400 Bad Request" "$(tx "Masque de sous-réseau invalide" "Ungültige Netzmaske" "Invalid netmask")"
+      [ -z "$gw" ] || isip "$gw" || fail "400 Bad Request" "$(tx "Passerelle invalide" "Ungültiges Gateway" "Invalid gateway")"
+      n=0; for d in $dns; do isip "$d" || fail "400 Bad Request" "$(tx "Serveur DNS invalide : $d" "Ungültiger DNS-Server: $d" "Invalid DNS server: $d")"; n=$((n + 1)); done
+      [ $n -le 3 ] || fail "400 Bad Request" "$(tx "Trois serveurs DNS au plus" "Höchstens drei DNS-Server" "Three DNS servers max.")" ;;
+    *) fail "400 Bad Request" "$(tx "Mode réseau invalide" "Ungültiger Netzwerkmodus" "Invalid network mode")" ;;
+  esac
+  case "$tgtoken" in '') ;; *[!A-Za-z0-9:_-]*|*:*:*) fail "400 Bad Request" "$(tx "Jeton Telegram invalide" "Ungültiges Telegram-Token" "Invalid Telegram token")";; [0-9]*:?*) ;; *) fail "400 Bad Request" "$(tx "Jeton Telegram invalide" "Ungültiges Telegram-Token" "Invalid Telegram token")";; esac
+  case "$tgchat" in '') ;; -|-*[!0-9]*|[!0-9-]*|[0-9]*[!0-9]*) fail "400 Bad Request" "$(tx "Identifiant de discussion Telegram invalide" "Ungültige Telegram-Chat-ID" "Invalid Telegram chat ID")";; esac
+
+  # Telegram : identifiant vide = désactivé ; jeton vide = garder celui enregistré.
+  # Fichier créé à l'exécution sur le NAS (jamais dans l'image), lisible par root seul.
+  if [ -z "$tgchat" ]; then rm -f "$ETC/diet-notify.conf"
+  else
+    TG_TOKEN=""; [ -r "$ETC/diet-notify.conf" ] && . "$ETC/diet-notify.conf"
+    [ -n "$tgtoken" ] && TG_TOKEN=$tgtoken
+    [ -n "$TG_TOKEN" ] || fail "400 Bad Request" "$(tx "Jeton Telegram manquant" "Telegram-Token fehlt" "Telegram token missing")"
+    ( umask 077; printf 'TG_TOKEN=%s\nTG_CHAT=%s\n' "$TG_TOKEN" "$tgchat" > "$ETC/diet-notify.conf" )
+  fi
+  # réseau : appliqué au prochain démarrage (S40network, ifup -a)
+  mkdir -p "$ETC/network"
+  {
+    printf '# écrit par l’interface web DIET\nauto lo\niface lo inet loopback\n\nauto eth0\n'
+    if [ "$net" = static ]; then
+      printf 'iface eth0 inet static\n  address %s\n  netmask %s\n' "$ip" "$mask"
+      [ -n "$gw" ] && printf '  gateway %s\n' "$gw"
+      # shellcheck disable=SC2086
+      [ -n "$dns" ] && printf "  up printf 'nameserver %%s\\\\n' %s > /etc/resolv.conf\n" "$(echo $dns)"
+    else
+      printf 'iface eth0 inet dhcp\n  hostname $(hostname)\n'
+    fi
+    printf '  pre-up /etc/network/nfs_check\n  wait-delay 15\n'
+  } > "$IFACES.tmp" && mv "$IFACES.tmp" "$IFACES"
+  [ -n "$tz" ] && echo "$tz" > "$ETC/TZ"
+  if [ -n "$lang" ] && [ "$lang" != "$(cat "$ETC/diet-lang" 2>/dev/null)" ]; then
+    echo "$lang" > "$ETC/diet-lang"
+    "$INITD/S95diet" restart-hwmon >/dev/null 2>&1   # la surveillance relit la langue
+  fi
+  OLD=$(cat "$ETC/hostname" 2>/dev/null)
+  if [ "$host" != "$OLD" ]; then
+    echo "$host" > "$ETC/hostname"
+    sed -i "s/^\([ \t]*netbios name[ \t]*=\).*/\1 $(echo "$host" | tr 'a-z' 'A-Z')/" "$KCONF" 2>/dev/null
+    hostname "$host"
+    bg "$INITD/S70ksmbd restart"   # ksmbd ne relit le nom NetBIOS qu'au démarrage
+  fi
+  note "Réglages système modifiés"
+  ok "$(tx "Enregistré. Le nom et le fuseau horaire sont appliqués tout de suite ; le réseau au prochain redémarrage." "Gespeichert. Name und Zeitzone gelten sofort, das Netzwerk ab dem nächsten Neustart." "Saved. The name and time zone apply now; the network at the next reboot.")"
+}
+
+notify_test() {
+  out=$(diet-notify "$(tx "message de test envoyé depuis l’interface web" "Testnachricht aus der Web-Oberfläche" "test message sent from the web interface")" 2>&1); rc=$?
+  [ $rc -eq 0 ] && { ok "$(tx "Notification envoyée" "Nachricht gesendet" "Notification sent")"; return; }
+  [ $rc -eq 2 ] && fail "400 Bad Request" "$(tx "Telegram n’est pas configuré : enregistrer d’abord le jeton et l’identifiant" "Telegram ist nicht eingerichtet: zuerst Token und Chat-ID speichern" "Telegram is not set up: save the token and chat ID first")"
+  fail "502 Bad Gateway" "$(tx "Échec de l’envoi" "Senden fehlgeschlagen" "Sending failed") : $(echo "$out" | tr -d '\r' | cut -c1-200)"
+}
+
+A=$(qp a)
+if [ "$REQUEST_METHOD" = "POST" ]; then
+  # protection CSRF : un formulaire d'un autre site ne peut pas poser cet en-tête
+  [ "$HTTP_X_DIET" = "1" ] || fail "403 Forbidden" "$(tx "Action réservée à l’interface" "Aktion nur über die Oberfläche" "Action only through the web interface")"
+  BODY=""; CL=${CONTENT_LENGTH:-0}
+  case "$CL" in *[!0-9]*) CL=0;; esac
+  [ "$CL" -lt 4096 ] || fail "413 Request Entity Too Large" "$(tx "trop de données" "zu viele Daten" "too much data")"
+  [ "$CL" -gt 0 ] && BODY=$(head -c "$CL")
+  [ ${#BODY} -eq "$CL" ] || fail "500 Internal Server Error" "$(tx "Données reçues incomplètes, réessayez" "Daten unvollständig angekommen, bitte nochmal" "Incomplete data received, please retry")"
+  case "$A" in
+    spindown)
+      for d in $(disks); do hdparm -y /dev/$d >/dev/null 2>&1; done; ok "$(tx "Disques en veille" "Platten schlafen" "Disks spun down")" ;;
+    ksmbd)
+      "$INITD/S70ksmbd" restart >/dev/null 2>&1; sleep 1
+      pidof ksmbd.mountd >/dev/null && ok "$(tx "Partage SMB redémarré" "SMB neu gestartet" "SMB restarted")" || fail "500 Internal Server Error" "$(tx "ksmbd.mountd ne démarre pas" "ksmbd.mountd startet nicht" "ksmbd.mountd does not start")" ;;
+    nfsd)
+      "$INITD/S60nfs" restart >/dev/null 2>&1; ok "$(tx "NFS redémarré" "NFS neu gestartet" "NFS restarted")" ;;
+    ntp)
+      bg "ntpd -q -n -p pool.ntp.org"; ok "$(tx "Mise à l’heure demandée" "Zeitabgleich angestoßen" "Time update requested")" ;;
+    reboot)    ok "$(tx "Redémarrage" "Neustart" "Restarting")"; bg "sleep 2; reboot" ;;
+    poweroff)  ok "$(tx "Extinction" "Ausschalten" "Powering off")"; bg ": > $RUN/poweroff; sleep 2; poweroff" ;;
+    config)    config_set ;;
+    share_add|share_del|share_set) shares_change "$A" ;;
+    user_set|user_del) users_change "$A" ;;
+    nfs_add|nfs_del) nfs_change "$A" ;;
+    sys_set) sys_set ;;
+    notify_test) notify_test ;;
+    *) fail "400 Bad Request" "$(tx "action inconnue" "unbekannte Aktion" "unknown action")" ;;
+  esac
+  exit 0
+fi
+
+case "$A" in
+  status|"") status ;;
+  config) config_get ;;
+  shares) shares_get ;;
+  users) users_get ;;
+  nfs) nfs_get ;;
+  sys) sys_get ;;
+  hist) hdr 'text/plain; charset=utf-8'; cat "$RUN/hwmon.hist" 2>/dev/null ;;
+  log)
+    hdr 'text/plain; charset=utf-8'
+    case "$(qp f)" in
+      diet)     tail -n 300 "$LOG" 2>/dev/null ;;
+      messages) tail -n 300 "$R/var/log/messages" 2>/dev/null ;;
+      dmesg)    dmesg | tail -n 300 ;;
+      *) tx "journal inconnu" "unbekanntes Protokoll" "unknown log"; echo ;;
+    esac ;;
+  smart)
+    d=$(qp d)
+    disks | grep -qx "$d" || fail "400 Bad Request" "$(tx "disque inconnu" "unbekannte Platte" "unknown disk")"
+    hdr 'text/plain; charset=utf-8'
+    if [ -x "$R/usr/sbin/smartctl" ]; then "$R/usr/sbin/smartctl" -H -i -A /dev/$d 2>&1
+    else
+      # pas de smartctl (chaîne sans C++) : modèle, température drivetemp et messages du noyau
+      echo "$(tx "smartctl absent de ce système ; informations disponibles :" "smartctl fehlt auf diesem System; verfügbare Angaben:" "smartctl is not on this system; available information:")"
+      echo "  /dev/$d : $(cat "$R/sys/block/$d/device/model" 2>/dev/null), $(($(cat "$R/sys/block/$d/size" 2>/dev/null || echo 0) / 1953125)) GB, $(dtemp "$d" || echo '?') °C (drivetemp)"
+      echo; dmesg | grep -w "$d" | tail -n 50
+    fi ;;
+  md)
+    d=$(qp d)
+    mds | grep -qx "$d" || fail "400 Bad Request" "$(tx "volume RAID inconnu" "unbekanntes RAID-Volume" "unknown RAID volume")"
+    hdr 'text/plain; charset=utf-8'
+    mdadm --detail /dev/$d 2>&1 ;;
+  *) fail "400 Bad Request" "$(tx "inconnu" "unbekannt" "unknown")" ;;
+esac

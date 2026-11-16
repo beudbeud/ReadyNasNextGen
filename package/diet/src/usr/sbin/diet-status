@@ -1,0 +1,17 @@
+#!/bin/sh
+# Résumé en console (SSH) : ventilateur, disques, RAID, /c, mémoire, services.
+[ -r /etc/diet-lang.sh ] && . /etc/diet-lang.sh || tx() { printf "%s" "$3"; }
+temp=; disques=; fan=; pwm=
+for kv in $(cat /var/run/ventilateur.etat 2>/dev/null); do case "$kv" in temp=*|disques=*|fan=*|pwm=*) eval "$kv";; esac; done
+echo "$(tx "Température : ${temp}C (disques ${disques}C)   Ventilateur : ${fan} tr/min (consigne ${pwm})" "Temperatur: ${temp}C (Platten ${disques}C)   Lüfter: ${fan} U/min (Stufe ${pwm})" "Temperature: ${temp}C (disks ${disques}C)   Fan: ${fan} rpm (level ${pwm})")"
+for b in /sys/block/sd*; do
+	[ -d "$b" ] || continue
+	t=$(cat $b/device/hwmon/hwmon*/temp1_input 2>/dev/null | head -n 1)
+	echo "${b##*/} : $(cat $b/device/model 2>/dev/null) ${t:+$((t / 1000))C}"
+done
+grep -A2 '^md' /proc/mdstat 2>/dev/null
+df -h /c 2>/dev/null | tail -n 1
+free | sed -n 2p
+echo "$(tx "Services :" "Dienste:" "Services:") $(for p in dropbear ksmbd.mountd lighttpd ntpd rpc.mountd; do pidof $p >/dev/null && printf "$p "; done)"
+A=$(diet-alerts); [ -n "$A" ] && echo "$(tx "ALERTE :" "ALARM:" "ALERT:") $A"
+exit 0
