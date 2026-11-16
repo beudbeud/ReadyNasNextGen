@@ -1,0 +1,86 @@
+ldso/sparc : FLUSH après réécriture des instructions de la PLT
+
+SPARC V8 exige FLUSH après une écriture dans du code. Sur l'Infrant Padre
+(antémémoire D à écriture différée, I non cohérente), ld.so exécutait sinon
+l'entrée PLT non patchée -> _dl_linux_resolver avec tpnt = %g1 -> segfault.
+
+--- a/ldso/ldso/sparc/dl-startup.h
++++ b/ldso/ldso/sparc/dl-startup.h
+@@ -67,6 +67,8 @@
+ 	case R_SPARC_JMP_SLOT: \
+ 		REL[1] = 0x03000000 | ((SYMBOL >> 10) & 0x3fffff); \
+ 		REL[2] = 0x81c06000 | (SYMBOL & 0x3ff); \
++		SPARC_IFLUSH(&REL[1]); \
++		SPARC_IFLUSH(&REL[2]); \
+ 		break; \
+ 	case R_SPARC_NONE: \
+ 	case R_SPARC_WDISP30: \
+--- a/ldso/ldso/sparc/dl-sysdep.h
++++ b/ldso/ldso/sparc/dl-sysdep.h
+@@ -17,12 +17,22 @@
+  *		nop
+  *		.word implementation_dependent
+  */
++/* SPARC V8 : FLUSH obligatoire sur chaque double mot d'instructions réécrit
++ * (PLT, relocations de texte), sinon l'antémémoire d'instructions peut
++ * exécuter l'ancien code (antémémoire D à écriture différée non surveillée
++ * par la I, p. ex. Infrant Padre : PLT non patchée exécutée -> segfault
++ * dans _dl_linux_resolver). Comme sparc_fixup_plt de la glibc. */
++#define SPARC_IFLUSH(ADDR) __asm__ __volatile__("flush %0" : : "r" (ADDR) : "memory")
++
+ #define INIT_GOT(GOT_BASE,MODULE) \
+ {				\
+    GOT_BASE[0] = 0x9de3bfc0;  /* save %sp, -64, %sp */	\
+    GOT_BASE[1] = 0x40000000 | (((unsigned int) _dl_linux_resolve - (unsigned int) GOT_BASE - 4) >> 2);	\
+    GOT_BASE[2] = 0x01000000; /* nop */ 			\
+    GOT_BASE[3] = (int) MODULE;					\
++   SPARC_IFLUSH(&GOT_BASE[0]);					\
++   SPARC_IFLUSH(&GOT_BASE[1]);					\
++   SPARC_IFLUSH(&GOT_BASE[2]);					\
+ }
+ 
+ /* Here we define the magic numbers that this dynamic loader should accept
+--- a/ldso/ldso/sparc/elfinterp.c
++++ b/ldso/ldso/sparc/elfinterp.c
+@@ -93,6 +93,8 @@
+ 	{
+ 		got_addr[1] = (char *) (OPCODE_SETHI_G1 | (((unsigned int) new_addr >> 10) & 0x3fffff));
+ 		got_addr[2] = (char *) (OPCODE_JMP_G1 | ((unsigned int) new_addr & 0x3ff));
++		SPARC_IFLUSH(&got_addr[1]);
++		SPARC_IFLUSH(&got_addr[2]);
+ 	}
+ 
+ 	return (unsigned long)new_addr;
+@@ -220,6 +222,7 @@
+ 			else
+ 				symbol_addr += rpnt->r_addend;
+ 			*reloc_addr = (*reloc_addr & ~0x3ff) | (symbol_addr & 0x3ff);
++			SPARC_IFLUSH(reloc_addr);
+ 			break;
+ 
+ 		case R_SPARC_GLOB_DAT:
+@@ -230,6 +233,8 @@
+ 		case R_SPARC_JMP_SLOT:
+ 			reloc_addr[1] = OPCODE_SETHI_G1 | (( symbol_addr >> 10 ) & 0x3fffff);
+ 			reloc_addr[2] = OPCODE_JMP_G1 | ( symbol_addr & 0x3ff );
++			SPARC_IFLUSH(&reloc_addr[1]);
++			SPARC_IFLUSH(&reloc_addr[2]);
+ 			break;
+ 
+ 		case R_SPARC_RELATIVE:
+@@ -239,6 +244,7 @@
+ 		case R_SPARC_WDISP30:
+ 			*reloc_addr = (*reloc_addr & 0xc0000000)|
+ 			         ((symbol_addr - (unsigned int) reloc_addr) >> 2);
++			SPARC_IFLUSH(reloc_addr);
+ 			break;
+ 
+ 		case R_SPARC_HI22:
+@@ -247,6 +253,7 @@
+ 			else
+ 				symbol_addr += rpnt->r_addend;
+ 			*reloc_addr = (*reloc_addr & 0xffc00000) | (symbol_addr >> 10);
++			SPARC_IFLUSH(reloc_addr);
+ 			break;
+ 
+ 		case R_SPARC_COPY:

@@ -2,6 +2,7 @@
 # que readynas_ng_defconfig, sans paquets ni noyau. Résultat : archive SDK
 # relocalisable publiée dans les releases GitHub et utilisée par
 # readynas_ng_rapide_defconfig.
+BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_READYNAS_NG_PATH)/board/readynas-duo-v1/patches"
 BR2_sparc=y
 BR2_sparc_v7=y
 BR2_DL_DIR="$(BR2_EXTERNAL_READYNAS_NG_PATH)/dl"
