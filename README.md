@@ -69,7 +69,7 @@ l'ancienne PLT (segfaults dans `_dl_linux_resolver`).
 ### Chaîne précompilée (construction rapide)
 
 La chaîne précompilée est publiée dans la release GitHub
-[`toolchain-v7-2026.08.1`](https://github.com/beudbeud/ReadyNasNextGen/releases/tag/toolchain-v7-2026.08.1),
+[`toolchain-v7-2026.08.1-r2`](https://github.com/beudbeud/ReadyNasNextGen/releases/tag/toolchain-v7-2026.08.1-r2),
 avec ses sources (legal-info) pour la conformité GPL/LGPL et les sommes SHA256 :
 
 ```sh

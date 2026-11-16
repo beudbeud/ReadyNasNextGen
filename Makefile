@@ -54,7 +54,7 @@ $(O)/.config: $(EXTERNAL)/configs/$(DEFCONFIG) | buildroot-patch
 
 # Construction « rapide » : même système avec la chaîne précompilée
 # (readynas_ng_rapide_defconfig), dans output-rapide/. La chaîne est téléchargée
-# depuis la release toolchain-v7-2026.08.1, ou prise dans TOOLCHAIN_ARCHIVE=…
+# depuis la release toolchain-v7-2026.08.1-r2, ou prise dans TOOLCHAIN_ARCHIVE=…
 # (archive locale de « make toolchain-sdk »).
 .PHONY: rapide toolchain-sdk
 TC_URL := $(shell sed -n 's/^BR2_TOOLCHAIN_EXTERNAL_URL="\(.*\)"/\1/p' \

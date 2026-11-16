@@ -1,0 +1,4 @@
+# Chaîne précompilée de la release toolchain-v7-2026.08.1-r2 (ld.so corrigé).
+# Même nom de fichier que la révision 1 : l empreinte force le retéléchargement
+# d une ancienne archive restée dans dl/.
+sha256  87c0051fd52a2a0696d16cbaacde20faff4894240772602a9b35e4972566dbb6  sparc-v7-readynas-linux-uclibc_sdk-buildroot-2026.08.1.tar.xz
