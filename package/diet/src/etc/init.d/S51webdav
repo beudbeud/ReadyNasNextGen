@@ -1,0 +1,28 @@
+#!/bin/sh
+# WebDAV des utilisateurs : seconde instance lighttpd sous l'utilisateur nas
+# (fichiers jamais créés en root), sur 127.0.0.1:8081, derrière le lighttpd
+# principal (https://<nas>/webdav/, mod_proxy). Conf /etc/lighttpd/webdav.conf
+# générée par l'API DIET ; mots de passe dans /etc/lighttpd/htpasswd-users.
+# Pas de démarrage si SVC_WEBDAV=0 dans /etc/diet.conf.
+PID=/var/run/lighttpd-webdav.pid
+start() {
+	grep -qs '^SVC_WEBDAV=0' /etc/diet.conf && { echo "webdav: disabled (/etc/diet.conf)"; return 0; }
+	# base des verrous et propriétés WebDAV, mots de passe lisibles par nas
+	mkdir -p /var/lib/lighttpd-webdav && chown -R nas:nas /var/lib/lighttpd-webdav	# base aussi ouverte par lighttpd -tt (root)
+	[ -e /etc/lighttpd/htpasswd-users ] || ( umask 077; : > /etc/lighttpd/htpasswd-users )
+	chown root:nas /etc/lighttpd/htpasswd-users && chmod 640 /etc/lighttpd/htpasswd-users
+	printf "Starting lighttpd (WebDAV): "
+	umask 002	# fichiers et dossiers modifiables par le groupe (groupe personnel, users)
+	start-stop-daemon -S -q -p $PID -x /usr/sbin/lighttpd -- -f /etc/lighttpd/webdav.conf && echo OK || echo FAIL
+}
+stop() {
+	printf "Stopping lighttpd (WebDAV): "
+	start-stop-daemon -K -q -p $PID && echo OK || echo FAIL
+	rm -f $PID	# lighttpd (nas) ne peut pas l'effacer lui-même
+}
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart|reload) stop; sleep 1; start ;;
+	*) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

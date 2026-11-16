@@ -12,6 +12,13 @@ DIET_SITE_METHOD = local
 DIET_LICENSE = GPL-2.0
 DIET_DEPENDENCIES = busybox lighttpd mbedtls ksmbd-tools nfs-utils mdadm
 
+# Compte système de l'instance lighttpd WebDAV (S51webdav) : les fichiers
+# déposés par WebDAV lui appartiennent, jamais à root ; il est membre du groupe
+# personnel de chaque utilisateur (ajouté par l'API).
+define DIET_USERS
+	nas -1 nas -1 * - - - DIET WebDAV
+endef
+
 # Applets busybox utilisés par les scripts, absents du busybox.config par défaut
 define DIET_BUSYBOX_CONFIG_FIXUPS
 	$(call KCONFIG_ENABLE_OPT,CONFIG_NTPD)

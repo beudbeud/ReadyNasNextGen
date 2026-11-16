@@ -79,6 +79,9 @@ select{font:inherit;padding:7px 9px;border-radius:8px;border:1px solid var(--lin
 .card.wide{grid-column:1/-1}
 .sp{flex:1}
 .page{display:none}.page.act{display:block}
+dialog{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:12px;max-width:min(680px,94vw);padding:16px}
+dialog::backdrop{background:#000a}
+dialog h3{margin:0 0 8px;font-size:16px}
 @media (max-width:520px){.bays{grid-template-columns:1fr}}
 </style>
 </head>
@@ -116,6 +119,8 @@ select{font:inherit;padding:7px 9px;border-radius:8px;border:1px solid var(--lin
         <div class="big" id="cfree">–</div><div class="small" id="cfreet">libre</div>
         <div class="bar" id="cbarw"><i id="cbar"></i></div>
         <div id="md"></div>
+        <div id="xr" class="small" style="margin-top:8px"></div>
+        <div class="btns" id="xrb" style="margin-top:8px"></div>
         <div class="row small" style="margin-top:8px"><span>Lecture <b id="rd">–</b></span><span>Écriture <b id="wr">–</b></span></div>
       </div>
       <div class="card"><h2>Réseau et services</h2>
@@ -161,6 +166,7 @@ select{font:inherit;padding:7px 9px;border-radius:8px;border:1px solid var(--lin
       </form>
       <p class="small" style="margin-bottom:0">Ces comptes servent à ouvrir les partages qui ne sont pas « sans mot de passe ».
         Saisir un nom existant change son mot de passe. Supprimer un compte ne touche pas à ses fichiers.</p>
+      <p class="small" style="margin-bottom:0">Le même mot de passe ouvre WebDAV et rsync (dossier personnel /c/home/nom et partages). Un compte créé avant doit redéfinir son mot de passe.</p>
     </div>
     <div class="card" style="max-width:760px;margin-top:12px">
       <h2>Exports NFS</h2>
@@ -172,6 +178,11 @@ select{font:inherit;padding:7px 9px;border-radius:8px;border:1px solid var(--lin
         <button class="b pri" type="submit">Exporter</button>
       </form>
       <p class="small" style="margin-bottom:0">Le dossier doit exister (un partage SMB le crée). Les modifications sont appliquées tout de suite (exportfs -ra).</p>
+    </div>
+    <div class="card" style="max-width:760px;margin-top:12px">
+      <h2>Services</h2>
+      <div id="svl"></div>
+      <p class="small" style="margin-bottom:0">Un service arrêté ici reste arrêté après un redémarrage du NAS.</p>
     </div>
   </section>
 
@@ -225,6 +236,7 @@ select{font:inherit;padding:7px 9px;border-radius:8px;border:1px solid var(--lin
           <option value="diet">Journal DIET</option>
           <option value="messages">Journal système</option>
           <option value="dmesg">Noyau (dmesg)</option>
+          <option value="stockage">Journal du stockage</option>
         </select>
         <button class="b" id="logr">Recharger</button>
         <span class="small" style="margin-left:auto">Rapport SMART (réveille le disque) :</span>
@@ -237,6 +249,16 @@ select{font:inherit;padding:7px 9px;border-radius:8px;border:1px solid var(--lin
   </section>
 </div>
 <div class="toast" id="toast"></div>
+<dialog id="wiz"><form method="dialog">
+  <h3 id="wizt"></h3>
+  <p class="small" id="wizw" style="color:var(--bad)"></p>
+  <div class="btns" id="wizd"></div>
+  <button class="b" type="button" id="wizp">Afficher les commandes (essai à blanc)</button>
+  <pre id="wizo" style="display:none"></pre>
+  <p><label><input type="checkbox" id="wizc"> J’ai compris que les disques désignés seront effacés et que le retour au X-RAID et à RAIDiator ne sera plus possible.</label></p>
+  <p class="small"><span id="wizl"></span><br><input class="inp" id="wizi" autocomplete="off" spellcheck="false" style="width:100%"></p>
+  <div class="btns"><span class="sp"></span><button class="b" value="annuler">Annuler</button><button class="b danger" type="button" id="wizgo" disabled>Lancer</button></div>
+</form></dialog>
 <div class="overlay" id="ov"><div id="ovt"></div></div>
 
 <script>
@@ -414,7 +436,44 @@ const I18N = {
   "RAID :": ["RAID:", "RAID:"],
   "lecture de l’état de {0}…": ["lese Zustand von {0} …", "reading the state of {0}…"],
   "en panne": ["ausgefallen", "failed"],
-  "Ventilateur arrêté ? {0} tr/min": ["Lüfter steht? {0} U/min", "Fan stopped? {0} rpm"]
+  "Ventilateur arrêté ? {0} tr/min": ["Lüfter steht? {0} U/min", "Fan stopped? {0} rpm"],
+  "Afficher les commandes (essai à blanc)": ["Befehle anzeigen (Probelauf)", "Show the commands (dry run)"],
+  "J’ai compris que les disques désignés seront effacés et que le retour au X-RAID et à RAIDiator ne sera plus possible.": ["Mir ist klar, dass die gewählten Platten gelöscht werden und keine Rückkehr zu X-RAID und RAIDiator mehr möglich ist.", "I understand that the chosen disks will be erased and that going back to X-RAID and RAIDiator will no longer be possible."],
+  "Annuler": ["Abbrechen", "Cancel"], "Lancer": ["Starten", "Start"],
+  "Mode": ["Modus", "Mode"], "X-RAID, lecture et écriture": ["X-RAID, Lesen und Schreiben", "X-RAID, read and write"],
+  "X-RAID, lecture seule": ["X-RAID, nur Lesen", "X-RAID, read-only"], "RAID md": ["RAID md", "md RAID"], "aucun volume": ["kein Volume", "no volume"],
+  "Section {0}": ["Bereich {0}", "Section {0}"], "synchronisée": ["synchron", "in sync"], "synchronisation inachevée": ["Synchronisation unvollständig", "sync unfinished"],
+  "Vérification du miroir": ["Spiegelprüfung", "Mirror check"], "jamais faite": ["nie", "never done"], "en cours {0} %": ["läuft {0} %", "running {0} %"],
+  "identique le {0}": ["identisch am {0}", "identical on {0}"], "{0} zones différentes": ["{0} Bereiche verschieden", "{0} zones differ"], "erreurs de lecture": ["Lesefehler", "read errors"],
+  "Migration vers md : {0}": ["Umstellung auf md: {0}", "Migration to md: {0}"],
+  "Vérifier le miroir": ["Spiegel prüfen", "Check the mirror"], "Migrer vers md": ["Auf md umstellen", "Migrate to md"],
+  "Terminer la migration": ["Umstellung abschließen", "Finish the migration"], "Créer un RAID md": ["md-RAID anlegen", "Create an md RAID"],
+  "Journal du stockage": ["Speicherprotokoll", "Storage log"],
+  "Tapez « {0} » pour confirmer :": ["„{0}“ eintippen zum Bestätigen:", "Type “{0}” to confirm:"],
+  "Lire tout le contenu des deux disques et les comparer (lecture seule, plusieurs heures) ?": ["Beide Platten vollständig lesen und vergleichen (nur Lesen, mehrere Stunden)?", "Read both disks entirely and compare them (read-only, several hours)?"],
+  "Le disque miroir est retiré du X-RAID et reformaté en md ; les données sont recopiées depuis le disque base, puis vérifiées. Le disque base n’est effacé qu’à l’étape « Terminer la migration ».": ["Die Spiegelplatte verlässt das X-RAID und wird als md formatiert; die Daten werden von der Basisplatte kopiert und geprüft. Die Basisplatte wird erst bei „Umstellung abschließen“ gelöscht.", "The mirror disk leaves the X-RAID and is reformatted as md; the data is copied from the base disk, then checked. The base disk is only erased at “Finish the migration”."],
+  "Services": ["Dienste", "Services"],
+  "Un service arrêté ici reste arrêté après un redémarrage du NAS.": ["Ein hier gestoppter Dienst bleibt auch nach einem Neustart des NAS gestoppt.", "A service stopped here stays stopped after the NAS restarts."],
+  "en marche": ["läuft", "running"], "arrêté": ["gestoppt", "stopped"], "activé": ["eingeschaltet", "enabled"],
+  "Fichiers indexés : {0} audio, {1} vidéo, {2} images": ["Indizierte Dateien: {0} Audio, {1} Video, {2} Bilder", "Indexed files: {0} audio, {1} video, {2} images"],
+  "base {0}": ["Datenbank {0}", "database {0}"],
+  "Nom affiché sur les lecteurs": ["Name auf den Abspielgeräten", "Name shown on players"],
+  "Un dossier par ligne, sous /c ; préfixe facultatif A, (audio) V, (vidéo) ou P, (images), par exemple V,/c/films.": ["Ein Ordner pro Zeile, unter /c; optionales Präfix A, (Audio) V, (Video) oder P, (Bilder), zum Beispiel V,/c/filme.", "One folder per line, under /c; optional prefix A, (audio) V, (video) or P, (images), for example V,/c/movies."],
+  "Réindexer": ["Neu indizieren", "Rescan"],
+  "Effacer la base et tout réindexer ? Cela peut prendre longtemps.": ["Datenbank löschen und alles neu indizieren? Das kann lange dauern.", "Erase the database and rescan everything? This can take a long time."],
+  "Annonce {0} sur le réseau local (SMB, interface web, WebDAV, SSH, rsync) ; le nom suit celui du NAS.": ["Meldet {0} im lokalen Netz an (SMB, Weboberfläche, WebDAV, SSH, rsync); der Name folgt dem des NAS.", "Announces {0} on the local network (SMB, web interface, WebDAV, SSH, rsync); the name follows the NAS name."],
+  "Compte « sauvegarde » : mot de passe défini.": ["Konto „sauvegarde“: Passwort gesetzt.", "Account “sauvegarde”: password set."],
+  "Compte « sauvegarde » : aucun mot de passe, accès refusé.": ["Konto „sauvegarde“: kein Passwort, Zugriff verweigert.", "Account “sauvegarde”: no password, access denied."],
+  "Définir le mot de passe": ["Passwort setzen", "Set the password"],
+  "dossier": ["ordner", "folder"], "Copier": ["Kopieren", "Copy"], "Copié": ["Kopiert", "Copied"],
+  "Adresses :": ["Adressen:", "Addresses:"], "utilisateur": ["benutzer", "user"], "partage": ["freigabe", "share"], "(dossier personnel)": ["(persönlicher Ordner)", "(personal folder)"],
+  "Comptes des utilisateurs (pas celui de cette interface) ; fichiers créés sous le compte « nas ».": ["Konten der Benutzer (nicht das dieser Oberfläche); Dateien werden unter dem Konto „nas“ angelegt.", "User accounts (not the one of this interface); files are created under the “nas” account."],
+  "Un module par utilisateur (son dossier personnel, sous son compte) et un par partage en écriture ; adresses dans la liste des utilisateurs.": ["Ein Modul pro Benutzer (sein persönlicher Ordner, unter seinem Konto) und eines pro beschreibbarer Freigabe; Adressen in der Benutzerliste.", "One module per user (their personal folder, under their account) and one per writable share; addresses in the user list."],
+  "Module « c » : tout /c pour le compte « sauvegarde » de l’administrateur (en root)": ["Modul „c“: ganz /c für das Konto „sauvegarde“ des Administrators (als root)", "Module “c”: all of /c for the administrator’s “sauvegarde” account (as root)"],
+  "mot de passe à redéfinir pour activer WebDAV/rsync": ["Passwort neu setzen, um WebDAV/rsync zu aktivieren", "set the password again to enable WebDAV/rsync"], "actif": ["aktiv", "active"],
+  "Le même mot de passe ouvre WebDAV et rsync (dossier personnel /c/home/nom et partages). Un compte créé avant doit redéfinir son mot de passe.": ["Dasselbe Passwort öffnet WebDAV und rsync (persönlicher Ordner /c/home/name und Freigaben). Ein früher angelegtes Konto muss sein Passwort neu setzen.", "The same password opens WebDAV and rsync (personal folder /c/home/name and shares). An account created earlier must set its password again."],
+  "Le dernier disque X-RAID ({0}) est EFFACÉ et rejoint le md (resynchronisation).": ["Die letzte X-RAID-Platte ({0}) wird GELÖSCHT und kommt ins md (Resynchronisation).", "The last X-RAID disk ({0}) is ERASED and joins the md (resync)."],
+  "TOUT le contenu des disques cochés est EFFACÉ (y compris un X-RAID) ; un RAID 1 md neuf est créé.": ["Der GESAMTE Inhalt der gewählten Platten wird GELÖSCHT (auch ein X-RAID); ein neues md-RAID 1 wird angelegt.", "ALL content of the ticked disks is ERASED (an X-RAID included); a new md RAID 1 is created."]
 };
 function t(s, ...a){
   const r = LANG === 'fr' ? s : ((I18N[s] || [])[LANG === 'de' ? 0 : 1] ?? s);
@@ -558,9 +617,73 @@ function render(s){
     $('#mdb').innerHTML = s.md.map(m=>`<button class="b" data-md="${esc(m.name)}">${esc(m.name)}</button>`).join('');
 }
 
+// Stockage : X-RAID (compatibilité) ou md, cohérence du miroir, assistants (nas-raid)
+let stk = null;
+const XRM = {'xraid-rw':'X-RAID, lecture et écriture', 'xraid-ro':'X-RAID, lecture seule', 'md':'RAID md', 'aucun':'aucun volume'};
+async function loadStk(){
+  try{ stk = await get('stockage'); }catch(e){ return; }
+  if(!stk || stk.mode==='absent'){ $('#xr').innerHTML=''; $('#xrb').innerHTML=''; return; }
+  const x = stk.xraid || {}, v = stk.verif || {}, m = stk.migration || {};
+  const ok = stk.mode==='md' || stk.mode==='xraid-rw';
+  let h = `<div class="row"><span>${t('Mode')}</span><b style="color:var(--${ok?'ok':'warn'})">${esc(t(XRM[stk.mode]||stk.mode))}</b></div>`;
+  if(stk.mode!=='md' && x.raisons) h += x.raisons.map(r=>`<div>· ${esc(r.texte)}</div>`).join('');
+  // raisons ajoutées par nas-raid (les autres viennent de xraid-info, déjà en texte)
+  const NR = {rw_desactive:'écriture désactivée : XRAID_RW=oui dans /etc/nas-raid.conf', arret_brutal_linux:'arrêt brutal sous Linux : vérifier le miroir',
+    arret_brutal_verifie:'arrêt brutal de RAIDiator, miroir vérifié depuis', migration_en_cours:'migration vers md en cours'};
+  if(stk.mode!=='md') (stk.raisons||'').split(' ').filter(r=>NR[r]).forEach(r=>{ h += `<div>· ${esc(NR[r])}</div>`; });
+  if(stk.mode!=='md') (x.sections||[]).forEach((s,i)=>{ h += `<div class="row"><span>${t('Section {0}', i)}</span><span>${kb(s.secteurs/2)} · ${s.init_mark ? t('synchronisation inachevée') : t('synchronisée')}</span></div>`; });
+  if(x.miroir || v.etat!=='jamais'){
+    const d = v.date ? new Date(v.date*1000).toLocaleDateString(LANG) : '';
+    const vs = v.etat==='en_cours' ? t('en cours {0} %', v.progression ?? 0) : v.etat==='ok' ? t('identique le {0}', d) : v.etat==='differences' ? t('{0} zones différentes', v.zones) : v.etat==='erreurs' ? t('erreurs de lecture') : t('jamais faite');
+    h += `<div class="row"><span>${t('Vérification du miroir')}</span><span style="color:var(--${v.etat==='ok'?'ok':v.etat==='jamais'||v.etat==='en_cours'?'mute':'bad'})">${esc(vs)}</span></div>`;
+  }
+  if(m.etape) h += `<div>${esc(t('Migration vers md : {0}', m.etape + (m.copie!=null ? ' ('+m.copie+' %)' : '')))}</div>`;
+  $('#xr').innerHTML = h;
+  const b = [];
+  if(x.base && x.miroir && v.etat!=='en_cours') b.push(`<button class="b" data-x="verif">${t('Vérifier le miroir')}</button>`);
+  if(stk.mode==='xraid-rw' && !m.etape) b.push(`<button class="b danger" data-x="migrer">${t('Migrer vers md')}</button>`);
+  if(m.etape==='copie_verifiee') b.push(`<button class="b danger" data-x="finaliser">${t('Terminer la migration')}</button>`);
+  if(!stk.md && !m.etape) b.push(`<button class="b danger" data-x="creer">${t('Créer un RAID md')}</button>`);
+  b.push(`<button class="b" data-x="journal">${t('Journal du stockage')}</button>`);
+  $('#xrb').innerHTML = b.join('');
+}
+// Assistant : essai à blanc, case à cocher ET phrase tapée (double confirmation)
+let wizOp = '', wizPhrase = () => '';
+function wizCheck(){ $('#wizgo').disabled = !($('#wizc').checked && $('#wizi').value.trim() === wizPhrase()); $('#wizl').textContent = t('Tapez « {0} » pour confirmer :', wizPhrase()); }
+function wizDisks(){ return [...document.querySelectorAll('#wizd input:checked')].map(i=>i.value); }
+function wizard(op, title, warn, phrase){
+  wizOp = op; wizPhrase = phrase;
+  $('#wizt').textContent = title; $('#wizw').textContent = warn;
+  $('#wizd').innerHTML = op==='creer' ? (last ? last.disks : []).map(d=>`<label class="chip"><input type="checkbox" value="${esc(d.dev)}"> ${esc(t('Baie {0}', d.bay))} · ${esc(d.dev)} · ${d.gb} ${t('Go')}</label>`).join('') : '';
+  $('#wizo').style.display = 'none'; $('#wizc').checked = false; $('#wizi').value = '';
+  wizCheck(); $('#wiz').showModal();
+}
+function wizBody(extra){ return 'op='+wizOp+'&d='+encodeURIComponent(wizDisks().join(','))+(extra||''); }
+$('#wizd').onchange = wizCheck; $('#wizc').onchange = wizCheck; $('#wizi').oninput = wizCheck;
+$('#wizp').onclick = async ()=>{
+  const o = $('#wizo'); o.style.display = ''; o.textContent = t('chargement…');
+  try{ const r = await fetch(API+'?a=raid_plan&l='+LANG, {method:'POST', headers:{'X-Diet':'1','Content-Type':'application/x-www-form-urlencoded'}, body: wizBody()}); o.textContent = await r.text(); }
+  catch(e){ o.textContent = t('Erreur : {0}', e.message); }
+};
+$('#wizgo').onclick = async ()=>{
+  $('#wizgo').disabled = true;
+  try{ const r = await post('raid_lancer', wizBody('&confirm='+encodeURIComponent($('#wizi').value.trim())+'&oui=1')); toast(r.msg); $('#wiz').close(); }
+  catch(e){ toast(t('Erreur : {0}', e.message)); wizCheck(); }
+  setTimeout(loadStk, 2000);
+};
+$('#xrb').onclick = async ev=>{
+  const a = ev.target.dataset.x; if(!a) return;
+  if(a==='verif'){ if(!confirm(t('Lire tout le contenu des deux disques et les comparer (lecture seule, plusieurs heures) ?'))) return;
+    try{ toast((await post('raid_verifier')).msg); }catch(e){ toast(t('Erreur : {0}', e.message)); } setTimeout(loadStk, 2000); }
+  else if(a==='migrer') wizard('migrer', t('Migrer vers md'), t('Le disque miroir est retiré du X-RAID et reformaté en md ; les données sont recopiées depuis le disque base, puis vérifiées. Le disque base n’est effacé qu’à l’étape « Terminer la migration ».'), ()=>'MIGRER');
+  else if(a==='finaliser') wizard('finaliser', t('Terminer la migration'), t('Le dernier disque X-RAID ({0}) est EFFACÉ et rejoint le md (resynchronisation).', stk.migration.a), ()=>'EFFACER '+stk.migration.a);
+  else if(a==='creer') wizard('creer', t('Créer un RAID md'), t('TOUT le contenu des disques cochés est EFFACÉ (y compris un X-RAID) ; un RAID 1 md neuf est créé.'), ()=>['EFFACER', ...wizDisks()].join(' '));
+  else if(a==='journal'){ $('#logf').value = 'stockage'; document.querySelector('nav button[data-p=log]').click(); }
+};
+
 async function poll(){
   clearTimeout(timer);
-  try { last = await get('status'); render(last); if(polls++ % 12 === 0) loadHist(); }
+  try { last = await get('status'); render(last); if(polls++ % 12 === 0){ loadHist(); loadStk(); } }
   catch(e){ $('#upd').textContent = t('pas de connexion'); }
   if(document.visibilityState==='visible') timer = setTimeout(poll, 5000);
 }
@@ -573,7 +696,7 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('act',x===b));
   document.querySelectorAll('.page').forEach(p=>p.classList.toggle('act',p.id==='p-'+b.dataset.p));
   if(b.dataset.p==='cfg'){ loadCfg(); loadSys(); }
-  if(b.dataset.p==='shares'){ loadShares(); loadUsers(); loadNfs(); }
+  if(b.dataset.p==='shares'){ loadShares(); loadUsers(); loadNfs(); loadSvc(); }
   if(b.dataset.p==='log') loadLog();
 });
 
@@ -673,11 +796,22 @@ $('#shl').onclick = ev=>{
 $('#shadd').onsubmit = ev=>{ ev.preventDefault(); const i = ev.target.querySelector('input'); shareDo('share_add', 'name='+encodeURIComponent(i.value.trim())); i.value=''; };
 
 // Utilisateurs
+// WebDAV et rsync : mêmes comptes ; un compte créé avant n'a pas encore d'entrée
+function davInfo(u){
+  if(!u.dav) return `<span class="small" style="color:var(--warn)">${t('mot de passe à redéfinir pour activer WebDAV/rsync')}</span>`;
+  const h = esc(((last && last.host) || 'nas').toLowerCase())+'.local', n = esc(u.name);
+  const cp = v => `<code class="small">${v}</code> <button class="b" style="padding:2px 8px" data-copy="${v}">${t('Copier')}</button>`;
+  return `<span class="small">WebDAV/rsync : ${t('actif')}</span><div class="btns small" style="margin-top:4px;align-items:center">${cp(`https://${h}/webdav/${n}/`)} ${cp(`rsync -av ${esc(t('dossier'))}/ ${n}@${h}::${n}/`)}</div>`;
+}
+document.addEventListener('click', ev=>{
+  const v = ev.target.dataset && ev.target.dataset.copy; if(v==null) return;
+  try{ navigator.clipboard.writeText(v).then(()=>toast(t('Copié'))); }catch(e){ toast(v); }
+});
 async function loadUsers(){
   try{
     const l = await get('users');
     $('#usl').innerHTML = l.length ? l.map(u=>`<div class="row usrow" data-name="${esc(u.name)}" style="align-items:center;padding:6px 0;border-bottom:1px solid var(--line)">
-      <span><b>${esc(u.name)}</b>${u.smb ? '' : ' <span class="small">· '+t('pas de mot de passe SMB')+'</span>'}</span>
+      <span><b>${esc(u.name)}</b>${u.smb ? '' : ' <span class="small">· '+t('pas de mot de passe SMB')+'</span>'}<br>${davInfo(u)}</span>
       <span class="btns">${u.uid >= 1000 ? '<button class="b danger" data-del="1">'+t('Supprimer')+'</button>' : '<span class="small">'+t('compte système')+'</span>'}</span></div>`).join('') : '<p class="small">'+t('Aucun utilisateur.')+'</p>';
   }catch(e){ toast(t('Erreur : {0}', e.message)); }
 }
@@ -716,6 +850,51 @@ $('#nfl').onclick = ev=>{
 $('#nfadd').onsubmit = ev=>{
   ev.preventDefault(); const f = ev.target;
   nfsDo('nfs_add', 'path='+encodeURIComponent(f.path.value.trim())+'&client='+encodeURIComponent(f.client.value.trim())+'&ro='+(f.ro.checked?1:0));
+};
+
+// Services : MiniDLNA, Avahi, rsync, WebDAV (marche/arrêt gardé au redémarrage)
+async function loadSvc(){
+  let s; try{ s = await get('services'); }catch(e){ toast(t('Erreur : {0}', e.message)); return; }
+  const h = esc(s.host)+'.local', d = s.minidlna, r = s.rsync;
+  const row = (k, title, on, run, body) => `<div data-s="${k}" style="padding:10px 0;border-bottom:1px solid var(--line)">
+    <div class="row" style="align-items:center"><b>${title}</b><span class="btns" style="align-items:center">
+      <span class="chip"><span class="led ${run?'on':on?'dn':''}"></span>${run?t('en marche'):t('arrêté')}</span>
+      <label class="small"><input type="checkbox" data-on ${on?'checked':''}> ${t('activé')}</label></span></div>
+    <div class="small" style="margin-top:6px">${body}</div></div>`;
+  const inp = 'class="inp" style="flex:1;min-width:200px"';
+  let info = d.files ? t('Fichiers indexés : {0} audio, {1} vidéo, {2} images', ...d.files) : '';
+  if(d.db!=null) info += (info?' · ':'')+t('base {0}', kb(d.db/1024));
+  $('#svl').innerHTML =
+    row('minidlna', 'MiniDLNA (DLNA/UPnP)', d.on, d.run, `${esc(info)}
+      <div class="btns" style="margin-top:6px"><input ${inp} id="dlname" maxlength="40" value="${esc(d.name)}" title="${t('Nom affiché sur les lecteurs')}"></div>
+      <textarea class="inp" id="dldirs" rows="3" spellcheck="false" style="width:100%;margin-top:6px;font:12.5px ui-monospace,monospace">${esc(d.dirs.join('\n'))}</textarea>
+      ${t('Un dossier par ligne, sous /c ; préfixe facultatif A, (audio) V, (vidéo) ou P, (images), par exemple V,/c/films.')}
+      <div class="btns" style="margin-top:6px"><button class="b pri" data-b="dlna_set">${t('Enregistrer')}</button><button class="b" data-b="dlna_scan" ${d.on?'':'disabled'}>${t('Réindexer')}</button></div>`) +
+    row('avahi', 'Avahi (Bonjour)', s.avahi.on, s.avahi.run, t('Annonce {0} sur le réseau local (SMB, interface web, WebDAV, SSH, rsync) ; le nom suit celui du NAS.', h)) +
+    row('rsync', 'rsync', r.on, r.run, `${t('Un module par utilisateur (son dossier personnel, sous son compte) et un par partage en écriture ; adresses dans la liste des utilisateurs.')}
+      <div style="margin-top:6px"><label><input type="checkbox" data-rc ${r.c?'checked':''}> ${t('Module « c » : tout /c pour le compte « sauvegarde » de l’administrateur (en root)')}</label></div>
+      ${r.c ? `<div>${r.pw ? t('Compte « sauvegarde » : mot de passe défini.') : t('Compte « sauvegarde » : aucun mot de passe, accès refusé.')}</div>
+      <div class="btns" style="margin-top:6px"><input ${inp} type="password" id="rspw" minlength="6" autocomplete="new-password" placeholder="${t('mot de passe (6 caractères min.)')}">
+        <button class="b" data-b="rsync_pw">${t('Définir le mot de passe')}</button></div>
+      <div class="btns" style="margin-top:6px;align-items:center"><code>rsync -av ${esc(t('dossier'))}/ sauvegarde@${h}::c/sauvegardes/</code>
+        <button class="b" data-copy="rsync -av ${esc(t('dossier'))}/ sauvegarde@${h}::c/sauvegardes/">${t('Copier')}</button></div>` : ''}`) +
+    row('webdav', 'WebDAV', s.webdav.on, s.webdav.run, `${t('Adresses :')} <b>https://${h}/webdav/&lt;${t('utilisateur')}&gt;/</b> ${t('(dossier personnel)')} · <b>https://${h}/webdav/&lt;${t('partage')}&gt;/</b><br>${t('Comptes des utilisateurs (pas celui de cette interface) ; fichiers créés sous le compte « nas ».')}`);
+}
+async function svcDo(a, body){
+  try{ const r = await post(a, body); toast(r.msg || t('fait')); }catch(e){ toast(t('Erreur : {0}', e.message)); }
+  setTimeout(loadSvc, a==='svc_set' ? 2500 : 300);
+}
+$('#svl').onchange = ev=>{
+  if('rc' in ev.target.dataset){ svcDo('rsync_c', 'on='+(ev.target.checked?1:0)); return; }
+  if(!('on' in ev.target.dataset)) return;
+  const k = ev.target.closest('[data-s]').dataset.s;
+  svcDo('svc_set', 's='+k+'&on='+(ev.target.checked?1:0));
+};
+$('#svl').onclick = ev=>{
+  const a = ev.target.dataset.b; if(!a) return;
+  if(a==='dlna_set') svcDo(a, 'name='+encodeURIComponent($('#dlname').value.trim())+'&dirs='+encodeURIComponent($('#dldirs').value));
+  else if(a==='dlna_scan'){ if(confirm(t('Effacer la base et tout réindexer ? Cela peut prendre longtemps.'))) svcDo(a); }
+  else if(a==='rsync_pw'){ const p = $('#rspw'); svcDo(a, 'pw='+encodeURIComponent(p.value)); p.value=''; }
 };
 
 // Protokolle
