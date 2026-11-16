@@ -1,0 +1,548 @@
+#!/bin/sh
+# nas-raid : stockage du ReadyNAS Duo v1 sous Linux 6.18 (docs/XRAID.md).
+#
+# Lecture et écriture d'un X-RAID existant SANS le convertir (compatibilité),
+# puis, à la demande, bascule vers md (RAID 1 logiciel de Linux).
+#
+#   nas-raid etat [--json] [--rafraichir]  mode, sections, cohérence, migration
+#   nas-raid monter | demonter             au démarrage / à l'arrêt (S35stockage)
+#   nas-raid verifier                      compare les deux disques X-RAID (long)
+#   nas-raid reparer                       recopie la base sur le miroir (md repair)
+#   nas-raid migrer [--finaliser]          X-RAID -> md sur place (2 disques)
+#   nas-raid creer DISQUE [DISQUE2]        md RAID 1 neuf (EFFACE les disques)
+#   nas-raid ajouter DISQUE                ajoute un disque au md (remplacement)
+#   nas-raid agrandir                      md, LVM et ext4 à la taille des disques
+# Options : --a-blanc (affiche les commandes sans rien faire),
+#           --confirmer PHRASE et --oui (double confirmation des actions qui
+#           écrivent sur les disques), --sans-smart (migration sans SMART lisible).
+#
+# Compatibilité X-RAID : jamais de superbloc md, jamais d'écriture dans la zone
+# protégée (fin de disque, au-delà de V) ni dans le superbloc X-RAID. Chaque
+# section devient deux dm-linear (base, miroir) assemblés par « mdadm --build »
+# (RAID 1 sans métadonnées) ; les partitions du disque base sont projetées par
+# dm-linear sur ces md ; LVM (VG c) puis /c par fuse2fs (ext3 à blocs de 16 Ko).
+#
+# Essais sur PC : NAS_RAID_RACINE préfixe /proc, /var, /etc et met
+# $NAS_RAID_RACINE/bin en tête du PATH ; NAS_RAID_DISQUES remplace la
+# liste des disques SATA (images disque).
+set -u
+R=${NAS_RAID_RACINE:-}
+export PATH=${R:+$R/bin:}/bin:/sbin:/usr/bin:/usr/sbin
+ETAT=$R/var/lib/nas-raid		# persistant (clé USB) : marques, migration
+RUN=$R/var/run
+JOURNAL=$ETAT/journal
+DATA=/c
+POINT_MD=/mnt/md			# md monté ici pendant la migration
+MD=/dev/md/donnees
+VG_MD=donnees
+LV_MD=c
+XRAID_VG=c				# groupe LVM créé par RAIDiator, LV « c »
+XRAID_LV=c
+FUSE2FS_OPTS=allow_other
+XRAID_RW=non				# « oui » : X-RAID en écriture si tous les garde-fous passent
+ECHANTILLONS=256			# blocs de 64 Kio comparés par section au montage
+VERIF_MAX_JOURS=7			# âge maximal d'une vérification avant migration
+VERIF_RSYNC=-c				# vérification de la copie par sommes (vide = taille+date)
+[ -r "$R/etc/nas-raid.conf" ] && . "$R/etc/nas-raid.conf"
+
+LVM_XR="devices { filter = [ \"a|^/dev/mapper/xr-p|\", \"r|.*|\" ] use_devicesfile = 0 } global { metadata_read_only = 1 }"
+LVM_XR_RO="$LVM_XR activation { read_only_volume_list = [ \"$XRAID_VG\" ] }"
+LVM_MD="devices { filter = [ \"a|^/dev/md|\", \"r|.*|\" ] use_devicesfile = 0 }"
+
+A_BLANC=; JSON=; CONFIRMER=; OUI=; SANS_SMART=; FINALISER=; RAFRAICHIR=
+CMD=${1:-aide}; [ $# -gt 0 ] && shift
+ARGS=
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--a-blanc) A_BLANC=1 ;;
+	--json) JSON=1 ;;
+	--oui) OUI=1 ;;
+	--sans-smart) SANS_SMART=1 ;;
+	--finaliser) FINALISER=1 ;;
+	--rafraichir) RAFRAICHIR=1 ;;
+	--confirmer) [ $# -ge 2 ] || { echo "--confirmer : phrase manquante" >&2; exit 2; }; CONFIRMER=$2; shift ;;
+	-*) echo "option inconnue : $1" >&2; exit 2 ;;
+	*) case "$1" in *[!A-Za-z0-9/._-]*) echo "nom de disque refusé : $1" >&2; exit 2;; esac
+	   ARGS="$ARGS $1" ;;
+	esac
+	shift
+done
+
+log() {
+	echo "$*" >&2
+	[ -n "$A_BLANC" ] && return 0
+	mkdir -p "$ETAT" && echo "[$(date '+%F %T')] $*" >> "$JOURNAL"
+}
+meurt() { log "ERREUR : $*"; exit 1; }
+# x commande... : affichée (+ ...), exécutée sauf à blanc, notée au journal
+x() {
+	l="+"; for a in "$@"; do case "$a" in *[!A-Za-z0-9/._=,:+-]*|'') l="$l '$a'";; *) l="$l $a";; esac; done
+	echo "$l"
+	[ -n "$A_BLANC" ] && return 0
+	mkdir -p "$ETAT" && echo "[$(date '+%F %T')] $l" >> "$JOURNAL"
+	"$@"
+}
+# x_ : comme x, sans arrêter sur un échec (démontage)
+x_() { x "$@" || log "(échec ignoré : $*)"; }
+ecrire() { [ -n "$A_BLANC" ] || { mkdir -p "${1%/*}" && printf '%s\n' "$2" > "$1"; }; }
+
+# Disques SATA du NAS (libata : /sys/block/sdX/device -> .../ataN/...), pas la clé USB
+disques() {
+	if [ -n "${NAS_RAID_DISQUES:-}" ]; then echo $NAS_RAID_DISQUES; return; fi
+	for b in "$R"/sys/block/sd*; do
+		[ -d "$b" ] || continue
+		case "$(readlink -f "$b/device")" in */ata[0-9]*) echo "/dev/${b##*/}";; esac
+	done
+}
+monte() { awk -v m="$1" '$2 == m { f = 1 } END { exit !f }' "$R/proc/mounts" 2>/dev/null; }
+# le disque doit être un des disques SATA (jamais la clé USB du système)
+disque_sata() { for d in $(disques); do [ "$d" = "$1" ] && return 0; done; meurt "$1 n'est pas un disque SATA du NAS"; }
+secteurs() {	# secteurs d'un disque (XR_Dn de xraid-info, sinon /sys)
+	i=0
+	while [ $i -lt "${XR_NB_DISQUES_LUS:-0}" ]; do
+		eval "set -- \$XR_D$i"; [ "$1" = "$D" ] && { echo "$2"; return; }; i=$((i + 1))
+	done
+	cat "$R/sys/block/${D##*/}/size" 2>/dev/null || echo 0
+}
+
+# analyse X-RAID (variables XR_*) ; $1 = nombre d'échantillons
+analyser() {
+	XR_MODE=aucun; XR_RAISONS=; XR_MD=; XR_BASE=; XR_MIROIR=; XR_LECTURE=
+	XR_NB_SECTIONS=0; XR_NB_PARTS=0; XR_NB_DISQUES_LUS=0; XR_ID=; XR_CTIME=0
+	set -- $(disques)
+	[ $# -gt 0 ] || return 0
+	sortie=$(xraid-info --echantillons "${ECH:-0}" "$@") || meurt "xraid-info a échoué"
+	eval "$sortie"
+}
+
+# Marques persistantes : xraid-sale = assemblé en rw (supprimée à l'arrêt propre,
+# reste après une coupure) ; xraid-verifie = « ID CTIME » d'une vérification
+# complète réussie (accepte alors un superbloc RAIDiator marqué non propre).
+SALE=$ETAT/xraid-sale
+VERIFIE=$ETAT/xraid-verifie
+
+# décide rw/ro en ajoutant nos propres garde-fous à ceux de xraid-info
+decider() {
+	MODE=$XR_MODE; POURQUOI=$XR_RAISONS
+	[ "$MODE" = rw ] || [ "$MODE" = ro ] || { MODE=aucun; return; }
+	if [ "$MODE" = ro ] && [ "$XR_RAISONS" = arret_brutal ] && [ "$(cat "$VERIFIE" 2>/dev/null)" = "$XR_ID $XR_CTIME" ]; then
+		MODE=rw; POURQUOI="arret_brutal_verifie"
+	fi
+	if [ "$MODE" = rw ] && [ -e "$SALE" ]; then
+		MODE=ro; POURQUOI="${POURQUOI:+$POURQUOI }arret_brutal_linux"
+	fi
+	if [ "$MODE" = rw ] && [ -e "$ETAT/migration" ]; then
+		MODE=ro; POURQUOI="${POURQUOI:+$POURQUOI }migration_en_cours"
+	fi
+}
+
+# ---------- assemblage X-RAID ----------
+assembler_xraid() {	# $1 = rw | ro
+	m=$1; i=0
+	[ -n "$A_BLANC" ] || mkdir -p "$POINT"
+	if [ $m = rw ]; then
+		ecrire "$SALE" "$(date +%s)"; [ -n "$A_BLANC" ] || sync
+		while [ $i -lt "$XR_NB_SECTIONS" ]; do
+			eval "set -- \$XR_S$i"
+			x dmsetup create "xr-a-s$i" --table "0 $2 linear $XR_BASE $1" || return 1
+			x dmsetup create "xr-b-s$i" --table "0 $2 linear $XR_MIROIR $1" || return 1
+			# base en premier : source d'un « repair »
+			x mdadm --build "/dev/md1$i" --level=1 --raid-devices=2 --assume-clean \
+				"/dev/mapper/xr-a-s$i" "/dev/mapper/xr-b-s$i" || return 1
+			i=$((i + 1))
+		done
+	fi
+	i=0
+	while [ $i -lt "$XR_NB_PARTS" ]; do
+		eval "set -- \$XR_P$i"	# num début taille type section décalage
+		if [ $m = rw ]; then
+			[ "$5" -ge 0 ] && x dmsetup create "xr-p$1" --table "0 $3 linear /dev/md1$5 $6"
+		else
+			x dmsetup create "xr-p$1" --readonly --table "0 $3 linear $XR_LECTURE $2"
+		fi || return 1
+		i=$((i + 1))
+	done
+	if [ $m = rw ]; then
+		x lvm vgchange -ay --config "$LVM_XR" "$XRAID_VG" || return 1
+		x fuse2fs -o "$FUSE2FS_OPTS" "/dev/mapper/$XRAID_VG-$XRAID_LV" "$POINT" || return 1
+	else
+		x lvm vgchange -ay --config "$LVM_XR_RO" "$XRAID_VG" || return 1
+		x fuse2fs -o "ro,$FUSE2FS_OPTS" "/dev/mapper/$XRAID_VG-$XRAID_LV" "$POINT" || return 1
+	fi
+}
+
+desassembler_xraid() {
+	monte "$DATA" && x_ umount "$DATA"
+	x_ lvm vgchange -an --config "$LVM_XR" "$XRAID_VG"
+	i=0
+	while [ $i -lt "$XR_NB_PARTS" ]; do
+		eval "set -- \$XR_P$i"; x_ dmsetup remove "xr-p$1"; i=$((i + 1))
+	done
+	# un md X-RAID dégradé ([U_]) : les disques divergent, garder la marque « sale »
+	degrade=$(awk '/^md1[0-6] :/ { n = $1 } n && /\[[U_]*_[U_]*\]/ { print n; n = "" }' "$R/proc/mdstat" 2>/dev/null)
+	i=0
+	while [ $i -lt "$XR_NB_SECTIONS" ]; do
+		if [ "$MODE_ACTUEL" = xraid-rw ]; then
+			x_ mdadm --stop "/dev/md1$i"
+			x_ dmsetup remove "xr-a-s$i"; x_ dmsetup remove "xr-b-s$i"
+		fi
+		i=$((i + 1))
+	done
+	if [ "$MODE_ACTUEL" = xraid-rw ]; then
+		if [ -n "$degrade" ]; then log "md X-RAID dégradé ($degrade) : les disques divergent, rw refusé au prochain démarrage"
+		elif [ -z "$A_BLANC" ]; then rm -f "$SALE"; fi
+	fi
+}
+
+monter_md() {	# $1 = point de montage
+	x mdadm --assemble --scan || [ -e "$MD" ] || return 1
+	x lvm vgchange -ay --config "$LVM_MD" "$VG_MD" || return 1
+	x mkdir -p "$1"
+	x mount -t ext4 "/dev/mapper/$VG_MD-$LV_MD" "$1"
+}
+
+mode_actuel() { read -r MODE_ACTUEL _ 2>/dev/null < "$RUN/nas-raid.mode" || MODE_ACTUEL=aucun; }
+etape() { cat "$ETAT/migration" 2>/dev/null | sed -n 's/^etape=//p'; }
+
+monter() {
+	ECH=$ECHANTILLONS; analyser
+	ecrire "$RUN/xraid.json" "$(xraid-info --json $(disques) 2>/dev/null || echo null)"
+	if [ "${XR_MD:-}" = 1 ]; then
+		if [ -e "$ETAT/migration" ]; then
+			log "migration en cours (étape $(etape)) : md sur $POINT_MD, X-RAID en lecture seule sur $DATA"
+			monter_md "$POINT_MD" || log "md : montage impossible"
+		else
+			if monter_md "$DATA"; then ecrire "$RUN/nas-raid.mode" "md"; else ecrire "$RUN/nas-raid.mode" "aucun md_echec"; fi
+			return 0
+		fi
+	fi
+	decider
+	if [ "$MODE" = rw ] && [ "$XRAID_RW" != oui ]; then
+		MODE=ro; POURQUOI="${POURQUOI:+$POURQUOI }rw_desactive"
+	fi
+	POINT=$DATA
+	case "$MODE" in
+	rw|ro)
+		log "X-RAID : montage en $MODE${POURQUOI:+ ($POURQUOI)}"
+		if assembler_xraid "$MODE"; then ecrire "$RUN/nas-raid.mode" "xraid-$MODE $POURQUOI"
+		else
+			log "X-RAID : échec de l'assemblage en $MODE, tout est défait"
+			MODE_ACTUEL=xraid-$MODE; desassembler_xraid
+			ecrire "$RUN/nas-raid.mode" "aucun echec_assemblage $POURQUOI"
+		fi ;;
+	*)	log "aucun volume X-RAID utilisable${POURQUOI:+ ($POURQUOI)}"
+		ecrire "$RUN/nas-raid.mode" "aucun $POURQUOI" ;;
+	esac
+}
+
+demonter() {
+	mode_actuel
+	case "$MODE_ACTUEL" in
+	md) monte "$DATA" && x_ umount "$DATA"; x_ lvm vgchange -an --config "$LVM_MD" "$VG_MD" ;;
+	xraid-*) analyser; desassembler_xraid ;;
+	esac
+	monte "$POINT_MD" && x_ umount "$POINT_MD"
+	ecrire "$RUN/nas-raid.mode" "aucun arrete"
+}
+
+# ---------- vérification complète du miroir (lecture seule) ----------
+verifier() {
+	analyser
+	[ -n "$XR_BASE" ] && [ -n "$XR_MIROIR" ] || meurt "il faut les deux disques X-RAID ($XR_RAISONS)"
+	if [ -n "$A_BLANC" ]; then x xraid-info verifier "$XR_BASE" "$XR_MIROIR"; return 0; fi
+	mkdir -p "$ETAT"
+	echo "en_cours $(date +%s)" > "$ETAT/verif.etat"
+	log "vérification du miroir : $XR_BASE / $XR_MIROIR"
+	xraid-info verifier "$XR_BASE" "$XR_MIROIR" > "$ETAT/verif.res" 2> "$ETAT/verif.prog"
+	rc=$?
+	case $rc in 0) r=ok;; 1) r=differences;; *) r=erreurs;; esac
+	echo "$r $(date +%s)" > "$ETAT/verif.etat"
+	log "vérification : $r ($(grep -c '^# difference' "$ETAT/verif.res") zones différentes)"
+	mode_actuel
+	if [ $r = ok ] && [ "$MODE_ACTUEL" != xraid-rw ]; then
+		# miroir cohérent, rien d'assemblé en écriture : la marque peut tomber
+		rm -f "$SALE"; echo "$XR_ID $XR_CTIME" > "$VERIFIE"
+		log "miroir cohérent : écriture autorisée au prochain montage"
+	fi
+	return $rc
+}
+
+# ---------- confirmations, SMART ----------
+confirmer() {	# $1 = phrase attendue, $2 = ce qui va se passer
+	[ -n "$A_BLANC" ] && { echo "(à blanc : confirmation « $1 » non demandée)"; return 0; }
+	if [ "$CONFIRMER" != "$1" ] || [ -z "$OUI" ]; then
+		echo "$2" >&2
+		meurt "confirmation requise : --confirmer '$1' --oui"
+	fi
+}
+
+smart_ok() {	# $1 = disque ; refuse : santé FAILED, secteurs en attente, illisibles
+	d=${1##*/}
+	if [ -r "$RUN/smart.$d" ]; then s=$(cat "$RUN/smart.$d"); else s=$(xraid-info smart "$1" 2>/dev/null); fi
+	health=; realloc=0; pending=0; uncorr=0
+	case "$s" in health=*) eval "$s" ;; *)
+		[ -n "$SANS_SMART" ] && { log "$1 : SMART illisible (--sans-smart)"; return 0; }
+		[ -n "$A_BLANC" ] && { log "$1 : SMART illisible (refusé hors essai à blanc ; --sans-smart pour passer outre)"; return 0; }
+		meurt "$1 : SMART illisible ; --sans-smart pour passer outre (déconseillé)" ;;
+	esac
+	[ "$health" = FAILED ] && meurt "$1 : SMART en échec"
+	[ "${pending:-0}" -gt 0 ] && meurt "$1 : $pending secteurs en attente de réallocation"
+	[ "${uncorr:-0}" -gt 0 ] && meurt "$1 : $uncorr secteurs illisibles"
+	[ "${realloc:-0}" -gt 0 ] && log "attention : $1 a $realloc secteurs réalloués"
+	log "$1 : SMART ${health:-?}, $pending en attente, $uncorr illisibles"
+}
+
+services() {	# stop|start des partages autour d'un changement de /c
+	if [ "$1" = stop ]; then l="S70ksmbd S60nfs"; else l="S60nfs S70ksmbd"; fi
+	for s in $l; do [ -x "$R/etc/init.d/$s" ] && x_ "$R/etc/init.d/$s" "$1"; done
+	return 0
+}
+
+# efface le début d'un disque (MBR, superblocs md/LVM) et la zone X-RAID de fin
+effacer() {	# $1 = disque, $2 = secteurs
+	x dd if=/dev/zero of="$1" bs=1048576 count=1 conv=notrunc
+	x dd if=/dev/zero of="$1" bs=512 seek=$(($2 - 4096)) count=4096 conv=notrunc
+	[ -b "$1" ] && x_ partprobe "$1"	# oublier les anciennes partitions
+	return 0
+}
+
+creer_md() {	# disques... (un seul : md dégradé, le second sera ajouté)
+	n=$#; [ $n -eq 1 ] && set -- "$@" missing
+	x mdadm --create "$MD" --run --metadata=1.2 --level=1 --raid-devices=2 \
+		--bitmap=internal --name=donnees "$@" || return 1
+	x sh -c "mdadm --detail --brief $MD > $R/etc/mdadm.conf"
+	x lvm pvcreate --config "$LVM_MD" "$MD" || return 1
+	x lvm vgcreate --config "$LVM_MD" "$VG_MD" "$MD" || return 1
+	x lvm lvcreate --config "$LVM_MD" -l 100%FREE -n "$LV_MD" "$VG_MD" || return 1
+	x mkfs.ext4 -b 4096 -L donnees "/dev/mapper/$VG_MD-$LV_MD"
+}
+
+# ---------- migration X-RAID -> md sur place ----------
+migrer() {
+	E=$(etape)
+	if [ -n "$FINALISER" ]; then finaliser; return; fi
+	if [ -z "$E" ]; then
+		ECH=$ECHANTILLONS; analyser; decider
+		[ -n "$XR_BASE" ] && [ -n "$XR_MIROIR" ] || meurt "il faut les deux disques X-RAID ($XR_RAISONS)"
+		[ "$MODE" = rw ] || meurt "X-RAID pas sain ($POURQUOI) : vérifier ou réparer d'abord"
+		A=$XR_BASE; B=$XR_MIROIR
+		r=$(cat "$ETAT/verif.etat" 2>/dev/null)
+		case "$r" in
+		ok\ *) age=$(( ($(date +%s) - ${r#ok }) / 86400 ))
+		       [ $age -le $VERIF_MAX_JOURS ] || { [ -n "$A_BLANC" ] && log "(vérification trop ancienne)" || meurt "vérification complète trop ancienne ($age j) : nas-raid verifier"; } ;;
+		*) [ -n "$A_BLANC" ] && log "(pas de vérification complète réussie : refusé hors essai à blanc)" \
+			|| meurt "lancer d'abord une vérification complète réussie : nas-raid verifier" ;;
+		esac
+		smart_ok "$A"; smart_ok "$B"
+		if monte "$DATA"; then
+			u=$(df -Pk "$DATA" | awk 'NR == 2 { print $3 }')
+			D=$B; t=$(secteurs)
+			[ "${u:-0}" -lt $((t / 2 * 95 / 100)) ] || meurt "les données de $DATA ne tiendront pas sur le md"
+		fi
+		confirmer MIGRER "Migration X-RAID -> md : $B (miroir) est retiré du X-RAID et reformaté en md ; \
+les données sont recopiées depuis $A ; puis (--finaliser) $A est effacé et rejoint le md. \
+Ensuite, plus de retour possible au X-RAID ni à RAIDiator."
+		log "migration : début (A=$A garde le X-RAID, B=$B devient md)"
+		ecrire "$ETAT/migration" "etape=casser
+a=$A
+b=$B"
+		E=casser
+	else
+		confirmer MIGRER "Reprise de la migration (étape $E)."
+		A=$(sed -n 's/^a=//p' "$ETAT/migration"); B=$(sed -n 's/^b=//p' "$ETAT/migration")
+		analyser
+	fi
+	if [ "$E" = casser ]; then
+		services stop
+		mode_actuel
+		[ -n "$A_BLANC" ] && MODE_ACTUEL=xraid-rw
+		case "$MODE_ACTUEL" in xraid-*) desassembler_xraid ;; esac
+		D=$B; nb=$(secteurs)
+		if [ ! -e "$MD" ] || [ -n "$A_BLANC" ]; then
+			effacer "$B" "$nb" || meurt "effacement de $B"
+			creer_md "$B" || meurt "création du md sur $B"
+		fi
+		# X-RAID en lecture seule sur A seul (B n'a plus de superbloc X-RAID)
+		POINT=$DATA; XR_LECTURE=$A
+		assembler_xraid ro || meurt "X-RAID en lecture seule sur $A"
+		ecrire "$RUN/nas-raid.mode" "xraid-ro migration_en_cours"
+		services start
+		x mkdir -p "$POINT_MD"
+		monte "$POINT_MD" || x mount -t ext4 "/dev/mapper/$VG_MD-$LV_MD" "$POINT_MD" || meurt "montage du md"
+		ecrire "$ETAT/migration" "etape=copier
+a=$A
+b=$B"
+		E=copier
+	fi
+	if [ -z "$A_BLANC" ] && [ "$E" != copie_verifiee ]; then
+		monte "$DATA" && monte "$POINT_MD" || meurt "$DATA (X-RAID) et $POINT_MD (md) doivent être montés : redémarrer puis relancer nas-raid migrer"
+		awk -v m="$DATA" '$2 == m && $4 ~ /^ro(,|$)/ { f = 1 } END { exit !f }' "$R/proc/mounts" \
+			|| meurt "$DATA n'est pas le X-RAID en lecture seule"
+	fi
+	if [ "$E" = copier ]; then
+		log "migration : copie de $DATA vers $POINT_MD (reprenable)"
+		x rsync -aH --numeric-ids --delete "$DATA/" "$POINT_MD/" || meurt "copie interrompue (relancer nas-raid migrer)"
+		ecrire "$ETAT/migration" "etape=verifier
+a=$A
+b=$B"
+		E=verifier
+	fi
+	if [ "$E" = verifier ]; then
+		log "migration : vérification de la copie (rsync $VERIF_RSYNC)"
+		if [ -n "$A_BLANC" ]; then x rsync -aHn $VERIF_RSYNC --numeric-ids --delete --itemize-changes "$DATA/" "$POINT_MD/"
+		else
+			rsync -aHn $VERIF_RSYNC --numeric-ids --delete --itemize-changes "$DATA/" "$POINT_MD/" > "$ETAT/ecarts" || meurt "vérification interrompue"
+			[ -s "$ETAT/ecarts" ] && meurt "la copie diffère ($(wc -l < "$ETAT/ecarts") lignes, $ETAT/ecarts) : relancer nas-raid migrer"
+		fi
+		ecrire "$ETAT/migration" "etape=copie_verifiee
+a=$A
+b=$B"
+		log "migration : copie vérifiée. Contrôler $POINT_MD puis : nas-raid migrer --finaliser --confirmer 'EFFACER ${A##*/}' --oui"
+	fi
+	[ "$E" = copie_verifiee ] && log "copie déjà vérifiée : nas-raid migrer --finaliser --confirmer 'EFFACER ${A##*/}' --oui"
+	return 0
+}
+
+finaliser() {
+	E=$(etape); A=$(sed -n 's/^a=//p' "$ETAT/migration" 2>/dev/null)
+	[ -n "$A_BLANC" ] && [ -z "$E" ] && { analyser; A=$XR_BASE; E=copie_verifiee; }
+	[ "$E" = copie_verifiee ] || meurt "la copie n'est pas vérifiée (étape : ${E:-aucune})"
+	confirmer "EFFACER ${A##*/}" "Dernière étape : $A (dernier disque X-RAID) est EFFACÉ et rejoint le md. \
+Plus de retour possible au X-RAID ni à RAIDiator."
+	smart_ok "$A"
+	analyser
+	if [ -z "$A_BLANC" ]; then	# dernier contrôle avant d'effacer l'original
+		monte "$DATA" && monte "$POINT_MD" || meurt "$DATA et $POINT_MD doivent être montés"
+		a=$(df -Pk "$DATA" | awk 'NR == 2 { print $3 }'); b=$(df -Pk "$POINT_MD" | awk 'NR == 2 { print $3 }')
+		[ "${b:-0}" -ge $(( ${a:-0} / 2 )) ] || meurt "le md contient bien moins de données que le X-RAID ($b / $a Kio) : rien n'est effacé"
+	fi
+	services stop
+	MODE_ACTUEL=xraid-ro; desassembler_xraid
+	monte "$POINT_MD" && x_ umount "$POINT_MD"
+	D=$A; nb=$(secteurs)
+	effacer "$A" "$nb" || meurt "effacement de $A"
+	x mdadm "$MD" --add "$A" || meurt "ajout de $A au md"
+	x mount -t ext4 "/dev/mapper/$VG_MD-$LV_MD" "$DATA" || meurt "montage de $DATA"
+	ecrire "$RUN/nas-raid.mode" "md"
+	services start
+	[ -n "$A_BLANC" ] || { rm -f "$ETAT/migration" "$SALE"; echo terminee > "$ETAT/migration.fin"; }
+	log "migration terminée : resynchronisation du md en cours (cat /proc/mdstat)"
+}
+
+# ---------- md neuf, ajout, agrandissement, réparation X-RAID ----------
+creer() {
+	set -- $ARGS
+	[ $# -ge 1 ] && [ $# -le 2 ] || meurt "creer : un ou deux disques"
+	[ -e "$MD" ] && [ -z "$A_BLANC" ] && meurt "$MD existe déjà"
+	analyser
+	noms=; for D in "$@"; do disque_sata "$D"; noms="$noms ${D##*/}"; done
+	confirmer "EFFACER${noms}" "Création d'un RAID 1 md neuf : TOUT le contenu de$noms sera EFFACÉ (y compris un X-RAID)."
+	mode_actuel
+	services stop
+	case "$MODE_ACTUEL" in xraid-*) desassembler_xraid ;; esac
+	for D in "$@"; do effacer "$D" "$(secteurs)" || meurt "effacement de $D"; done
+	creer_md "$@" || meurt "création du md"
+	x mount -t ext4 "/dev/mapper/$VG_MD-$LV_MD" "$DATA" || meurt "montage"
+	ecrire "$RUN/nas-raid.mode" "md"
+	[ -n "$A_BLANC" ] || rm -f "$ETAT/migration" "$SALE"
+	services start
+}
+
+ajouter() {
+	set -- $ARGS
+	[ $# -eq 1 ] || meurt "ajouter : un disque"
+	[ -e "$MD" ] || [ -n "$A_BLANC" ] || meurt "pas de md $MD"
+	analyser; D=$1; disque_sata "$D"
+	confirmer "EFFACER ${D##*/}" "$D sera EFFACÉ et ajouté au RAID md (resynchronisation)."
+	smart_ok "$D"
+	effacer "$D" "$(secteurs)" || meurt "effacement de $D"
+	x mdadm "$MD" --add "$D"
+}
+
+agrandir() {
+	[ -e "$MD" ] || [ -n "$A_BLANC" ] || meurt "pas de md $MD"
+	grep -q 'recovery\|resync' "$R/proc/mdstat" 2>/dev/null && meurt "resynchronisation en cours : attendre la fin"
+	confirmer AGRANDIR "Agrandissement de $MD, du LVM et de l'ext4 à la taille du plus petit disque."
+	x mdadm --grow "$MD" --bitmap=none || meurt "retrait du bitmap"
+	x mdadm --grow "$MD" --size=max || meurt "agrandissement du md"
+	x mdadm --grow "$MD" --bitmap=internal
+	x lvm pvresize --config "$LVM_MD" "$MD" || meurt "pvresize"
+	x lvm lvextend --config "$LVM_MD" -l +100%FREE "$VG_MD/$LV_MD" || meurt "lvextend"
+	x resize2fs "/dev/mapper/$VG_MD-$LV_MD"
+}
+
+reparer() {
+	analyser
+	[ -n "$XR_BASE" ] && [ -n "$XR_MIROIR" ] || meurt "il faut les deux disques X-RAID"
+	for r in $XR_RAISONS; do
+		case "$r" in arret_brutal|miroir_different) ;; *) meurt "réparation impossible : $r";; esac
+	done
+	confirmer REPARER "Le contenu des sections de $XR_BASE (base) est recopié sur $XR_MIROIR là où ils diffèrent."
+	mode_actuel
+	[ -n "$A_BLANC" ] && MODE_ACTUEL=xraid-ro
+	services stop
+	case "$MODE_ACTUEL" in xraid-*) desassembler_xraid ;; esac
+	POINT=$DATA
+	assembler_xraid rw || meurt "assemblage"
+	ecrire "$RUN/nas-raid.mode" "xraid-rw reparation"
+	i=0
+	while [ $i -lt "$XR_NB_SECTIONS" ]; do
+		x sh -c "echo repair > /sys/block/md1$i/md/sync_action"; i=$((i + 1))
+	done
+	services start
+	log "réparation lancée (cat /proc/mdstat) ; ensuite : nas-raid verifier"
+}
+
+# ---------- état ----------
+etat() {
+	if [ -n "$RAFRAICHIR" ] || [ ! -r "$RUN/xraid.json" ]; then
+		xr=$(xraid-info --json $(disques) 2>/dev/null) || xr=null
+		[ -z "$A_BLANC" ] && [ -d "$RUN" ] && printf '%s\n' "$xr" > "$RUN/xraid.json"
+	else xr=$(cat "$RUN/xraid.json"); fi
+	read -r m raisons 2>/dev/null < "$RUN/nas-raid.mode" || { m=inconnu; raisons=; }
+	read -r v vd 2>/dev/null < "$ETAT/verif.etat" || { v=jamais; vd=0; }
+	prog=$(tail -n 1 "$ETAT/verif.prog" 2>/dev/null | sed -n 's/progression \([0-9]*\)%/\1/p')
+	zones=$(grep -c '^# difference' "$ETAT/verif.res" 2>/dev/null); zones=${zones:-0}
+	E=$(etape); [ -e "$ETAT/migration.fin" ] && [ -z "$E" ] && E=terminee
+	[ -e "$SALE" ] && sale=1 || sale=0
+	# progression de la copie : place occupée sur le md / sur /c
+	cp=
+	if [ "$E" = copier ] && monte "$POINT_MD" && monte "$DATA"; then
+		a=$(df -Pk "$DATA" | awk 'NR == 2 { print $3 }'); b=$(df -Pk "$POINT_MD" | awk 'NR == 2 { print $3 }')
+		[ "${a:-0}" -gt 0 ] && cp=$(( ${b:-0} * 100 / a ))
+	fi
+	if [ -n "$JSON" ]; then
+		printf '{"mode":"%s","raisons":"%s","sale":%d,"verif":{"etat":"%s","date":%s,"progression":%s,"zones":%s},' \
+			"$m" "$raisons" "$sale" "$v" "${vd:-0}" "${prog:-null}" "$zones"
+		a=$(sed -n 's/^a=//p' "$ETAT/migration" 2>/dev/null)
+		printf '"migration":{"etape":"%s","a":"%s","copie":%s},"md":%s,"xraid":%s}\n' "$E" "${a##*/}" "${cp:-null}" "$([ -e "$MD" ] && echo 1 || echo 0)" "$xr"
+	else
+		echo "mode : $m${raisons:+ ($raisons)}"
+		echo "marque d'écriture non terminée : $sale"
+		echo "vérification : $v $( [ "$vd" != 0 ] && date -d "@$vd" '+%F %T' 2>/dev/null)${prog:+ ($prog %)} zones différentes : $zones"
+		[ -n "$E" ] && echo "migration : $E${cp:+ (copie ~$cp %)}"
+		ECH=0; analyser
+		echo "X-RAID : $XR_MODE${XR_RAISONS:+ ($XR_RAISONS)} base=${XR_BASE:--} miroir=${XR_MIROIR:--}"
+	fi
+}
+
+# une seule action à la fois (sauf etat)
+verrou() {
+	[ -n "$A_BLANC" ] && return 0
+	mkdir -p "$RUN"
+	exec 9> "$RUN/nas-raid.lock"
+	flock -n 9 || meurt "une autre action nas-raid est en cours"
+}
+
+case "$CMD" in
+etat) etat ;;
+monter) verrou; monter ;;
+demonter) verrou; demonter ;;
+verifier) verrou; verifier ;;
+reparer) verrou; reparer ;;
+migrer) verrou; migrer ;;
+creer) verrou; creer ;;
+ajouter) verrou; ajouter ;;
+agrandir) verrou; agrandir ;;
+*) sed -n '2,/^set -u/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 2 ;;
+esac
