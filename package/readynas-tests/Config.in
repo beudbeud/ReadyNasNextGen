@@ -1,0 +1,9 @@
+config BR2_PACKAGE_READYNAS_TESTS
+	bool "readynas-tests (essais du portage Padre)"
+	help
+	  Petits essais à lancer à la console du ReadyNAS Duo v1 :
+	  essai-flush (antémémoire I après réécriture de code + flottant),
+	  essai-fp-s / essai-fp-d / essai-fp-n (émulation FPU en statique,
+	  dynamique PIE et dynamique non PIE), essai-ldso (programmes
+	  dynamiques en boucle, compte les segfaults de ld-uClibc).
+	  Installés dans /usr/bin.

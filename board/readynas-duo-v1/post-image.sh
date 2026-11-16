@@ -92,40 +92,9 @@ if [ -f "$OUTIL/readynas_crypto.c" ]; then
 	"$BUILD_DIR/readynas_crypto" -d -k3 < "$B/vmlinux.k3" | cmp -n "$taille" - "$B/vmlinux.bin"
 	echo "-- $B/vmlinux.k3 (chiffré -k3, vérifié par déchiffrement)"
 
-	# Variantes EHCI/PCI (mise au point) : même noyau, seuls les mots
-	# « padre.ehci=<7 car.> », « padre.pcibus=<8 hex> » et
-	# « padre.pcifeat=<4 hex> », « padre.pciswap=<4 hex> » de la ligne de
-	# commande intégrée changent
-	# (longueurs identiques, chacun présent une seule fois, vérifié).
-	# vmlinux.k3 = la variante par défaut de configs/linux-padre.config.
-	rm -f "$B"/vmlinux-*.bin "$B"/vmlinux-*.k3
-	if [ "$(grep -c -a 'padre.ehci=' "$B/vmlinux.bin")" = 1 ] &&
-	   [ "$(grep -c -a 'padre.pcibus=' "$B/vmlinux.bin")" = 1 ] &&
-	   [ "$(grep -c -a 'padre.pcifeat=' "$B/vmlinux.bin")" = 1 ] &&
-	   [ "$(grep -c -a 'padre.pciswap=' "$B/vmlinux.bin")" = 1 ]; then
-		i=0
-		for v in "le-haut 00000000 302c 4444" "be-haut 00000000 302c 4444" \
-			 "le-haut 00000000 0128 0000" "be-haut 00000000 0128 0000"; do
-			i=$((i + 1))
-			set -- $v
-			nom="$i-$1-$2-$3-$4"
-			python3 - "$B/vmlinux.bin" "$B/vmlinux-$nom.bin" "$1" "$2" "$3" "$4" <<'FIN_PY'
-import sys
-s = open(sys.argv[1], 'rb').read()
-for k, v, n in ((b'padre.ehci=', sys.argv[3], 7),
-                (b'padre.pcibus=', sys.argv[4], 8),
-                (b'padre.pcifeat=', sys.argv[5], 4),
-                (b'padre.pciswap=', sys.argv[6], 4)):
-    v = v.encode()
-    assert s.count(k) == 1 and len(v) == n
-    i = s.index(k) + len(k)
-    s = s[:i] + v + s[i + n:]
-open(sys.argv[2], 'wb').write(s)
-FIN_PY
-			"$BUILD_DIR/readynas_crypto" -e -k3 < "$B/vmlinux-$nom.bin" > "$B/vmlinux-$nom.k3"
-			"$BUILD_DIR/readynas_crypto" -d -k3 < "$B/vmlinux-$nom.k3" | cmp -n "$taille" - "$B/vmlinux-$nom.bin"
-			grep -q -a "padre.ehci=$1 padre.pcibus=$2 padre.pcifeat=$3 padre.pciswap=$4" "$B/vmlinux-$nom.bin"
-			echo "   variante $B/vmlinux-$nom.k3 (padre.ehci=$1 padre.pcibus=$2 padre.pcifeat=$3 padre.pciswap=$4, vérifiée)"
-		done
-	fi
+	# ligne de commande intégrée : COMMAND_LINE_SIZE = 256 sur sparc32
+	lg=$(strings "$B/vmlinux.bin" | grep -m1 -o 'console=ttyS1,9600.*' | wc -c)
+	[ "$lg" -lt 256 ] || { echo "ERREUR : ligne de commande intégrée trop longue ($lg >= 256)"; exit 1; }
+	echo "   ligne de commande intégrée : $lg caractères"
+	rm -f "$B"/vmlinux-*.bin "$B"/vmlinux-*.k3	# anciennes variantes de mise au point
 fi

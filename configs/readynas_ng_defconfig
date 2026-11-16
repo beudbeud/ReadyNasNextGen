@@ -44,6 +44,8 @@ BR2_LINUX_KERNEL_VMLINUX=y
 
 # Initramfs minimal intégré au noyau (busybox statique sans flottant + tests)
 BR2_PACKAGE_READYNAS_INITRAMFS=y
+# essais du portage à la console (package/readynas-tests)
+BR2_PACKAGE_READYNAS_TESTS=y
 
 # Services de fichiers
 BR2_PACKAGE_KSMBD_TOOLS=y

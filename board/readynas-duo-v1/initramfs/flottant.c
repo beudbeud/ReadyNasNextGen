@@ -110,6 +110,63 @@ int main(void)
 
 		ok(ns == 1500000000L);
 	}
+	/* t8/t9 : flush (piège bad_instruction -> padre_user_flush) puis
+	 * calcul flottant, 200 fois : régression de l'essai r (après les flush
+	 * de ld.so, flottant faux dans les programmes dynamiques). t9 met
+	 * l'adresse dans %l0 (registre de fenêtre : chemin « fenêtres vidées »
+	 * du mode padre_mm.flush=2).
+	 */
+	dire("flottant t8 flush (%o) puis faddd x200 ...");
+	{
+		int n, bon = 1;
+
+		for (n = 0; n < 200; n++) {
+			r = 0;
+			__asm__ __volatile__("flush %3\n\tldd [%0], %%f0\n\tldd [%1], %%f2\n\t"
+					     "faddd %%f0, %%f2, %%f4\n\tstd %%f4, [%2]"
+					     : : "r" (&a), "r" (&c), "r" (&r), "r" (&main)
+					     : "memory");
+			bon &= r == 3.5;
+		}
+		ok(bon);
+	}
+	dire("flottant t9 flush (%l0) puis faddd x200 ...");
+	{
+		int n, bon = 1;
+
+		for (n = 0; n < 200; n++) {
+			r = 0;
+			__asm__ __volatile__("mov %3, %%l0\n\tflush %%l0\n\t"
+					     "ldd [%0], %%f0\n\tldd [%1], %%f2\n\t"
+					     "faddd %%f0, %%f2, %%f4\n\tstd %%f4, [%2]"
+					     : : "r" (&a), "r" (&c), "r" (&r), "r" (&main)
+					     : "memory", "l0");
+			bon &= r == 3.5;
+		}
+		ok(bon);
+	}
+	dire("flottant t10 strtod/printf apres flush ...");
+	{
+		volatile double d;
+
+		__asm__ __volatile__("flush %0" : : "r" (&main) : "memory");
+		d = strtod("2", NULL) * strtod("1.5", NULL);
+		ok((long)d == 3);
+	}
+	/* t11 : fmovs/fnegs/fabss (résultat écrasé par IR avant correction :
+	 * printf("%f") faux, « 1.5 » -> « 00000000000.00 »)
+	 */
+	dire("flottant t11 fmovs/fnegs/fabss ...");
+	{
+		static double m = -2.5, x1, x2, x3;
+
+		__asm__ __volatile__("ldd [%0], %%f0\n\t"
+				     "fmovs %%f0, %%f2\n\tfmovs %%f1, %%f3\n\tstd %%f2, [%1]\n\t"
+				     "fnegs %%f0, %%f4\n\tfmovs %%f1, %%f5\n\tstd %%f4, [%2]\n\t"
+				     "fabss %%f0, %%f6\n\tfmovs %%f1, %%f7\n\tstd %%f6, [%3]"
+				     : : "r" (&m), "r" (&x1), "r" (&x2), "r" (&x3) : "memory");
+		ok(x1 == -2.5 && x2 == 2.5 && x3 == 2.5);
+	}
 	dire("flottant FIN\n");
 	return 0;
 }

@@ -4,7 +4,8 @@
 # jamais sondés), la partition ext2/3/4 qui contient $DOSSIER/sbin/init
 # (aujourd'hui /rootfs-6.18 sur la clé), monte ce dossier comme racine et lui
 # passe la main. Repli : shell sur la console.
-# Ligne de commande : racine=/dev/sdXN (sans recherche), dossier=/autre
+# Ligne de commande : racine=/dev/sdXN (sans recherche), dossier=/autre,
+# essais=1 (essais de mise au point avant la recherche)
 /bin/busybox --install -s /bin
 export PATH=/bin
 mount -t devtmpfs devtmpfs /dev
@@ -13,9 +14,11 @@ mount -t sysfs sysfs /sys
 
 DOSSIER=/rootfs-6.18
 RACINE=
+ESSAIS=
 for a in $(cat /proc/cmdline); do
 	case "$a" in
 	racine=*) RACINE="${a#racine=}" ;;
+	essais=*) ESSAIS="${a#essais=}" ;;
 	dossier=*) DOSSIER="${a#dossier=}" ;;
 	esac
 done
@@ -44,7 +47,6 @@ candidats() {
 trouver() {
 	for p in $(candidats); do
 		[ -b "$p" ] || continue
-		echo "init [$(t)] sonde $p" > /dev/console
 		# lecture seule sans rejouer le journal : rien n'est écrit en sondant
 		mount -t ext4 -o ro,noload "$p" /mnt 2>/dev/null || continue
 		if [ -x "/mnt$DOSSIER/sbin/init" ]; then
@@ -72,68 +74,61 @@ etat() {
 	sed 's/^/    padre_tic /' /proc/padre_tic 2>/dev/null
 }
 
-# Émulation FPU, test gradué (essai charge : seul le sleep FLOTTANT de busybox
-# arrêtait tout). La dernière ligne « flottant tN ... » sans OK désigne
-# l'instruction fatale. La busybox de cet initramfs est désormais construite
-# sans FLOAT_DURATION (sleep en entiers) : le reste de /init n'utilise plus le
-# flottant.
-echo "init [$(t)] flottant"
-/bin/flottant
+# essais=1 (ligne de commande) : essais de mise au point du portage (FPU
+# émulée, fenêtres, fork/fautes/sommeil). Absents du démarrage normal.
+if [ "$ESSAIS" = 1 ]; then
+	# Émulation FPU, test gradué (essai charge : seul le sleep FLOTTANT de busybox
+	# arrêtait tout). La dernière ligne « flottant tN ... » sans OK désigne
+	# l'instruction fatale. La busybox de cet initramfs est désormais construite
+	# sans FLOAT_DURATION (sleep en entiers) : le reste de /init n'utilise plus le
+	# flottant.
+	echo "init [$(t)] flottant"
+	/bin/flottant
 
-# Fenêtres de registres + sommeil (9e essai) : chacun doit afficher « fenetres OK n »
-for f in 1 2 3; do
-	echo "init [$(t)] fenetres $f"
-	/bin/fenetres $f
-done
+	# Fenêtres de registres + sommeil (9e essai) : chacun doit afficher « fenetres OK n »
+	for f in 1 2 3; do
+		echo "init [$(t)] fenetres $f"
+		/bin/fenetres $f
+	done
 
-# Reproducteur (essai A) : c = fork sans dormeur (témoin), b = dormeur + fautes
-# de page, a = dormeur + fork, e = dormeur + fork/exec. Chacun : « charge x OK ».
-for c in c b a e; do
-	echo "init [$(t)] charge $c"
-	/bin/charge $c
-done
+	# Reproducteur (essai A) : c = fork sans dormeur (témoin), b = dormeur + fautes
+	# de page, a = dormeur + fork, e = dormeur + fork/exec. Chacun : « charge x OK ».
+	for c in c b a e; do
+		echo "init [$(t)] charge $c"
+		/bin/charge $c
+	done
 
-# Le sommeil marche-t-il ? sleep 1 en arrière-plan, puis 2 s d'attente active.
-etat "AVANT sleep 1"
-echo "init [$(t)] usleep 100000 (nanosleep 0,1 s) ..."
-usleep 100000
-echo "init [$(t)] usleep OK"
-sleep 1 &
-spid=$!
-attente_active 2
-etat "APRES 2 s d'attente active"
-st=Z
-read _ _ st _ 2>/dev/null < /proc/$spid/stat	# Z (zombie) ou absent = terminé
-if [ "$st" != Z ]; then
-	echo "init [$(t)] sleep 1 ne revient pas : sommeil cassé, attente active à la place"
-	kill $spid 2>/dev/null
-	DORMIR=attente_active
-else
-	echo "init [$(t)] sleep 1 est revenu : le sommeil marche"
-	DORMIR=sleep
+	# Le sommeil marche-t-il ? sleep 1 en arrière-plan, puis 2 s d'attente active.
+	etat "AVANT sleep 1"
+	echo "init [$(t)] usleep 100000 (nanosleep 0,1 s) ..."
+	usleep 100000
+	echo "init [$(t)] usleep OK"
+	sleep 1 &
+	spid=$!
+	attente_active 2
+	etat "APRES 2 s d'attente active"
+	st=Z
+	read _ _ st _ 2>/dev/null < /proc/$spid/stat	# Z (zombie) ou absent = terminé
+	if [ "$st" != Z ]; then
+		echo "init [$(t)] sleep 1 ne revient pas : sommeil cassé, attente active à la place"
+		kill $spid 2>/dev/null
+		DORMIR=attente_active
+	else
+		echo "init [$(t)] sleep 1 est revenu : le sommeil marche"
+		DORMIR=sleep
+	fi
+
 fi
 
-# EHCI : espace de configuration PCI (COMMAND en 0x04 : 0x0006 attendu =
-# mémoire + maître du bus) ; les registres USBCMD/USBSTS/ASYNC/PORTSC
-# sortent dans les traces [ehci] du noyau à chaque expiration d'URB.
-pci_ehci() {
-	echo "init [$(t)] config PCI 0000:00:17.2 ($1) :"
-	hexdump -C -n 64 /sys/bus/pci/devices/0000:00:17.2/config 2>&1 | sed 's/^/    /'
-}
-pci_ehci "avant la recherche"
-
-echo "init [$(t)] : recherche de $DOSSIER/sbin/init sur les disques USB (30 essais)"
+# Clé USB : scrutation toutes les 0,1 s, 15 s au plus (l'énumération USB
+# se poursuit pendant ce temps).
 n=0
 P=
-while [ $n -lt 30 ]; do
-	n=$((n + 1))
-	echo "init [$(t)] essai $n : disques $(ls /sys/block 2>/dev/null | tr '\n' ' ')"
-	grep -E 'ehci|timer|padre' /proc/interrupts 2>/dev/null | tr -s ' ' | sed 's/^/    irq /'
-	if P=$(trouver); then
-		break
-	fi
+while [ $n -lt 150 ]; do
+	P=$(trouver) && break
 	P=
-	$DORMIR 1
+	n=$((n + 1))
+	usleep 100000
 done
 
 if [ -n "$P" ] && mount -t ext4 -o rw,noatime "$P" /mnt; then
@@ -146,6 +141,5 @@ fi
 
 echo "init [$(t)] : racine introuvable ou montage impossible, shell de secours"
 echo "       (disques : $(ls /sys/block 2>/dev/null | tr '\n' ' '))"
-pci_ehci "après échec"
 dmesg | grep -E 'ehci|usb|padre: DMA' | tail -20 | sed 's/^/    /'
 exec /bin/sh </dev/console >/dev/console 2>&1

@@ -1,6 +1,6 @@
-diff -urN a/linux/arch/sparc/include/asm/cacheflush_32.h b/linux/arch/sparc/include/asm/cacheflush_32.h
+diff --color -urN a/linux/arch/sparc/include/asm/cacheflush_32.h b/linux/arch/sparc/include/asm/cacheflush_32.h
 --- a/arch/sparc/include/asm/cacheflush_32.h	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/include/asm/cacheflush_32.h	2026-11-16 09:31:55.331946080 +0100
++++ b/arch/sparc/include/asm/cacheflush_32.h	2026-11-16 23:47:56.613026484 +0100
 @@ -15,7 +15,13 @@
  	sparc32_cachetlb_ops->cache_range(vma, start, end)
  #define flush_cache_page(vma,addr,pfn) \
@@ -15,9 +15,9 @@ diff -urN a/linux/arch/sparc/include/asm/cacheflush_32.h b/linux/arch/sparc/incl
  
  #define copy_to_user_page(vma, page, vaddr, dst, src, len) \
  	do {							\
-diff -urN a/linux/arch/sparc/include/asm/cpu_type.h b/linux/arch/sparc/include/asm/cpu_type.h
+diff --color -urN a/linux/arch/sparc/include/asm/cpu_type.h b/linux/arch/sparc/include/asm/cpu_type.h
 --- a/arch/sparc/include/asm/cpu_type.h	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/include/asm/cpu_type.h	2026-11-16 09:28:16.354064188 +0100
++++ b/arch/sparc/include/asm/cpu_type.h	2026-11-16 23:47:56.613086464 +0100
 @@ -13,6 +13,7 @@
    sun_unknown = 0x04,
    ap1000      = 0x05, /* almost a sun4m */
@@ -26,9 +26,9 @@ diff -urN a/linux/arch/sparc/include/asm/cpu_type.h b/linux/arch/sparc/include/a
  };
  
  #ifdef CONFIG_SPARC32
-diff -urN a/linux/arch/sparc/include/asm/head_32.h b/linux/arch/sparc/include/asm/head_32.h
+diff --color -urN a/linux/arch/sparc/include/asm/head_32.h b/linux/arch/sparc/include/asm/head_32.h
 --- a/arch/sparc/include/asm/head_32.h	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/include/asm/head_32.h	2026-11-16 09:25:17.132413267 +0100
++++ b/arch/sparc/include/asm/head_32.h	2026-11-16 23:47:56.613139804 +0100
 @@ -2,7 +2,11 @@
  #ifndef __SPARC_HEAD_H
  #define __SPARC_HEAD_H
@@ -41,10 +41,10 @@ diff -urN a/linux/arch/sparc/include/asm/head_32.h b/linux/arch/sparc/include/as
  
  #define WRITE_PAUSE      nop; nop; nop; /* Have to do this after %wim/%psr chg */
  
-diff -urN a/linux/arch/sparc/include/asm/padre.h b/linux/arch/sparc/include/asm/padre.h
+diff --color -urN a/linux/arch/sparc/include/asm/padre.h b/linux/arch/sparc/include/asm/padre.h
 --- a/arch/sparc/include/asm/padre.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/arch/sparc/include/asm/padre.h	2026-11-16 16:58:49.284465252 +0100
-@@ -0,0 +1,172 @@
++++ b/arch/sparc/include/asm/padre.h	2026-11-16 23:48:48.359551681 +0100
+@@ -0,0 +1,170 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * Infrant IT3107 « Padre » (ReadyNAS Duo v1) : registres et constantes.
@@ -197,8 +197,6 @@ diff -urN a/linux/arch/sparc/include/asm/padre.h b/linux/arch/sparc/include/asm/
 +bool padre_desactive(const char *nom);
 +/* écriture console brute par scrutation de l'UART, sans verrou (sûre en interruption) */
 +int padre_prom_write(int fd, const char *buf, int len);
-+/* padre.ehci=le-haut|be-haut|le-bas|be-bas (mise au point de l'EHCI) */
-+extern int padre_ehci_be, padre_dma_bas;
 +extern u32 padre_pciswap;	/* PCI_SWAP posé (0x4444 ou 0 comme iboot) */
 +void padre_flush_dcache_all(void);
 +void padre_handler_irq(unsigned int pil);
@@ -217,9 +215,9 @@ diff -urN a/linux/arch/sparc/include/asm/padre.h b/linux/arch/sparc/include/asm/
 +#endif
 +
 +#endif /* _ASM_SPARC_PADRE_H */
-diff -urN a/linux/arch/sparc/include/asm/padre_i2c.h b/linux/arch/sparc/include/asm/padre_i2c.h
+diff --color -urN a/linux/arch/sparc/include/asm/padre_i2c.h b/linux/arch/sparc/include/asm/padre_i2c.h
 --- a/arch/sparc/include/asm/padre_i2c.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/arch/sparc/include/asm/padre_i2c.h	2026-11-16 09:46:19.065205032 +0100
++++ b/arch/sparc/include/asm/padre_i2c.h	2026-11-16 23:47:56.613288853 +0100
 @@ -0,0 +1,19 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/* Accès I2C (TWSI) de l'Infrant Padre, drivers/platform/padre/padre_i2c.c */
@@ -240,9 +238,9 @@ diff -urN a/linux/arch/sparc/include/asm/padre_i2c.h b/linux/arch/sparc/include/
 +u8 CMOS_READ(u8 reg);
 +void CMOS_WRITE(u8 val, u8 reg);
 +#endif
-diff -urN a/linux/arch/sparc/include/asm/page_32.h b/linux/arch/sparc/include/asm/page_32.h
+diff --color -urN a/linux/arch/sparc/include/asm/page_32.h b/linux/arch/sparc/include/asm/page_32.h
 --- a/arch/sparc/include/asm/page_32.h	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/include/asm/page_32.h	2026-11-16 09:25:17.132251659 +0100
++++ b/arch/sparc/include/asm/page_32.h	2026-11-16 23:47:56.613346302 +0100
 @@ -80,7 +80,9 @@
   */
  typedef unsigned long pte_t;
@@ -296,9 +294,9 @@ diff -urN a/linux/arch/sparc/include/asm/page_32.h b/linux/arch/sparc/include/as
  #ifndef __ASSEMBLER__
  extern unsigned long phys_base;
  extern unsigned long pfn_base;
-diff -urN a/linux/arch/sparc/include/asm/pgalloc_32.h b/linux/arch/sparc/include/asm/pgalloc_32.h
+diff --color -urN a/linux/arch/sparc/include/asm/pgalloc_32.h b/linux/arch/sparc/include/asm/pgalloc_32.h
 --- a/arch/sparc/include/asm/pgalloc_32.h	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/include/asm/pgalloc_32.h	2026-11-16 09:29:28.568171101 +0100
++++ b/arch/sparc/include/asm/pgalloc_32.h	2026-11-16 23:47:56.613400042 +0100
 @@ -2,6 +2,9 @@
  #ifndef _SPARC_PGALLOC_H
  #define _SPARC_PGALLOC_H
@@ -315,9 +313,9 @@ diff -urN a/linux/arch/sparc/include/asm/pgalloc_32.h b/linux/arch/sparc/include
  
 +#endif /* !CONFIG_SPARC_PADRE */
  #endif /* _SPARC_PGALLOC_H */
-diff -urN a/linux/arch/sparc/include/asm/pgalloc_32_padre.h b/linux/arch/sparc/include/asm/pgalloc_32_padre.h
+diff --color -urN a/linux/arch/sparc/include/asm/pgalloc_32_padre.h b/linux/arch/sparc/include/asm/pgalloc_32_padre.h
 --- a/arch/sparc/include/asm/pgalloc_32_padre.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/arch/sparc/include/asm/pgalloc_32_padre.h	2026-11-16 09:29:38.458869736 +0100
++++ b/arch/sparc/include/asm/pgalloc_32_padre.h	2026-11-16 23:47:56.613449602 +0100
 @@ -0,0 +1,42 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
@@ -361,9 +359,9 @@ diff -urN a/linux/arch/sparc/include/asm/pgalloc_32_padre.h b/linux/arch/sparc/i
 +#define __pte_free_tlb(tlb, pte, addr)	pte_free((tlb)->mm, pte)
 +
 +#endif /* _SPARC_PGALLOC_32_PADRE_H */
-diff -urN a/linux/arch/sparc/include/asm/pgtable_32.h b/linux/arch/sparc/include/asm/pgtable_32.h
+diff --color -urN a/linux/arch/sparc/include/asm/pgtable_32.h b/linux/arch/sparc/include/asm/pgtable_32.h
 --- a/arch/sparc/include/asm/pgtable_32.h	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/include/asm/pgtable_32.h	2026-11-16 09:29:28.568037242 +0100
++++ b/arch/sparc/include/asm/pgtable_32.h	2026-11-16 23:47:56.613526402 +0100
 @@ -9,6 +9,9 @@
   *  Copyright (C) 1998 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
   */
@@ -380,9 +378,9 @@ diff -urN a/linux/arch/sparc/include/asm/pgtable_32.h b/linux/arch/sparc/include
  
 +#endif /* !CONFIG_SPARC_PADRE */
  #endif /* !(_SPARC_PGTABLE_H) */
-diff -urN a/linux/arch/sparc/include/asm/pgtable_32_padre.h b/linux/arch/sparc/include/asm/pgtable_32_padre.h
+diff --color -urN a/linux/arch/sparc/include/asm/pgtable_32_padre.h b/linux/arch/sparc/include/asm/pgtable_32_padre.h
 --- a/arch/sparc/include/asm/pgtable_32_padre.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/arch/sparc/include/asm/pgtable_32_padre.h	2026-11-16 09:42:34.093531403 +0100
++++ b/arch/sparc/include/asm/pgtable_32_padre.h	2026-11-16 23:47:56.613586961 +0100
 @@ -0,0 +1,305 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
@@ -689,9 +687,9 @@ diff -urN a/linux/arch/sparc/include/asm/pgtable_32_padre.h b/linux/arch/sparc/i
 +#define HAVE_ARCH_UNMAPPED_AREA
 +
 +#endif /* _SPARC_PGTABLE_32_PADRE_H */
-diff -urN a/linux/arch/sparc/include/asm/processor_32.h b/linux/arch/sparc/include/asm/processor_32.h
+diff --color -urN a/linux/arch/sparc/include/asm/processor_32.h b/linux/arch/sparc/include/asm/processor_32.h
 --- a/arch/sparc/include/asm/processor_32.h	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/include/asm/processor_32.h	2026-11-16 09:25:06.405876951 +0100
++++ b/arch/sparc/include/asm/processor_32.h	2026-11-16 23:47:56.613687291 +0100
 @@ -17,9 +17,14 @@
   * That one page is used to protect kernel from intruders, so that
   * we can make our access_ok test faster
@@ -708,9 +706,9 @@ diff -urN a/linux/arch/sparc/include/asm/processor_32.h b/linux/arch/sparc/inclu
  #define STACK_TOP_MAX	STACK_TOP
  #endif /* __KERNEL__ */
  
-diff -urN a/linux/arch/sparc/include/asm/sfp-machine_32.h b/linux/arch/sparc/include/asm/sfp-machine_32.h
+diff --color -urN a/linux/arch/sparc/include/asm/sfp-machine_32.h b/linux/arch/sparc/include/asm/sfp-machine_32.h
 --- a/arch/sparc/include/asm/sfp-machine_32.h	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/include/asm/sfp-machine_32.h	2026-11-16 14:55:04.017638436 +0100
++++ b/arch/sparc/include/asm/sfp-machine_32.h	2026-11-16 23:47:56.613746730 +0100
 @@ -179,9 +179,13 @@
  extern struct task_struct *last_task_used_math;
  #endif
@@ -742,9 +740,9 @@ diff -urN a/linux/arch/sparc/include/asm/sfp-machine_32.h b/linux/arch/sparc/inc
  #define FP_TRAPPING_EXCEPTIONS ((current->thread.fsr >> 23) & 0x1f)
  #else
  #define FP_TRAPPING_EXCEPTIONS ((last_task_used_math->thread.fsr >> 23) & 0x1f)
-diff -urN a/linux/arch/sparc/include/asm/vaddrs.h b/linux/arch/sparc/include/asm/vaddrs.h
+diff --color -urN a/linux/arch/sparc/include/asm/vaddrs.h b/linux/arch/sparc/include/asm/vaddrs.h
 --- a/arch/sparc/include/asm/vaddrs.h	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/include/asm/vaddrs.h	2026-11-16 09:29:28.568274861 +0100
++++ b/arch/sparc/include/asm/vaddrs.h	2026-11-16 23:47:56.613806430 +0100
 @@ -12,7 +12,12 @@
   * Copyright (C) 2000 Anton Blanchard (anton@samba.org)
   */
@@ -758,9 +756,9 @@ diff -urN a/linux/arch/sparc/include/asm/vaddrs.h b/linux/arch/sparc/include/asm
  
  #define SRMMU_NOCACHE_VADDR	(KERNBASE + SRMMU_MAXMEM)
  				/* = 0x0fc000000 */
-diff -urN a/linux/arch/sparc/Kconfig b/linux/arch/sparc/Kconfig
+diff --color -urN a/linux/arch/sparc/Kconfig b/linux/arch/sparc/Kconfig
 --- a/arch/sparc/Kconfig	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/Kconfig	2026-11-16 15:23:37.921296559 +0100
++++ b/arch/sparc/Kconfig	2026-11-16 23:48:48.360849265 +0100
 @@ -140,11 +140,12 @@
  
  config HIGHMEM
@@ -784,7 +782,7 @@ diff -urN a/linux/arch/sparc/Kconfig b/linux/arch/sparc/Kconfig
  
  config CMDLINE
  	string "Initial kernel command string"
-@@ -347,9 +348,23 @@
+@@ -347,9 +348,22 @@
  
  	  If unsure, say N.
  
@@ -795,7 +793,6 @@ diff -urN a/linux/arch/sparc/Kconfig b/linux/arch/sparc/Kconfig
 +	select ARCH_HAS_DMA_PREP_COHERENT
 +	select ARCH_HAS_DMA_ALLOC
 +	select USB_EHCI_BIG_ENDIAN_MMIO if USB_EHCI_HCD
-+	select USB_EHCI_BIG_ENDIAN_DESC if USB_EHCI_HCD
 +	help
 +	  Noyau pour le SoC Infrant IT3107 (ReadyNAS Duo v1, NV+ v1) : MMU
 +	  Infrant à deux niveaux (pas SRMMU), pas de PROM (iboot), noyau
@@ -809,7 +806,7 @@ diff -urN a/linux/arch/sparc/Kconfig b/linux/arch/sparc/Kconfig
  	select USB_EHCI_BIG_ENDIAN_MMIO
  	select USB_EHCI_BIG_ENDIAN_DESC
  	select USB_UHCI_BIG_ENDIAN_MMIO
-@@ -415,7 +430,7 @@
+@@ -415,7 +429,7 @@
  
  config PCIC_PCI
  	bool
@@ -818,9 +815,9 @@ diff -urN a/linux/arch/sparc/Kconfig b/linux/arch/sparc/Kconfig
  	default y
  
  config LEON_PCI
-diff -urN a/linux/arch/sparc/kernel/cpu.c b/linux/arch/sparc/kernel/cpu.c
+diff --color -urN a/linux/arch/sparc/kernel/cpu.c b/linux/arch/sparc/kernel/cpu.c
 --- a/arch/sparc/kernel/cpu.c	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/kernel/cpu.c	2026-11-16 11:00:59.782700299 +0100
++++ b/arch/sparc/kernel/cpu.c	2026-11-16 23:47:56.613967159 +0100
 @@ -445,10 +445,15 @@
  	psr_impl = ((get_psr() >> PSR_IMPL_SHIFT) & PSR_IMPL_SHIFTED_MASK);
  	psr_vers = ((get_psr() >> PSR_VERS_SHIFT) & PSR_VERS_SHIFTED_MASK);
@@ -838,9 +835,9 @@ diff -urN a/linux/arch/sparc/kernel/cpu.c b/linux/arch/sparc/kernel/cpu.c
  		fpu_vers = get_psr() & PSR_EF ? ((get_fsr() >> 17) & 0x7) : 7;
  	else
  		fpu_vers = ((get_fsr() >> 17) & 0x7);
-diff -urN a/linux/arch/sparc/kernel/entry.S b/linux/arch/sparc/kernel/entry.S
+diff --color -urN a/linux/arch/sparc/kernel/entry.S b/linux/arch/sparc/kernel/entry.S
 --- a/arch/sparc/kernel/entry.S	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/kernel/entry.S	2026-11-16 09:27:11.031852942 +0100
++++ b/arch/sparc/kernel/entry.S	2026-11-16 23:48:48.362114009 +0100
 @@ -31,6 +31,7 @@
  #include <asm/unistd.h>
  
@@ -849,7 +846,33 @@ diff -urN a/linux/arch/sparc/kernel/entry.S b/linux/arch/sparc/kernel/entry.S
  
  #define curptr      g6
  
-@@ -766,6 +767,21 @@
+@@ -453,8 +454,25 @@
+ 	RESTORE_ALL
+ 
+ 1:	/* unimplemented flush - just skip */
++#ifdef CONFIG_SPARC_PADRE
++	/* Padre : « flush » piège ici (comme en 2.6.17, qui l'émulait). Le
++	 * chargeur dynamique s'en sert après avoir réécrit la PLT : il faut
++	 * réellement écrire la D (écriture différée) et invalider la I, sinon
++	 * le code patché n'est pas vu (segfault dans _dl_linux_resolver).
++	 */
++	SAVE_ALL
++
++	wr	%l0, PSR_ET, %psr		! re-enable traps
++	WRITE_PAUSE
++
++	call	padre_user_flush
++	 add	%sp, STACKFRAME_SZ, %o0
++
++	RESTORE_ALL
++#else
+ 	jmpl	%l2, %g0
+ 	 rett	%l2 + 4
++#endif
+ 
+ 	.align	4
+ 	.globl	priv_instruction
+@@ -766,6 +784,21 @@
  	.align	4
  	.globl	srmmu_fault
  srmmu_fault:
@@ -871,7 +894,7 @@ diff -urN a/linux/arch/sparc/kernel/entry.S b/linux/arch/sparc/kernel/entry.S
  	mov	0x400, %l5
  	mov	0x300, %l4
  
-@@ -780,6 +796,7 @@
+@@ -780,6 +813,7 @@
  
  	and	%l5, 2, %l5
  	or	%l5, %l6, %l6
@@ -879,9 +902,9 @@ diff -urN a/linux/arch/sparc/kernel/entry.S b/linux/arch/sparc/kernel/entry.S
  
  	or	%l6, %l7, %l7			! l7 = [addr,write,txtfault]
  
-diff -urN a/linux/arch/sparc/kernel/etrap_32.S b/linux/arch/sparc/kernel/etrap_32.S
+diff --color -urN a/linux/arch/sparc/kernel/etrap_32.S b/linux/arch/sparc/kernel/etrap_32.S
 --- a/arch/sparc/kernel/etrap_32.S	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/kernel/etrap_32.S	2026-11-16 09:26:53.642643221 +0100
++++ b/arch/sparc/kernel/etrap_32.S	2026-11-16 23:47:56.614177598 +0100
 @@ -14,6 +14,7 @@
  #include <asm/ptrace.h>
  #include <asm/winmacro.h>
@@ -941,9 +964,9 @@ diff -urN a/linux/arch/sparc/kernel/etrap_32.S b/linux/arch/sparc/kernel/etrap_3
  
  	restore %g0, %g0, %g0
  
-diff -urN a/linux/arch/sparc/kernel/head_32.S b/linux/arch/sparc/kernel/head_32.S
+diff --color -urN a/linux/arch/sparc/kernel/head_32.S b/linux/arch/sparc/kernel/head_32.S
 --- a/arch/sparc/kernel/head_32.S	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/kernel/head_32.S	2026-11-16 11:55:07.405236459 +0100
++++ b/arch/sparc/kernel/head_32.S	2026-11-16 23:47:56.614353877 +0100
 @@ -26,6 +26,7 @@
  #include <asm/thread_info.h>	/* TI_UWINMASK */
  #include <asm/errno.h>
@@ -1157,9 +1180,9 @@ diff -urN a/linux/arch/sparc/kernel/head_32.S b/linux/arch/sparc/kernel/head_32.
  		/* Call sparc32_start_kernel(struct linux_romvec *rp) */
  		sethi	%hi(prom_vector_p), %g5
  		ld	[%g5 + %lo(prom_vector_p)], %o0
-diff -urN a/linux/arch/sparc/kernel/ioport.c b/linux/arch/sparc/kernel/ioport.c
+diff --color -urN a/linux/arch/sparc/kernel/ioport.c b/linux/arch/sparc/kernel/ioport.c
 --- a/arch/sparc/kernel/ioport.c	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/kernel/ioport.c	2026-11-16 09:28:37.414965604 +0100
++++ b/arch/sparc/kernel/ioport.c	2026-11-16 23:47:56.614551156 +0100
 @@ -51,11 +51,14 @@
  #include <asm/iommu.h>
  #include <asm/io-unit.h>
@@ -1249,9 +1272,9 @@ diff -urN a/linux/arch/sparc/kernel/ioport.c b/linux/arch/sparc/kernel/ioport.c
  }
  
  #ifdef CONFIG_PROC_FS
-diff -urN a/linux/arch/sparc/kernel/irq_32.c b/linux/arch/sparc/kernel/irq_32.c
+diff --color -urN a/linux/arch/sparc/kernel/irq_32.c b/linux/arch/sparc/kernel/irq_32.c
 --- a/arch/sparc/kernel/irq_32.c	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/kernel/irq_32.c	2026-11-16 09:38:59.193659967 +0100
++++ b/arch/sparc/kernel/irq_32.c	2026-11-16 23:47:56.614650566 +0100
 @@ -21,6 +21,7 @@
  #include <asm/setup.h>
  #include <asm/pcic.h>
@@ -1292,9 +1315,9 @@ diff -urN a/linux/arch/sparc/kernel/irq_32.c b/linux/arch/sparc/kernel/irq_32.c
  
  	default:
  		prom_printf("Cannot initialize IRQs on this Sun machine...");
-diff -urN a/linux/arch/sparc/kernel/Makefile b/linux/arch/sparc/kernel/Makefile
+diff --color -urN a/linux/arch/sparc/kernel/Makefile b/linux/arch/sparc/kernel/Makefile
 --- a/arch/sparc/kernel/Makefile	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/kernel/Makefile	2026-11-16 11:55:07.405364828 +0100
++++ b/arch/sparc/kernel/Makefile	2026-11-16 23:47:56.614722366 +0100
 @@ -27,6 +27,10 @@
  # IRQ
  obj-y                   += irq_$(BITS).o
@@ -1317,10 +1340,10 @@ diff -urN a/linux/arch/sparc/kernel/Makefile b/linux/arch/sparc/kernel/Makefile
  
  obj-$(CONFIG_SPARC64)   += reboot.o
  obj-$(CONFIG_SPARC64)   += sysfs.o
-diff -urN a/linux/arch/sparc/kernel/padre_kernel.c b/linux/arch/sparc/kernel/padre_kernel.c
+diff --color -urN a/linux/arch/sparc/kernel/padre_kernel.c b/linux/arch/sparc/kernel/padre_kernel.c
 --- a/arch/sparc/kernel/padre_kernel.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/arch/sparc/kernel/padre_kernel.c	2026-11-16 15:23:37.919221398 +0100
-@@ -0,0 +1,447 @@
++++ b/arch/sparc/kernel/padre_kernel.c	2026-11-16 23:48:48.363454632 +0100
+@@ -0,0 +1,425 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * padre_kernel.c : interruptions et minuterie de l'Infrant IT3107 « Padre ».
@@ -1364,28 +1387,6 @@ diff -urN a/linux/arch/sparc/kernel/padre_kernel.c b/linux/arch/sparc/kernel/pad
 +	return 0;
 +}
 +early_param("padre.desactive", padre_desactive_param);
-+
-+/* padre.ehci=<ordre>-<pool> : ordre des octets des descripteurs EHCI
-+ * (le = petit-boutiste comme le 2.6.17, be = gros-boutiste) et place du
-+ * DMA cohérent (haut = zone physiquement non cachée, bas = pages ordinaires
-+ * cachées + vidage complet de l'antémémoire D autour de chaque opération
-+ * EHCI, comme le 2.6.17). Défaut : le-haut. Les images vmlinux-<variante>.k3
-+ * ne diffèrent que par ce mot dans la ligne de commande intégrée.
-+ */
-+int padre_ehci_be, padre_dma_bas;
-+
-+static int __init padre_ehci_param(char *s)
-+{
-+	if (!s)
-+		return 0;
-+	padre_ehci_be = s[0] == 'b';
-+	padre_dma_bas = strstr(s, "bas") != NULL;
-+	pr_info("padre: EHCI descripteurs %s, DMA cohérent %s\n",
-+		padre_ehci_be ? "gros-boutistes" : "petit-boutistes",
-+		padre_dma_bas ? "bas (caché + vidages)" : "haut (non caché)");
-+	return 0;
-+}
-+early_param("padre.ehci", padre_ehci_param);
 +
 +bool padre_desactive(const char *nom)
 +{
@@ -1558,14 +1559,14 @@ diff -urN a/linux/arch/sparc/kernel/padre_kernel.c b/linux/arch/sparc/kernel/pad
 +	return PADRE_TICKS_PER_JIFFY - 1 - b;
 +}
 +
-+/* padre.trace_tick=1 (défaut) : à chaque tic, photo de l'état dans
++/* padre.trace_tick=1 (défaut 0, mise au point) : à chaque tic, photo de l'état dans
 + * padre_tic, lue par /proc/padre_tic. AUCUN printk ni ktime_get() ici :
 + * padre_clear_clock_irq() est appelé par timer_interrupt() SOUS
 + * write_seqlock(&timer_cs_lock), et timer_cs_read() (donc ktime_get) attend
 + * la fin de ce verrou : interblocage (7e essai, figé après « Switched to
 + * clocksource timer_cs »). 0 = pas de photo.
 + */
-+static unsigned int padre_trace_tick = 1;
++static unsigned int padre_trace_tick;
 +
 +static int __init padre_trace_tick_param(char *s)
 +{
@@ -1768,9 +1769,9 @@ diff -urN a/linux/arch/sparc/kernel/padre_kernel.c b/linux/arch/sparc/kernel/pad
 +	sparc_config.clear_clock_irq  = padre_clear_clock_irq;
 +	sparc_config.load_profile_irq = padre_load_profile_irq;
 +}
-diff -urN a/linux/arch/sparc/kernel/padre_lpram.c b/linux/arch/sparc/kernel/padre_lpram.c
+diff --color -urN a/linux/arch/sparc/kernel/padre_lpram.c b/linux/arch/sparc/kernel/padre_lpram.c
 --- a/arch/sparc/kernel/padre_lpram.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/arch/sparc/kernel/padre_lpram.c	2026-11-16 11:54:36.760995578 +0100
++++ b/arch/sparc/kernel/padre_lpram.c	2026-11-16 23:47:56.615037194 +0100
 @@ -0,0 +1,709 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
@@ -2481,9 +2482,9 @@ diff -urN a/linux/arch/sparc/kernel/padre_lpram.c b/linux/arch/sparc/kernel/padr
 +	0x00000000, 0x00000000, 0x00000000, 0x00000000,
 +	0x00000000, 0x00000000, 0x00000000, 0x00000000,
 +};
-diff -urN a/linux/arch/sparc/kernel/padre_pci.c b/linux/arch/sparc/kernel/padre_pci.c
+diff --color -urN a/linux/arch/sparc/kernel/padre_pci.c b/linux/arch/sparc/kernel/padre_pci.c
 --- a/arch/sparc/kernel/padre_pci.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/arch/sparc/kernel/padre_pci.c	2026-11-16 16:58:49.284065643 +0100
++++ b/arch/sparc/kernel/padre_pci.c	2026-11-16 23:47:56.615174693 +0100
 @@ -0,0 +1,323 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
@@ -2808,9 +2809,9 @@ diff -urN a/linux/arch/sparc/kernel/padre_pci.c b/linux/arch/sparc/kernel/padre_
 +	return 0;
 +}
 +subsys_initcall(padre_pci_init);
-diff -urN a/linux/arch/sparc/kernel/padre_prom.c b/linux/arch/sparc/kernel/padre_prom.c
+diff --color -urN a/linux/arch/sparc/kernel/padre_prom.c b/linux/arch/sparc/kernel/padre_prom.c
 --- a/arch/sparc/kernel/padre_prom.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/arch/sparc/kernel/padre_prom.c	2026-11-16 13:56:33.323815381 +0100
++++ b/arch/sparc/kernel/padre_prom.c	2026-11-16 23:47:56.615289113 +0100
 @@ -0,0 +1,301 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
@@ -3113,9 +3114,9 @@ diff -urN a/linux/arch/sparc/kernel/padre_prom.c b/linux/arch/sparc/kernel/padre
 +		padre_idprom.id_cksum = c;
 +	}
 +}
-diff -urN a/linux/arch/sparc/kernel/process_32.c b/linux/arch/sparc/kernel/process_32.c
+diff --color -urN a/linux/arch/sparc/kernel/process_32.c b/linux/arch/sparc/kernel/process_32.c
 --- a/arch/sparc/kernel/process_32.c	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/kernel/process_32.c	2026-11-16 13:23:54.841762081 +0100
++++ b/arch/sparc/kernel/process_32.c	2026-11-16 23:47:56.615384842 +0100
 @@ -69,6 +69,20 @@
  /* Idle loop support. */
  void arch_cpu_idle(void)
@@ -3137,9 +3138,9 @@ diff -urN a/linux/arch/sparc/kernel/process_32.c b/linux/arch/sparc/kernel/proce
  	if (sparc_idle)
  		(*sparc_idle)();
  }
-diff -urN a/linux/arch/sparc/kernel/rtrap_32.S b/linux/arch/sparc/kernel/rtrap_32.S
+diff --color -urN a/linux/arch/sparc/kernel/rtrap_32.S b/linux/arch/sparc/kernel/rtrap_32.S
 --- a/arch/sparc/kernel/rtrap_32.S	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/kernel/rtrap_32.S	2026-11-16 09:26:53.642536802 +0100
++++ b/arch/sparc/kernel/rtrap_32.S	2026-11-16 23:47:56.615480792 +0100
 @@ -13,6 +13,7 @@
  #include <asm/contregs.h>
  #include <asm/winmacro.h>
@@ -3189,9 +3190,9 @@ diff -urN a/linux/arch/sparc/kernel/rtrap_32.S b/linux/arch/sparc/kernel/rtrap_3
 +#endif
  
  	b,a	ret_trap_user_stack_is_bolixed
-diff -urN a/linux/arch/sparc/kernel/setup_32.c b/linux/arch/sparc/kernel/setup_32.c
+diff --color -urN a/linux/arch/sparc/kernel/setup_32.c b/linux/arch/sparc/kernel/setup_32.c
 --- a/arch/sparc/kernel/setup_32.c	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/kernel/setup_32.c	2026-11-16 09:28:16.359346974 +0100
++++ b/arch/sparc/kernel/setup_32.c	2026-11-16 23:47:56.615565681 +0100
 @@ -190,7 +190,7 @@
  {
  	struct cpuid_patch_entry *p;
@@ -3222,9 +3223,9 @@ diff -urN a/linux/arch/sparc/kernel/setup_32.c b/linux/arch/sparc/kernel/setup_3
  	default:
  		pr_info("ARCH: UNKNOWN!\n");
  		break;
-diff -urN a/linux/arch/sparc/kernel/traps_32.c b/linux/arch/sparc/kernel/traps_32.c
+diff --color -urN a/linux/arch/sparc/kernel/traps_32.c b/linux/arch/sparc/kernel/traps_32.c
 --- a/arch/sparc/kernel/traps_32.c	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/kernel/traps_32.c	2026-11-16 11:00:59.782872478 +0100
++++ b/arch/sparc/kernel/traps_32.c	2026-11-16 23:47:56.615656251 +0100
 @@ -161,6 +161,37 @@
  	if(psr & PSR_PS)
  		die_if_kernel("Kernel gets FloatingPenguinUnit disabled trap", regs);
@@ -3263,9 +3264,9 @@ diff -urN a/linux/arch/sparc/kernel/traps_32.c b/linux/arch/sparc/kernel/traps_3
  	put_psr(get_psr() | PSR_EF);    /* Allow FPU ops. */
  	regs->psr |= PSR_EF;
  #ifndef CONFIG_SMP
-diff -urN a/linux/arch/sparc/kernel/ttable_32.S b/linux/arch/sparc/kernel/ttable_32.S
+diff --color -urN a/linux/arch/sparc/kernel/ttable_32.S b/linux/arch/sparc/kernel/ttable_32.S
 --- a/arch/sparc/kernel/ttable_32.S	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/kernel/ttable_32.S	2026-11-16 09:44:48.628387688 +0100
++++ b/arch/sparc/kernel/ttable_32.S	2026-11-16 23:47:56.615743110 +0100
 @@ -44,7 +44,11 @@
  t_irq14:TRAP_ENTRY_INTERRUPT(14)            /* IRQ Timer #2                  */
  
@@ -3298,9 +3299,9 @@ diff -urN a/linux/arch/sparc/kernel/ttable_32.S b/linux/arch/sparc/kernel/ttable
  t_bad3d:BAD_TRAP(0x3d) BAD_TRAP(0x3e) BAD_TRAP(0x3f) BAD_TRAP(0x40) BAD_TRAP(0x41)
  t_bad42:BAD_TRAP(0x42) BAD_TRAP(0x43) BAD_TRAP(0x44) BAD_TRAP(0x45) BAD_TRAP(0x46)
  t_bad47:BAD_TRAP(0x47) BAD_TRAP(0x48) BAD_TRAP(0x49) BAD_TRAP(0x4a) BAD_TRAP(0x4b)
-diff -urN a/linux/arch/sparc/kernel/vmlinux.lds.S b/linux/arch/sparc/kernel/vmlinux.lds.S
+diff --color -urN a/linux/arch/sparc/kernel/vmlinux.lds.S b/linux/arch/sparc/kernel/vmlinux.lds.S
 --- a/arch/sparc/kernel/vmlinux.lds.S	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/kernel/vmlinux.lds.S	2026-11-16 09:27:11.032150590 +0100
++++ b/arch/sparc/kernel/vmlinux.lds.S	2026-11-16 23:47:56.615822710 +0100
 @@ -8,7 +8,11 @@
  
  #ifdef CONFIG_SPARC32
@@ -3313,9 +3314,9 @@ diff -urN a/linux/arch/sparc/kernel/vmlinux.lds.S b/linux/arch/sparc/kernel/vmli
  
  #define SMP_CACHE_BYTES_SHIFT 5
  
-diff -urN a/linux/arch/sparc/kernel/wof.S b/linux/arch/sparc/kernel/wof.S
+diff --color -urN a/linux/arch/sparc/kernel/wof.S b/linux/arch/sparc/kernel/wof.S
 --- a/arch/sparc/kernel/wof.S	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/kernel/wof.S	2026-11-16 09:26:32.566485027 +0100
++++ b/arch/sparc/kernel/wof.S	2026-11-16 23:47:56.615889590 +0100
 @@ -13,6 +13,7 @@
  #include <asm/asi.h>
  #include <asm/winmacro.h>
@@ -3376,9 +3377,9 @@ diff -urN a/linux/arch/sparc/kernel/wof.S b/linux/arch/sparc/kernel/wof.S
  	b	spwin_user_stack_is_bolixed + 0x4	! we faulted, ugh
  	 nop
 +#endif
-diff -urN a/linux/arch/sparc/kernel/wuf.S b/linux/arch/sparc/kernel/wuf.S
+diff --color -urN a/linux/arch/sparc/kernel/wuf.S b/linux/arch/sparc/kernel/wuf.S
 --- a/arch/sparc/kernel/wuf.S	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/kernel/wuf.S	2026-11-16 09:26:53.642386403 +0100
++++ b/arch/sparc/kernel/wuf.S	2026-11-16 23:47:56.615970719 +0100
 @@ -13,6 +13,7 @@
  #include <asm/asi.h>
  #include <asm/winmacro.h>
@@ -3431,9 +3432,9 @@ diff -urN a/linux/arch/sparc/kernel/wuf.S b/linux/arch/sparc/kernel/wuf.S
  
  	wr	%t_psr, 0x0, %psr
  	nop
-diff -urN a/linux/arch/sparc/lib/Makefile b/linux/arch/sparc/lib/Makefile
+diff --color -urN a/linux/arch/sparc/lib/Makefile b/linux/arch/sparc/lib/Makefile
 --- a/arch/sparc/lib/Makefile	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/lib/Makefile	2026-11-16 09:31:55.337314836 +0100
++++ b/arch/sparc/lib/Makefile	2026-11-16 23:47:56.616035039 +0100
 @@ -11,6 +11,8 @@
  lib-$(CONFIG_SPARC32) += blockops.o
  lib-y                 += memscan_$(BITS).o memcmp.o strncmp_$(BITS).o
@@ -3443,9 +3444,9 @@ diff -urN a/linux/arch/sparc/lib/Makefile b/linux/arch/sparc/lib/Makefile
  lib-$(CONFIG_SPARC32) += copy_user.o locks.o
  lib-$(CONFIG_SPARC64) += atomic_64.o
  lib-$(CONFIG_SPARC32) += lshrdi3.o ashldi3.o
-diff -urN a/linux/arch/sparc/lib/padre_muldiv.S b/linux/arch/sparc/lib/padre_muldiv.S
+diff --color -urN a/linux/arch/sparc/lib/padre_muldiv.S b/linux/arch/sparc/lib/padre_muldiv.S
 --- a/arch/sparc/lib/padre_muldiv.S	1970-01-01 01:00:00.000000000 +0100
-+++ b/arch/sparc/lib/padre_muldiv.S	2026-11-16 09:43:36.833660403 +0100
++++ b/arch/sparc/lib/padre_muldiv.S	2026-11-16 23:47:56.616076279 +0100
 @@ -0,0 +1,104 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
@@ -3551,9 +3552,9 @@ diff -urN a/linux/arch/sparc/lib/padre_muldiv.S b/linux/arch/sparc/lib/padre_mul
 +	 neg	%o0
 +3:	retl
 +	 nop
-diff -urN a/linux/arch/sparc/Makefile b/linux/arch/sparc/Makefile
+diff --color -urN a/linux/arch/sparc/Makefile b/linux/arch/sparc/Makefile
 --- a/arch/sparc/Makefile	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/Makefile	2026-11-16 09:31:55.337426495 +0100
++++ b/arch/sparc/Makefile	2026-11-16 23:47:56.616137198 +0100
 @@ -29,7 +29,15 @@
  # versions of gcc.  Some gcc versions won't pass -Av8 to binutils when you
  # give -mcpu=v8.  This silently worked with older bintutils versions but
@@ -3570,9 +3571,9 @@ diff -urN a/linux/arch/sparc/Makefile b/linux/arch/sparc/Makefile
  KBUILD_CFLAGS  += -Wa,-Av8
  
  KBUILD_AFLAGS  += -m32 -Wa,-Av8
-diff -urN a/linux/arch/sparc/math-emu/math_32.c b/linux/arch/sparc/math-emu/math_32.c
+diff --color -urN a/linux/arch/sparc/math-emu/math_32.c b/linux/arch/sparc/math-emu/math_32.c
 --- a/arch/sparc/math-emu/math_32.c	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/math-emu/math_32.c	2026-11-16 11:00:59.787936253 +0100
++++ b/arch/sparc/math-emu/math_32.c	2026-11-16 23:48:48.366095429 +0100
 @@ -132,6 +132,102 @@
  
  static int do_one_mathemu(u32 insn, unsigned long *fsr, unsigned long *fregs);
@@ -3690,9 +3691,28 @@ diff -urN a/linux/arch/sparc/math-emu/math_32.c b/linux/arch/sparc/math-emu/math
  			retcode = do_one_mathemu(insn, &fpt->thread.fsr, fpt->thread.float_regs);
  			if (retcode) {
  				/* in this case we need to fix up PC & nPC */
-diff -urN a/linux/arch/sparc/mm/fault_32.c b/linux/arch/sparc/mm/fault_32.c
+@@ -449,9 +552,15 @@
+ 	case FSQRTD: FP_SQRT_D (DR, DB); break;
+ 	case FSQRTQ: FP_SQRT_Q (QR, QB); break;
+ 	/* mov */
+-	case FMOVS: rd->s = rs2->s; break;
+-	case FABSS: rd->s = rs2->s & 0x7fffffff; break;
+-	case FNEGS: rd->s = rs2->s ^ 0x80000000; break;
++	/* Résultat dans IR : le type (r=1, sans empaquetage) fait écrire
++	 * rd->s = IR plus bas, qui écrasait rd->s (IR non initialisé). Sans
++	 * conséquence sur une vraie FPU (fmovs n'y est jamais émulé), fatal
++	 * sur le Padre qui émule tout : printf("%f") d'uClibc copie ses
++	 * doubles par fmovs (_fpmaxtostr).
++	 */
++	case FMOVS: IR = rs2->s; break;
++	case FABSS: IR = rs2->s & 0x7fffffff; break;
++	case FNEGS: IR = rs2->s ^ 0x80000000; break;
+ 	/* float to int */
+ 	case FSTOI: FP_TO_INT_S (IR, SB, 32, 1); break;
+ 	case FDTOI: FP_TO_INT_D (IR, DB, 32, 1); break;
+diff --color -urN a/linux/arch/sparc/mm/fault_32.c b/linux/arch/sparc/mm/fault_32.c
 --- a/arch/sparc/mm/fault_32.c	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/mm/fault_32.c	2026-11-16 14:57:01.293170790 +0100
++++ b/arch/sparc/mm/fault_32.c	2026-11-16 23:47:56.616309448 +0100
 @@ -109,6 +109,34 @@
  	__do_fault_siginfo(code, sig, regs, addr);
  }
@@ -3774,9 +3794,9 @@ diff -urN a/linux/arch/sparc/mm/fault_32.c b/linux/arch/sparc/mm/fault_32.c
  	}
  
  	unhandled_fault(address, tsk, regs);
-diff -urN a/linux/arch/sparc/mm/init_32.c b/linux/arch/sparc/mm/init_32.c
+diff --color -urN a/linux/arch/sparc/mm/init_32.c b/linux/arch/sparc/mm/init_32.c
 --- a/arch/sparc/mm/init_32.c	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/mm/init_32.c	2026-11-16 09:42:34.093405343 +0100
++++ b/arch/sparc/mm/init_32.c	2026-11-16 23:47:56.616381327 +0100
 @@ -236,6 +236,7 @@
  {
  	int i;
@@ -3793,9 +3813,9 @@ diff -urN a/linux/arch/sparc/mm/init_32.c b/linux/arch/sparc/mm/init_32.c
  
  
  	/* Saves us work later. */
-diff -urN a/linux/arch/sparc/mm/Makefile b/linux/arch/sparc/mm/Makefile
+diff --color -urN a/linux/arch/sparc/mm/Makefile b/linux/arch/sparc/mm/Makefile
 --- a/arch/sparc/mm/Makefile	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/mm/Makefile	2026-11-16 09:31:55.332068959 +0100
++++ b/arch/sparc/mm/Makefile	2026-11-16 23:47:56.616440987 +0100
 @@ -5,10 +5,14 @@
  obj-$(CONFIG_SPARC64)   += ultra.o tlb.o tsb.o
  obj-y                   += fault_$(BITS).o
@@ -3811,10 +3831,10 @@ diff -urN a/linux/arch/sparc/mm/Makefile b/linux/arch/sparc/mm/Makefile
  
  # Only used by sparc64
  obj-$(CONFIG_HUGETLB_PAGE) += hugetlbpage.o
-diff -urN a/linux/arch/sparc/mm/padre_mm.c b/linux/arch/sparc/mm/padre_mm.c
+diff --color -urN a/linux/arch/sparc/mm/padre_mm.c b/linux/arch/sparc/mm/padre_mm.c
 --- a/arch/sparc/mm/padre_mm.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/arch/sparc/mm/padre_mm.c	2026-11-16 16:26:10.234513345 +0100
-@@ -0,0 +1,518 @@
++++ b/arch/sparc/mm/padre_mm.c	2026-11-16 23:49:12.783740198 +0100
+@@ -0,0 +1,554 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * padre_mm.c : MMU et antémémoires de l'Infrant IT3107 « Padre ».
@@ -3837,6 +3857,7 @@ diff -urN a/linux/arch/sparc/mm/padre_mm.c b/linux/arch/sparc/mm/padre_mm.c
 +#include <linux/dma-map-ops.h>
 +#include <linux/dma-direct.h>
 +#include <linux/pagemap.h>
++#include <linux/moduleparam.h>
 +
 +#include <asm/padre.h>
 +#include <asm/page.h>
@@ -3846,6 +3867,8 @@ diff -urN a/linux/arch/sparc/mm/padre_mm.c b/linux/arch/sparc/mm/padre_mm.c
 +#include <asm/cacheflush.h>
 +#include <asm/tlbflush.h>
 +#include <asm/sections.h>
++#include <asm/setup.h>
++#include <asm/psr.h>
 +
 +#include "mm_32.h"
 +
@@ -3967,6 +3990,57 @@ diff -urN a/linux/arch/sparc/mm/padre_mm.c b/linux/arch/sparc/mm/padre_mm.c
 +			     : : "r" (PADRE_ICMU_CTRL_EN), "r" (PADRE_ICMU_CTRL),
 +			       "i" (ASI_PADRE_ICMU) : "memory");
 +	local_irq_restore(flags);
++}
++
++/* Instruction « flush » (piège bad_instruction, comme le « soft implemented
++ * flush » du 2.6.17) : l'antémémoire D est à écriture différée et la I ne la
++ * surveille pas ; un code réécrit (PLT de ld-uClibc, patché pour exécuter
++ * flush) n'est vu qu'une fois la ligne D écrite en mémoire et la I invalidée.
++ * padre_mm.flush (ligne de commande ou /sys/module/padre_mm/parameters/flush,
++ * modifiable à chaud) :
++ *   1 (défaut) : D entière écrite + I invalidée, sans lire les registres
++ *       utilisateur ni toucher aux fenêtres (le plus simple) ;
++ *   2 : seule la ligne D visée (adresse décodée, fenêtres vidées sur la pile
++ *       comme l'émulation FPU) ; mode d'essai (plus rapide, moins simple) ;
++ *   0 : instruction sautée sans rien faire (comportement sparc32 d'origine,
++ *       diagnostic seulement : la PLT redevient périmée).
++ * ponytail: I invalidée en entier (MBIST) ; par ligne (ITAG) si le coût compte.
++ */
++static int padre_flush_mode = 1;
++module_param_named(flush, padre_flush_mode, int, 0644);
++
++asmlinkage void padre_user_flush(struct pt_regs *regs)
++{
++	struct mm_struct *mm = current->mm;
++	unsigned long ea, k;
++	u32 insn;
++	pmd_t *pmd;
++	pte_t pte;
++
++	if (!padre_flush_mode)
++		goto fin;
++	if (padre_flush_mode != 2 || (regs->psr & PSR_PS) || !mm ||
++	    get_user(insn, (u32 __user *)regs->pc))
++		goto tout;
++	ea = safe_compute_effective_address(regs, insn) & ~7UL;
++	if (ea >= PAGE_OFFSET)
++		goto tout;
++	pmd = pmd_off(mm, ea);
++	if (pmd_none(*pmd))
++		goto tout;
++	pte = READ_ONCE(*((pte_t *)pmd_page_vaddr(*pmd) + pte_index(ea)));
++	if (!pte_present(pte) || !pfn_valid(pte_pfn(pte)))
++		goto tout;
++	k = (unsigned long)__va(pte_pfn(pte) << PAGE_SHIFT) + (ea & ~PAGE_MASK);
++	padre_clean_dcache_range(k, k + 8);
++	goto i;
++tout:
++	padre_flush_dcache_all();
++i:
++	padre_flush_icache_all();
++fin:
++	regs->pc = regs->npc;
++	regs->npc += 4;
 +}
 +
 +void padre_flush_icache_range(unsigned long start, unsigned long end)
@@ -4161,19 +4235,6 @@ diff -urN a/linux/arch/sparc/mm/padre_mm.c b/linux/arch/sparc/mm/padre_mm.c
 +	unsigned long flags, i;
 +	void *va;
 +
-+	if (padre_dma_bas) {	/* pages ordinaires, cachées (2.6.17) */
-+		struct page *pg = alloc_pages(gfp & ~__GFP_HIGHMEM,
-+					       get_order(PAGE_ALIGN(size)));
-+
-+		if (!pg)
-+			return NULL;
-+		va = page_address(pg);
-+		memset(va, 0, PAGE_ALIGN(size));
-+		padre_flush_dcache_range((unsigned long)va,
-+					 (unsigned long)va + PAGE_ALIGN(size));
-+		*dma_handle = phys_to_dma(dev, __pa(va));
-+		return va;
-+	}
 +	spin_lock_irqsave(&padre_dma_lock, flags);
 +	i = bitmap_find_next_zero_area(padre_dma_map, PADRE_DMA_PAGES, 0, n, 0);
 +	if (i < PADRE_DMA_PAGES)
@@ -4196,11 +4257,6 @@ diff -urN a/linux/arch/sparc/mm/padre_mm.c b/linux/arch/sparc/mm/padre_mm.c
 +	unsigned int n = PAGE_ALIGN(size) >> PAGE_SHIFT;
 +	unsigned long flags, i = (cpu_addr - base) >> PAGE_SHIFT;
 +
-+	if (cpu_addr < base || cpu_addr >= base + PADRE_DMA_PAGES * PAGE_SIZE) {
-+		/* pool bas : pages ordinaires */
-+		free_pages((unsigned long)cpu_addr, get_order(PAGE_ALIGN(size)));
-+		return;
-+	}
 +	if (WARN_ON(cpu_addr < base || i + n > PADRE_DMA_PAGES))
 +		return;
 +	spin_lock_irqsave(&padre_dma_lock, flags);
@@ -4333,9 +4389,9 @@ diff -urN a/linux/arch/sparc/mm/padre_mm.c b/linux/arch/sparc/mm/padre_mm.c
 +
 +	padre_flush_dcache_range(va, va + size);
 +}
-diff -urN a/linux/arch/sparc/prom/init_32.c b/linux/arch/sparc/prom/init_32.c
+diff --color -urN a/linux/arch/sparc/prom/init_32.c b/linux/arch/sparc/prom/init_32.c
 --- a/arch/sparc/prom/init_32.c	2026-11-10 19:07:06.000000000 +0100
-+++ b/arch/sparc/prom/init_32.c	2026-11-16 09:34:36.834826509 +0100
++++ b/arch/sparc/prom/init_32.c	2026-11-16 23:47:56.616620406 +0100
 @@ -35,6 +35,13 @@
  void __init prom_init(struct linux_romvec *rp)
  {
@@ -4350,26 +4406,26 @@ diff -urN a/linux/arch/sparc/prom/init_32.c b/linux/arch/sparc/prom/init_32.c
  
  	switch(romvec->pv_romvers) {
  	case 0:
-diff -urN a/linux/drivers/platform/Kconfig b/linux/drivers/platform/Kconfig
+diff --color -urN a/linux/drivers/platform/Kconfig b/linux/drivers/platform/Kconfig
 --- a/drivers/platform/Kconfig	2026-11-10 19:07:06.000000000 +0100
-+++ b/drivers/platform/Kconfig	2026-11-16 09:46:19.070205008 +0100
++++ b/drivers/platform/Kconfig	2026-11-16 23:47:56.616669566 +0100
 @@ -18,3 +18,5 @@
  source "drivers/platform/x86/Kconfig"
  
  source "drivers/platform/arm64/Kconfig"
 +
 +source "drivers/platform/padre/Kconfig"
-diff -urN a/linux/drivers/platform/Makefile b/linux/drivers/platform/Makefile
+diff --color -urN a/linux/drivers/platform/Makefile b/linux/drivers/platform/Makefile
 --- a/drivers/platform/Makefile	2026-11-10 19:07:06.000000000 +0100
-+++ b/drivers/platform/Makefile	2026-11-16 09:46:19.070205008 +0100
++++ b/drivers/platform/Makefile	2026-11-16 23:47:56.616712266 +0100
 @@ -13,3 +13,4 @@
  obj-$(CONFIG_CZNIC_PLATFORMS)	+= cznic/
  obj-$(CONFIG_SURFACE_PLATFORMS)	+= surface/
  obj-$(CONFIG_ARM64_PLATFORM_DEVICES)	+= arm64/
 +obj-$(CONFIG_SPARC_PADRE)	+= padre/
-diff -urN a/linux/drivers/platform/padre/Kconfig b/linux/drivers/platform/padre/Kconfig
+diff --color -urN a/linux/drivers/platform/padre/Kconfig b/linux/drivers/platform/padre/Kconfig
 --- a/drivers/platform/padre/Kconfig	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/platform/padre/Kconfig	2026-11-16 10:10:05.447366128 +0100
++++ b/drivers/platform/padre/Kconfig	2026-11-16 23:47:56.616777705 +0100
 @@ -0,0 +1,41 @@
 +# SPDX-License-Identifier: GPL-2.0
 +menu "Pilotes Infrant Padre (ReadyNAS Duo v1)"
@@ -4412,9 +4468,9 @@ diff -urN a/linux/drivers/platform/padre/Kconfig b/linux/drivers/platform/padre/
 +	  D'après le pilote libre ide pour 2.6.17 (IDE 2.6.17, PIO) et description IO.
 +
 +endmenu
-diff -urN a/linux/drivers/platform/padre/Makefile b/linux/drivers/platform/padre/Makefile
+diff --color -urN a/linux/drivers/platform/padre/Makefile b/linux/drivers/platform/padre/Makefile
 --- a/drivers/platform/padre/Makefile	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/platform/padre/Makefile	2026-11-16 10:10:05.447451228 +0100
++++ b/drivers/platform/padre/Makefile	2026-11-16 23:47:56.616820165 +0100
 @@ -0,0 +1,6 @@
 +# SPDX-License-Identifier: GPL-2.0
 +obj-$(CONFIG_PADRE_I2C)		+= padre_i2c.o
@@ -4422,9 +4478,9 @@ diff -urN a/linux/drivers/platform/padre/Makefile b/linux/drivers/platform/padre
 +obj-$(CONFIG_PADRE_HWMON)	+= padre_hwmon.o
 +obj-$(CONFIG_PADRE_GMAC)	+= padre_gmac.o
 +obj-$(CONFIG_PADRE_SATA)	+= padre_sata.o
-diff -urN a/linux/drivers/platform/padre/padre_gmac.c b/linux/drivers/platform/padre/padre_gmac.c
+diff --color -urN a/linux/drivers/platform/padre/padre_gmac.c b/linux/drivers/platform/padre/padre_gmac.c
 --- a/drivers/platform/padre/padre_gmac.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/platform/padre/padre_gmac.c	2026-11-16 11:31:50.822436917 +0100
++++ b/drivers/platform/padre/padre_gmac.c	2026-11-16 23:47:56.616963004 +0100
 @@ -0,0 +1,905 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
@@ -5331,9 +5387,9 @@ diff -urN a/linux/drivers/platform/padre/padre_gmac.c b/linux/drivers/platform/p
 +	return r;
 +}
 +late_initcall(gm_init);	/* après padre_i2c (ICS) */
-diff -urN a/linux/drivers/platform/padre/padre_hwmon.c b/linux/drivers/platform/padre/padre_hwmon.c
+diff --color -urN a/linux/drivers/platform/padre/padre_hwmon.c b/linux/drivers/platform/padre/padre_hwmon.c
 --- a/drivers/platform/padre/padre_hwmon.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/platform/padre/padre_hwmon.c	2026-11-16 12:25:14.977470998 +0100
++++ b/drivers/platform/padre/padre_hwmon.c	2026-11-16 23:47:56.617099814 +0100
 @@ -0,0 +1,592 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
@@ -5927,9 +5983,9 @@ diff -urN a/linux/drivers/platform/padre/padre_hwmon.c b/linux/drivers/platform/
 +	return 0;
 +}
 +late_initcall(padre_hwmon_init);
-diff -urN a/linux/drivers/platform/padre/padre_i2c.c b/linux/drivers/platform/padre/padre_i2c.c
+diff --color -urN a/linux/drivers/platform/padre/padre_i2c.c b/linux/drivers/platform/padre/padre_i2c.c
 --- a/drivers/platform/padre/padre_i2c.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/platform/padre/padre_i2c.c	2026-11-16 11:31:50.816602639 +0100
++++ b/drivers/platform/padre/padre_i2c.c	2026-11-16 23:47:56.617185003 +0100
 @@ -0,0 +1,196 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
@@ -6127,9 +6183,9 @@ diff -urN a/linux/drivers/platform/padre/padre_i2c.c b/linux/drivers/platform/pa
 +	return 0;
 +}
 +arch_initcall(padre_i2c_init);
-diff -urN a/linux/drivers/platform/padre/padre_led.c b/linux/drivers/platform/padre/padre_led.c
+diff --color -urN a/linux/drivers/platform/padre/padre_led.c b/linux/drivers/platform/padre/padre_led.c
 --- a/drivers/platform/padre/padre_led.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/platform/padre/padre_led.c	2026-11-16 15:10:11.587741534 +0100
++++ b/drivers/platform/padre/padre_led.c	2026-11-16 23:47:56.617305203 +0100
 @@ -0,0 +1,521 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
@@ -6652,9 +6708,9 @@ diff -urN a/linux/drivers/platform/padre/padre_led.c b/linux/drivers/platform/pa
 +	return 0;
 +}
 +device_initcall(padre_led_init);
-diff -urN a/linux/drivers/platform/padre/padre_sata.c b/linux/drivers/platform/padre/padre_sata.c
+diff --color -urN a/linux/drivers/platform/padre/padre_sata.c b/linux/drivers/platform/padre/padre_sata.c
 --- a/drivers/platform/padre/padre_sata.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/platform/padre/padre_sata.c	2026-11-16 13:09:15.146411027 +0100
++++ b/drivers/platform/padre/padre_sata.c	2026-11-16 23:47:56.617459592 +0100
 @@ -0,0 +1,823 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
@@ -7479,9 +7535,9 @@ diff -urN a/linux/drivers/platform/padre/padre_sata.c b/linux/drivers/platform/p
 +	return rc;
 +}
 +late_initcall(padre_sata_init);
-diff -urN a/linux/drivers/tty/serial/Kconfig b/linux/drivers/tty/serial/Kconfig
+diff --color -urN a/linux/drivers/tty/serial/Kconfig b/linux/drivers/tty/serial/Kconfig
 --- a/drivers/tty/serial/Kconfig	2026-11-10 19:07:06.000000000 +0100
-+++ b/drivers/tty/serial/Kconfig	2026-11-16 09:35:52.563219493 +0100
++++ b/drivers/tty/serial/Kconfig	2026-11-16 23:47:56.617616601 +0100
 @@ -1099,6 +1099,20 @@
  	  If you have enabled the serial port on the BCM63xx CPU
  	  you can make it the console by answering Y to this option.
@@ -7503,9 +7559,9 @@ diff -urN a/linux/drivers/tty/serial/Kconfig b/linux/drivers/tty/serial/Kconfig
  config SERIAL_GRLIB_GAISLER_APBUART
  	tristate "GRLIB APBUART serial support"
  	depends on OF && SPARC
-diff -urN a/linux/drivers/tty/serial/Makefile b/linux/drivers/tty/serial/Makefile
+diff --color -urN a/linux/drivers/tty/serial/Makefile b/linux/drivers/tty/serial/Makefile
 --- a/drivers/tty/serial/Makefile	2026-11-10 19:07:06.000000000 +0100
-+++ b/drivers/tty/serial/Makefile	2026-11-16 09:35:52.562974734 +0100
++++ b/drivers/tty/serial/Makefile	2026-11-16 23:47:56.617740980 +0100
 @@ -29,6 +29,7 @@
  obj-$(CONFIG_SERIAL_AMBA_PL010)		+= amba-pl010.o
  obj-$(CONFIG_SERIAL_AMBA_PL011)		+= amba-pl011.o
@@ -7514,9 +7570,9 @@ diff -urN a/linux/drivers/tty/serial/Makefile b/linux/drivers/tty/serial/Makefil
  obj-$(CONFIG_SERIAL_AR933X)		+= ar933x_uart.o
  obj-$(CONFIG_SERIAL_ARC)		+= arc_uart.o
  obj-$(CONFIG_SERIAL_ATMEL)		+= atmel_serial.o
-diff -urN a/linux/drivers/tty/serial/padre_uart.c b/linux/drivers/tty/serial/padre_uart.c
+diff --color -urN a/linux/drivers/tty/serial/padre_uart.c b/linux/drivers/tty/serial/padre_uart.c
 --- a/drivers/tty/serial/padre_uart.c	1970-01-01 01:00:00.000000000 +0100
-+++ b/drivers/tty/serial/padre_uart.c	2026-11-16 10:40:31.296753015 +0100
++++ b/drivers/tty/serial/padre_uart.c	2026-11-16 23:47:56.617787070 +0100
 @@ -0,0 +1,347 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
@@ -7865,163 +7921,67 @@ diff -urN a/linux/drivers/tty/serial/padre_uart.c b/linux/drivers/tty/serial/pad
 +
 +MODULE_DESCRIPTION("UART Infrant IT3107 (Padre)");
 +MODULE_LICENSE("GPL");
-diff -urN a/linux/drivers/usb/host/ehci-hcd.c b/linux/drivers/usb/host/ehci-hcd.c
+diff --color -urN a/linux/drivers/usb/host/ehci.h b/linux/drivers/usb/host/ehci.h
+--- a/drivers/usb/host/ehci.h	2026-11-10 19:07:06.000000000 +0100
++++ b/drivers/usb/host/ehci.h	2026-11-16 23:48:48.374586717 +0100
+@@ -139,6 +139,7 @@
+ 
+ 	/* async schedule support */
+ 	struct ehci_qh		*async;
++	struct ehci_qh		*async_fixe;	/* Padre (VIA VT6212), voir ehci_init() */
+ 	struct ehci_qh		*dummy;		/* For AMD quirk use */
+ 	struct list_head	async_unlink;
+ 	struct list_head	async_idle;
+diff --color -urN a/linux/drivers/usb/host/ehci-hcd.c b/linux/drivers/usb/host/ehci-hcd.c
 --- a/drivers/usb/host/ehci-hcd.c	2026-11-10 19:07:06.000000000 +0100
-+++ b/drivers/usb/host/ehci-hcd.c	2026-11-16 15:47:17.572812637 +0100
-@@ -98,6 +98,30 @@
- #include "ehci.h"
- #include "pci-quirks.h"
++++ b/drivers/usb/host/ehci-hcd.c	2026-11-16 23:48:48.368750066 +0100
+@@ -528,6 +528,29 @@
+ 	ehci->async->qh_state = QH_STATE_LINKED;
+ 	hw->hw_alt_next = QTD_NEXT(ehci, ehci->async->dummy->qtd_dma);
  
-+#ifdef CONFIG_SPARC_PADRE
-+/* Mise au point (9e essai) : traces brutes sur l'UART, sans verrou ni
-+ * printk, pour voir si l'arrêt total vers 10 s vient d'un accès EHCI
-+ * (expiration à 5 s de l'énumération). 150 lignes au plus.
-+ */
-+#include <asm/padre.h>
-+static unsigned int padre_ehci_n;
-+#define PADRE_EHCI(fmt, ...) do {					\
-+	if (padre_ehci_n < 150) {					\
-+		char _b[112];						\
-+		int _n = scnprintf(_b, sizeof(_b), "[ehci %lu] " fmt "\n",	\
-+				   jiffies, ##__VA_ARGS__);		\
-+		padre_ehci_n++;						\
-+		padre_prom_write(0, _b, _n);				\
-+	}								\
-+} while (0)
-+/* Mode « bas » : descripteurs en mémoire cachée, on vide toute
-+ * l'antémémoire D (écriture + invalidation) autour de chaque opération. */
-+#define PADRE_BAS() do { if (padre_dma_bas) padre_flush_dcache_all(); } while (0)
-+#else
-+#define PADRE_EHCI(fmt, ...) do { } while (0)
-+#define PADRE_BAS() do { } while (0)
-+#endif
++	/* Padre : le VIA VT6212 ne relit jamais le lien horizontal du QH de
++	 * tête (H=1) une fois que le CPU l'a réécrit : seul le premier QH
++	 * chaîné était parcouru, les suivants jamais (énumération en -60).
++	 * Un QH factice permanent (H=0, arrêté, sans qTD, jamais actif) suit
++	 * donc la tête ; les vrais QH sont insérés et retirés après lui, et le
++	 * lien de la tête n'est plus jamais réécrit (async_tete_hw()).
++	 */
++	if (IS_ENABLED(CONFIG_SPARC_PADRE) && !ehci->async_fixe) {
++		struct ehci_qh *f = ehci_qh_alloc(ehci, GFP_KERNEL);
 +
- static void compute_tt_budget(u8 budget_table[EHCI_BANDWIDTH_SIZE],
- 		struct ehci_tt *tt);
- 
-@@ -151,6 +175,7 @@
- {
- 	u32	result;
- 
-+	PADRE_EHCI("handshake %p masque %x attendu %x %d us", ptr, mask, done, usec);
- 	do {
- 		result = ehci_readl(ehci, ptr);
- 		if (result == ~(u32)0)		/* card removed */
-@@ -307,6 +332,41 @@
- #include "ehci-hub.c"
- #include "ehci-mem.c"
- #include "ehci-q.c"
-+
-+#ifdef CONFIG_SPARC_PADRE
-+/* Erreur système (HSE) : mots BRUTS (tels qu'en mémoire, avant toute
-+ * conversion hc32) de chaque QH de la liste asynchrone et de ses qTD,
-+ * avec les adresses DMA, pour trouver l'adresse qui sort de la fenêtre
-+ * PCI vers la DDR. ponytail: 8 QH et 8 qTD par QH au plus.
-+ */
-+static void padre_ehci_vidage(struct ehci_hcd *ehci)
-+{
-+	struct ehci_qh *qh = ehci->async;
-+	int nq = 0;
-+
-+	for (; qh && nq < 8; qh = qh->qh_next.qh, nq++) {
-+		u32 *w = (u32 *)qh->hw;
-+		struct ehci_qtd *qtd;
-+		int nt = 0;
-+
-+		pr_err("padre ehci: QH %08x : %08x %08x %08x %08x | %08x %08x %08x | %08x %08x %08x %08x %08x\n",
-+		       (u32)qh->qh_dma, w[0], w[1], w[2], w[3], w[4], w[5], w[6],
-+		       w[7], w[8], w[9], w[10], w[11]);
-+		list_for_each_entry(qtd, &qh->qtd_list, qtd_list) {
-+			u32 *t = (u32 *)qtd;
-+
-+			if (nt++ >= 8)
-+				break;
-+			pr_err("padre ehci:   qTD %08x : %08x %08x %08x | %08x %08x %08x %08x %08x (urb %p tampon dma %08x setup %08x long %u)\n",
-+			       (u32)qtd->qtd_dma, t[0], t[1], t[2], t[3], t[4],
-+			       t[5], t[6], t[7], qtd->urb,
-+			       qtd->urb ? (u32)qtd->urb->transfer_dma : 0,
-+			       qtd->urb ? (u32)qtd->urb->setup_dma : 0,
-+			       (unsigned int)qtd->length);
-+		}
++		if (!f)
++			return -ENOMEM;
++		f->hw->hw_info1 = cpu_to_hc32(ehci, QH_HIGH_SPEED | (64 << 16));
++		f->hw->hw_info2 = cpu_to_hc32(ehci, 1 << 30);
++		f->hw->hw_token = cpu_to_hc32(ehci, QTD_STS_HALT);
++		f->hw->hw_qtd_next = EHCI_LIST_END(ehci);
++		f->hw->hw_alt_next = EHCI_LIST_END(ehci);
++		f->hw->hw_next = hw->hw_next;	/* = la tête */
++		wmb();
++		hw->hw_next = QH_NEXT(ehci, f->qh_dma);
++		ehci->async_fixe = f;
 +	}
-+}
-+#endif
- #include "ehci-sched.c"
- #include "ehci-sysfs.c"
- 
-@@ -718,8 +778,11 @@
- 
- 	spin_lock(&ehci->lock);
- 
-+	PADRE_BAS();
-+	PADRE_EHCI("irq : lecture status");
- 	status = 0;
- 	current_status = ehci_readl(ehci, &ehci->regs->status);
-+	PADRE_EHCI("irq : status %08x", current_status);
- restart:
- 
- 	/* e.g. cardbus physical eject */
-@@ -839,6 +902,9 @@
- 	/* PCI errors [4.15.2.4] */
- 	if (unlikely ((status & STS_FATAL) != 0)) {
- 		ehci_err(ehci, "fatal error\n");
-+#ifdef CONFIG_SPARC_PADRE
-+		padre_ehci_vidage(ehci);
-+#endif
- 		dbg_cmd(ehci, "fatal", cmd);
- 		dbg_status(ehci, "fatal", status);
- dead:
-@@ -858,6 +924,7 @@
- 
- 	if (bh)
- 		ehci_work (ehci);
-+	PADRE_BAS();
- 	spin_unlock(&ehci->lock);
- 	if (pcd_status)
- 		usb_hcd_poll_rh_status(hcd);
-@@ -900,12 +967,22 @@
- 	default:
- 		if (!qh_urb_transaction (ehci, urb, &qtd_list, mem_flags))
- 			return -ENOMEM;
--		return submit_async(ehci, urb, &qtd_list, mem_flags);
-+		{
-+			int rc = submit_async(ehci, urb, &qtd_list, mem_flags);
 +
-+			PADRE_BAS();
-+			return rc;
-+		}
+ 	/* clear interrupt enables, set irq latency */
+ 	if (log2_irq_thresh < 0 || log2_irq_thresh > 6)
+ 		log2_irq_thresh = 0;
+diff --color -urN a/linux/drivers/usb/host/ehci-mem.c b/linux/drivers/usb/host/ehci-mem.c
+--- a/drivers/usb/host/ehci-mem.c	2026-11-10 19:07:06.000000000 +0100
++++ b/drivers/usb/host/ehci-mem.c	2026-11-16 23:48:48.368883885 +0100
+@@ -109,6 +109,10 @@
+ 		qh_destroy(ehci, ehci->async);
+ 	ehci->async = NULL;
  
- 	case PIPE_INTERRUPT:
- 		if (!qh_urb_transaction (ehci, urb, &qtd_list, mem_flags))
- 			return -ENOMEM;
--		return intr_submit(ehci, urb, &qtd_list, mem_flags);
-+		{
-+			int rc = intr_submit(ehci, urb, &qtd_list, mem_flags);
++	if (ehci->async_fixe)
++		qh_destroy(ehci, ehci->async_fixe);
++	ehci->async_fixe = NULL;
 +
-+			PADRE_BAS();
-+			return rc;
-+		}
- 
- 	case PIPE_ISOCHRONOUS:
- 		if (urb->dev->speed == USB_SPEED_HIGH)
-@@ -926,6 +1003,14 @@
- 	unsigned long		flags;
- 	int			rc;
- 
-+	PADRE_EHCI("dequeue urb %p ep %02x statut %d", urb, urb->ep->desc.bEndpointAddress, status);
-+	/* Expiration (-60) : état du contrôleur et de la file asynchrone */
-+	PADRE_EHCI("USBCMD %08x USBSTS %08x ASYNC %08x (qh %08x) PORTSC3 %08x",
-+		   ehci_readl(ehci, &ehci->regs->command),
-+		   ehci_readl(ehci, &ehci->regs->status),
-+		   ehci_readl(ehci, &ehci->regs->async_next),
-+		   (u32)ehci->async->qh_dma,
-+		   ehci_readl(ehci, &ehci->regs->port_status[2]));
- 	spin_lock_irqsave (&ehci->lock, flags);
- 	rc = usb_hcd_check_unlink_urb(hcd, urb, status);
- 	if (rc)
-diff -urN a/linux/drivers/usb/host/ehci-pci.c b/linux/drivers/usb/host/ehci-pci.c
+ 	if (ehci->dummy)
+ 		qh_destroy(ehci, ehci->dummy);
+ 	ehci->dummy = NULL;
+diff --color -urN a/linux/drivers/usb/host/ehci-pci.c b/linux/drivers/usb/host/ehci-pci.c
 --- a/drivers/usb/host/ehci-pci.c	2026-11-10 19:07:06.000000000 +0100
-+++ b/drivers/usb/host/ehci-pci.c	2026-11-16 16:58:49.284711551 +0100
++++ b/drivers/usb/host/ehci-pci.c	2026-11-16 23:48:48.369089114 +0100
 @@ -13,6 +13,9 @@
  
  #include "ehci.h"
@@ -8032,101 +7992,75 @@ diff -urN a/linux/drivers/usb/host/ehci-pci.c b/linux/drivers/usb/host/ehci-pci.
  
  #define DRIVER_DESC "EHCI PCI platform driver"
  
-@@ -69,7 +72,16 @@
- 	 */
- 
- 	/* PCI Memory-Write-Invalidate cycle support is optional (uncommon) */
-+#ifdef CONFIG_SPARC_PADRE
-+	/* Padre : pas de MWI (COMMAND valait 0x0016) : rien ne dit que le pont
-+	 * PCI→DDR accepte cette commande ; une écriture maître refusée donne
-+	 * une « Host System Error ». Simple optimisation, on s'en passe.
-+	 */
-+	pci_clear_mwi(pdev);
-+	retval = -EINVAL;
-+#else
- 	retval = pci_set_mwi(pdev);
-+#endif
- 	if (!retval)
- 		ehci_dbg(ehci, "MWI active\n");
- 
-@@ -95,6 +107,26 @@
+@@ -95,6 +98,12 @@
  	int			retval;
  
  	ehci->caps = hcd->regs;
 +#ifdef CONFIG_SPARC_PADRE
-+	/* Pont PCI Padre en PCI_SWAP = 0x4444 : registres lus sans
-+	 * permutation (2.6.17 : readl natif), descripteurs en petit-boutiste.
++	/* Pont PCI Padre en PCI_SWAP = 0x4444 (défaut) : registres déjà dans
++	 * l'ordre du CPU (2.6.17 : readl natif) ; descripteurs petit-boutistes.
 +	 */
-+	/* PCI_SWAP=0 (comme iboot) : accès registres petit-boutistes standard */
 +	ehci->big_endian_mmio = padre_pciswap != 0;
-+	ehci->big_endian_desc = padre_ehci_be;
-+	dev_info(&pdev->dev, "padre : descripteurs %s-boutistes, DMA cohérent %s\n",
-+		 padre_ehci_be ? "gros" : "petit", padre_dma_bas ? "bas" : "haut");
-+	{
-+		u32 __iomem *r = hcd->regs;
-+		int i;
-+
-+		/* diagnostic : registres bruts (capacités puis opérationnels) */
-+		for (i = 0; i < 12; i += 4)
-+			dev_info(&pdev->dev, "padre : regs +%02x : %08x %08x %08x %08x\n",
-+				 i * 4, __raw_readl(r + i), __raw_readl(r + i + 1),
-+				 __raw_readl(r + i + 2), __raw_readl(r + i + 3));
-+	}
 +#endif
  
  	/*
  	 * ehci_init() causes memory for DMA transfers to be
-diff -urN a/linux/drivers/usb/host/ehci-q.c b/linux/drivers/usb/host/ehci-q.c
+@@ -173,7 +182,9 @@
+ 		}
+ 		break;
+ 	case PCI_VENDOR_ID_VIA:
+-		if (pdev->device == 0x3104 && (pdev->revision & 0xf0) == 0x60) {
++		/* Padre : registre 0x4b laissé comme sous le 2.6.17 (0x09) */
++		if (!IS_ENABLED(CONFIG_SPARC_PADRE) &&
++		    pdev->device == 0x3104 && (pdev->revision & 0xf0) == 0x60) {
+ 			u8 tmp;
+ 
+ 			/* The VT6212 defaults to a 1 usec EHCI sleep time which
+diff --color -urN a/linux/drivers/usb/host/ehci-q.c b/linux/drivers/usb/host/ehci-q.c
 --- a/drivers/usb/host/ehci-q.c	2026-11-10 19:07:06.000000000 +0100
-+++ b/drivers/usb/host/ehci-q.c	2026-11-16 14:11:09.194345846 +0100
-@@ -1272,6 +1272,7 @@
++++ b/drivers/usb/host/ehci-q.c	2026-11-16 23:48:48.369324683 +0100
+@@ -947,6 +947,14 @@
  
- static void start_iaa_cycle(struct ehci_hcd *ehci)
- {
-+	PADRE_EHCI("début cycle IAA, rh_state %d", ehci->rh_state);
- 	/* If the controller isn't running, we don't have to wait for it */
- 	if (unlikely(ehci->rh_state < EHCI_RH_RUNNING)) {
- 		end_unlink_async(ehci);
-@@ -1293,6 +1294,7 @@
+ /*-------------------------------------------------------------------------*/
  
- static void end_iaa_cycle(struct ehci_hcd *ehci)
- {
-+	PADRE_EHCI("fin cycle IAA");
- 	if (ehci->has_synopsys_hc_bug)
- 		ehci_writel(ehci, (u32) ehci->async->qh_dma,
- 			    &ehci->regs->async_next);
-diff -urN a/linux/drivers/usb/host/ehci-timer.c b/linux/drivers/usb/host/ehci-timer.c
---- a/drivers/usb/host/ehci-timer.c	2026-11-10 19:07:06.000000000 +0100
-+++ b/drivers/usb/host/ehci-timer.c	2026-11-16 15:23:37.921141609 +0100
-@@ -404,6 +404,17 @@
- 	unsigned	e;
- 
- 	spin_lock_irqsave(&ehci->lock, flags);
-+	PADRE_BAS();
-+#ifdef CONFIG_SPARC_PADRE
-+	{
-+		static unsigned int dern;
++/* Lien horizontal que le CPU réécrit pour insérer ou retirer un QH juste
++ * après la tête : celui du QH factice sur Padre (VT6212, voir ehci_init()).
++ */
++static inline struct ehci_qh_hw *async_tete_hw(struct ehci_hcd *ehci)
++{
++	return ehci->async_fixe ? ehci->async_fixe->hw : ehci->async->hw;
++}
 +
-+		if (ehci->enabled_hrtimer_events != dern) {
-+			dern = ehci->enabled_hrtimer_events;
-+			PADRE_EHCI("hrtimer événements %x", dern);
-+		}
-+	}
-+#endif
+ static void enable_async(struct ehci_hcd *ehci)
+ {
+ 	if (ehci->async_count++)
+@@ -992,11 +1000,11 @@
+ 	/* splice right after start */
+ 	head = ehci->async;
+ 	qh->qh_next = head->qh_next;
+-	qh->hw->hw_next = head->hw->hw_next;
++	qh->hw->hw_next = async_tete_hw(ehci)->hw_next;
+ 	wmb ();
  
- 	events = ehci->enabled_hrtimer_events;
- 	ehci->enabled_hrtimer_events = 0;
-@@ -421,6 +432,7 @@
- 			ehci_enable_event(ehci, e, false);
- 	}
+ 	head->qh_next.qh = qh;
+-	head->hw->hw_next = dma;
++	async_tete_hw(ehci)->hw_next = dma;
  
-+	PADRE_BAS();
- 	spin_unlock_irqrestore(&ehci->lock, flags);
- 	return HRTIMER_NORESTART;
- }
-diff -urN a/linux/drivers/usb/host/pci-quirks.c b/linux/drivers/usb/host/pci-quirks.c
+ 	qh->qh_state = QH_STATE_LINKED;
+ 	qh->xacterrs = 0;
+@@ -1264,7 +1272,8 @@
+ 	while (prev->qh_next.qh != qh)
+ 		prev = prev->qh_next.qh;
+ 
+-	prev->hw->hw_next = qh->hw->hw_next;
++	(prev == ehci->async ? async_tete_hw(ehci) : prev->hw)->hw_next =
++		qh->hw->hw_next;
+ 	prev->qh_next = qh->qh_next;
+ 	if (ehci->qh_scan_next == qh)
+ 		ehci->qh_scan_next = qh->qh_next.qh;
+diff --color -urN a/linux/drivers/usb/host/pci-quirks.c b/linux/drivers/usb/host/pci-quirks.c
 --- a/drivers/usb/host/pci-quirks.c	2026-11-10 19:07:06.000000000 +0100
-+++ b/drivers/usb/host/pci-quirks.c	2026-11-16 12:03:45.526200222 +0100
++++ b/drivers/usb/host/pci-quirks.c	2026-11-16 23:48:48.372065569 +0100
 @@ -1260,6 +1260,12 @@
  
  static void quirk_usb_early_handoff(struct pci_dev *pdev)

@@ -14,11 +14,13 @@ GPL du noyau 2.6.17 publiées par NETGEAR (voir [FAISABILITE.md](FAISABILITE.md)
 |---|---|
 | Démarrage par iboot + TFTP, console série ttyS1 (9600 bauds) | marche |
 | MMU, antémémoires, interruptions, minuterie, sommeil/réveil des tâches | marche |
-| Émulation FPU (le Padre n'en a pas) : programmes en flottant matériel | marche |
+| Émulation FPU (le Padre n'en a pas) : programmes en flottant matériel, `printf("%f")`, awk | marche (fmovs/fnegs/fabss corrigés dans `math-emu/math_32.c` : le Padre émule tout, y compris ces copies) |
 | initramfs intégré, `/init`, busybox, fork/exec, fautes de page | marche |
 | Disques SATA (libata, PIO ; DMA par le coprocesseur LP en option) | détectés |
 | Ethernet, voyants, bouton, ventilateur/température (`drivers/platform/padre`) | portés, à valider |
-| **USB EHCI** | **en cours** : le contrôleur tourne mais chaque accès maître PCI vers la DDR finit en *Master Abort* (HSE) ; la racine sur clé USB n'est donc pas encore atteinte et `/init` finit sur un shell de secours |
+| USB EHCI (VIA VT6212) | marche : arbitrage AHB du 2.6.17 rétabli ; le VT6212 ne relit jamais le lien horizontal du QH de tête une fois réécrit par le CPU, un QH factice permanent suit donc la tête et les vrais QH sont chaînés après lui |
+| Démarrage sur la clé USB (`/rootfs-6.18`), console `quiet` | marche : racine atteinte vers 3 s après le lancement du noyau |
+| Programmes dynamiques (ld-uClibc) | marche : ld.so exécute `flush` après avoir réécrit la PLT (patch uClibc), le noyau traite ce `flush` (écriture de l'antémémoire D, invalidation de la I) |
 | ksmbd, NFS v3/v4, mdadm, fuse2fs (ext3 X-RAID à blocs de 16 Ko) | construits, non testés |
 | Tableau de bord web [DIET](#tableau-de-bord-web-diet) (lighttpd HTTPS) | porté, testé en simulation |
 
@@ -52,14 +54,17 @@ Résultat dans `output/images/` :
 
 * `vmlinux.bin` : noyau brut lié à 0x8000_4000, avec l'initramfs intégré ;
 * `vmlinux.k3` : le même, chiffré pour iboot (`readynas_crypto -k3`, construit pendant
-  `post-image.sh`) ; `vmlinux-<n>-….k3` : variantes de mise au point de l'USB (même noyau, seuls
-  les paramètres `padre.*` de la ligne de commande intégrée changent) ;
+  `post-image.sh`) ;
 * `rootfs.tar` : le système, à extraire dans `/rootfs-6.18` d'une partition ext3/ext4 d'une clé USB
   (l'initramfs cherche ce dossier et y bascule).
 
 `post-image.sh` vérifie aussi l'adresse de chargement, l'absence de `sdiv`/`sdivcc`/`casa` dans le
 noyau, le système et l'initramfs, et qu'aucune instruction flottante n'est exécutée par le chemin
-d'émulation FPU du noyau.
+d'émulation FPU du noyau, et que la ligne de commande intégrée fait moins de 256 caractères.
+
+La chaîne applique `board/readynas-duo-v1/patches/uclibc/` : `flush` après chaque réécriture
+d'instructions par ld-uClibc (PLT), sans quoi l'antémémoire d'instructions du Padre exécutait
+l'ancienne PLT (segfaults dans `_dl_linux_resolver`).
 
 ### Chaîne précompilée (construction rapide)
 
@@ -112,9 +117,18 @@ de récupération.
 |---|---|
 | `padre.desactive=a,b` | ne pas lancer certains pilotes Padre (mise au point) |
 | `padre_sata.dma=0/1` | DMA disque par le coprocesseur LP (0 = PIO, défaut) |
-| `padre.trace_faute=N`, `padre.trace_tick=0/1` | traces des fautes de page, état du tic (`/proc/padre_tic`) |
-| `padre.ehci=le-haut/be-haut/le-bas/be-bas` | ordre des octets des descripteurs EHCI, place du DMA cohérent |
-| `padre.pcibus=<hex>`, `padre.pcifeat=<hex>`, `padre.pciswap=<hex>`, `padre.ahbarb=<n>` | réglages du pont PCI (mise au point de l'USB) |
+| `padre.trace_faute=N` | affiche les N premières fautes de page utilisateur |
+| `padre.trace_tick=1` | état du tic dans `/proc/padre_tic` et lignes `[pouls]`/`[chien]` sur la console (défaut 0) |
+| `padre_mm.flush=1/2/0` | traitement de l'instruction `flush` : 1 (défaut) antémémoire D entière + I ; 2 ligne D visée seulement ; 0 sautée (diagnostic). Aussi à chaud : `/sys/module/padre_mm/parameters/flush` |
+| `padre.pcibus=<hex>`, `padre.pcifeat=<hex>`, `padre.pciswap=<hex>`, `padre.ahbarb=<n>` | réglages du pont PCI (défauts du 2.6.17) |
+| `essais=1` | `/init` lance d'abord les essais de l'initramfs (flottant t1–t11, fenêtres, charge, sommeil) |
+
+Défaut : `console=ttyS1,9600 quiet panic=10` (journal complet dans `dmesg`).
+
+Essais à la console (paquet `readynas-tests`, dans `/usr/bin`) : `essai-flush avec` (antémémoire I
+après réécriture de code, 0 erreur attendue ; `sans` doit en montrer), `essai-fp-s`, `essai-fp-d`,
+`essai-fp-n` (émulation FPU en statique, dynamique PIE, dynamique non PIE), `essai-ldso 200`
+(programmes dynamiques en boucle, 0 échec et 0 segfault ld-uClibc attendus).
 
 ## Tableau de bord web (DIET)
 
@@ -144,12 +158,14 @@ configs/readynas_ng_defconfig            système complet, chaîne construite
 configs/readynas_ng_rapide_defconfig     même système, chaîne précompilée (make rapide)
 configs/readynas_ng_toolchain_defconfig  chaîne seule (make toolchain-sdk)
 package/readynas-initramfs/      busybox statique sans flottant + tests, pour l'initramfs
+package/readynas-tests/          essais du portage dans le rootfs (essai-flush, essai-fp-*, essai-ldso)
 package/diet/                    tableau de bord web DIET porté sur 6.18 (+ tests/essai-api.sh)
 docs/DIET.md                     ce qui change par rapport à DIET
 board/readynas-duo-v1/
   linux-padre.config, linux-padre-nas.fragment
   patches/linux/                 plateforme Padre pour Linux 6.18.63 (arch/sparc, pilotes)
   patches/e2fsprogs/             fuse2fs avec uClibc-ng
+  patches/uclibc/                flush après réécriture de la PLT par ld-uClibc
   initramfs/                     /init, liste gen_init_cpio, sources des tests
   rootfs-overlay/                ksmbd, NFS, régulation du ventilateur
   readynas_crypto/               outil de chiffrement iboot (GPL), compilé par post-image.sh

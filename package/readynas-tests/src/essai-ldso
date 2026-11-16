@@ -1,0 +1,20 @@
+#!/bin/sh
+# essai-ldso [N] : lance N fois (défaut 200) des programmes dynamiques PIE
+# (busybox sh/sed/ls/awk flottant, mdadm, e2fsck), puis compte les nouveaux
+# « segfault … ld-uClibc » du journal noyau. Réussite : 0 échec, 0 segfault.
+n=${1:-200}
+avant=$(dmesg | grep -c 'segfault.*ld-uClibc')
+i=0
+echecs=0
+while [ "$i" -lt "$n" ]; do
+	/bin/sh -c 'echo a | /bin/sed s/a/b/ | /bin/grep -q b' || echecs=$((echecs + 1))
+	/bin/ls / > /dev/null || echecs=$((echecs + 1))
+	/sbin/mdadm --version > /dev/null 2>&1 || echecs=$((echecs + 1))
+	/sbin/e2fsck -V > /dev/null 2>&1 || echecs=$((echecs + 1))
+	# flottant dans un programme dynamique (régression de l'essai r)
+	[ "$(awk 'BEGIN{printf "%s %.2f", 1+1, 3/2}')" = "2 1.50" ] || echecs=$((echecs + 1))
+	i=$((i + 1))
+done
+apres=$(dmesg | grep -c 'segfault.*ld-uClibc')
+echo "essai-ldso : $n tours, $echecs échecs, $((apres - avant)) segfaults ld-uClibc"
+[ "$echecs" = 0 ] && [ "$apres" = "$avant" ]
