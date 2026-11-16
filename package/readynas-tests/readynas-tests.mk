@@ -1,6 +1,6 @@
 ################################################################################
 #
-# readynas-tests : essais du portage Padre (antémémoire I, FPU émulée, ld.so)
+# readynas-tests: Padre port tests (I-cache, emulated FPU, ld.so)
 #
 ################################################################################
 
@@ -10,14 +10,14 @@ READYNAS_TESTS_SITE_METHOD = local
 READYNAS_TESTS_LICENSE = GPL-2.0
 
 define READYNAS_TESTS_BUILD_CMDS
-	$(TARGET_CC) $(TARGET_CFLAGS) -static -o $(@D)/essai-flush $(@D)/essai-flush.c
-	$(TARGET_CC) $(TARGET_CFLAGS) -static -o $(@D)/essai-fp-s $(@D)/essai-fp.c
-	$(TARGET_CC) $(TARGET_CFLAGS) -fPIE -pie -o $(@D)/essai-fp-d $(@D)/essai-fp.c
-	$(TARGET_CC) $(TARGET_CFLAGS) -no-pie -o $(@D)/essai-fp-n $(@D)/essai-fp.c
+	$(TARGET_CC) $(TARGET_CFLAGS) -static -o $(@D)/test-flush $(@D)/test-flush.c
+	$(TARGET_CC) $(TARGET_CFLAGS) -static -o $(@D)/test-fp-s $(@D)/test-fp.c
+	$(TARGET_CC) $(TARGET_CFLAGS) -fPIE -pie -o $(@D)/test-fp-d $(@D)/test-fp.c
+	$(TARGET_CC) $(TARGET_CFLAGS) -no-pie -o $(@D)/test-fp-n $(@D)/test-fp.c
 endef
 
 define READYNAS_TESTS_INSTALL_TARGET_CMDS
-	for p in essai-flush essai-fp-s essai-fp-d essai-fp-n essai-ldso; do \
+	for p in test-flush test-fp-s test-fp-d test-fp-n test-ldso; do \
 		$(INSTALL) -D -m 0755 $(@D)/$$p $(TARGET_DIR)/usr/bin/$$p || exit 1; \
 	done
 endef

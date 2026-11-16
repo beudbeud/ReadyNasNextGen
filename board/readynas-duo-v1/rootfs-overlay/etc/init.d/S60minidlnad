@@ -1,7 +1,7 @@
 #!/bin/sh
-# MiniDLNA (ReadyMedia), conf /etc/minidlna.conf. Remplace le script de Buildroot
-# pour ne pas démarrer si SVC_MINIDLNA=0 dans /etc/diet.conf (arrêté depuis
-# l'interface DIET) ; force-reload = réindexation complète (minidlnad -R).
+# MiniDLNA (ReadyMedia), config /etc/minidlna.conf. Replaces the Buildroot script
+# so that it does not start when SVC_MINIDLNA=0 in /etc/diet.conf (stopped from
+# the DIET interface); force-reload = full rescan (minidlnad -R).
 PID=/var/run/minidlna/minidlna.pid
 start() {
 	grep -qs '^SVC_MINIDLNA=0' /etc/diet.conf && { echo "minidlna: disabled (/etc/diet.conf)"; return 0; }

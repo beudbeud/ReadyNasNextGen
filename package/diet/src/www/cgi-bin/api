@@ -1,43 +1,43 @@
 #!/bin/sh
-# API web de DIET (CGI lancé par lighttpd), ReadyNAS Duo v1 sous Linux 6.18.
-#   GET  ?a=status | config | shares | users | nfs | sys | hist | stockage | services
-#        ?a=log&f=diet|messages|dmesg|stockage   ?a=smart&d=sda   ?a=md&d=md0
+# DIET web API (CGI run by lighttpd), ReadyNAS Duo v1 on Linux 6.18.
+#   GET  ?a=status | config | shares | users | nfs | sys | hist | storage | services
+#        ?a=log&f=diet|messages|dmesg|storage    ?a=smart&d=sda   ?a=md&d=md0
 #   POST ?a=spindown|ksmbd|nfsd|ntp|reboot|poweroff|config|share_add|share_del|share_set
 #        |user_set|user_del|nfs_add|nfs_del|sys_set|notify_test
 #        |svc_set|dlna_set|dlna_scan|rsync_pw|rsync_c
-#        |raid_verifier|raid_plan|raid_lancer   (en-tête X-Diet: 1 obligatoire)
-# Langue des messages : &l=fr|de|en.
-# Essai sur PC : DIET_RACINE=/chemin/racine-factice préfixe tous les fichiers lus
-# ou écrits (/proc, /sys, /etc, /var) et place $DIET_RACINE/bin en tête du PATH
-# (commandes simulées) ; voir package/diet/tests/.
-R=${DIET_RACINE:-}
+#        |raid_verify|raid_plan|raid_run   (X-Diet: 1 header required)
+# Message language: &l=fr|de|en.
+# Testing on a PC: DIET_ROOT=/path/to/fake-root prefixes every file read or
+# written (/proc, /sys, /etc, /var) and puts $DIET_ROOT/bin first in PATH
+# (simulated commands); see package/diet/tests/.
+R=${DIET_ROOT:-}
 export PATH=${R:+$R/bin:}/bin:/sbin:/usr/bin:/usr/sbin
 
-# Cache du collecteur (ce même script lancé par S95diet avec DIET_COLLECTE=1, voir
-# collecte plus bas) : réponses JSON prêtes, écrites par fichier temporaire puis mv.
-# Lecture rapide ici, avant que ash ait à lire le reste du script : uniquement des
-# commandes internes du shell (et cat, applet « nofork » de busybox), aucun processus.
+# Collector cache (this same script started by S95diet with DIET_COLLECT=1, see
+# collect() below): ready JSON answers, written to a temporary file then mv'd.
+# Fast path here, before ash has to read the rest of the script: shell builtins
+# only (and cat, a busybox "nofork" applet), no process.
 C=$R/var/run/diet
-if [ "$REQUEST_METHOD" = GET ] && [ -z "${DIET_COLLECTE:-}" ]; then
+if [ "$REQUEST_METHOD" = GET ] && [ -z "${DIET_COLLECT:-}" ]; then
   q="&$QUERY_STRING&"; A=${q#*&a=}; [ "$A" = "$q" ] && A= || A=${A%%&*}; A=${A:-status}
-  case $A in status|all|services|shares|nfs|sys|users|config|stockage)
+  case $A in status|all|services|shares|nfs|sys|users|config|storage)
     if read -r P 2>/dev/null < "$C/pid" && kill -0 "$P" 2>/dev/null; then
-      # demande vue : le collecteur passe au rythme rapide (et se réveille s'il dormait)
-      read -r UP _ < "$R/proc/uptime" && echo "${UP%.*}" > "$C/vu"
-      [ -e "$C/actif" ] || { [ -p "$C/reveil" ] && echo vu 1<> "$C/reveil"; }
+      # request seen: the collector switches to the fast pace (and wakes up if asleep)
+      read -r UP _ < "$R/proc/uptime" && echo "${UP%.*}" > "$C/seen"
+      [ -e "$C/active" ] || { [ -p "$C/wake" ] && echo seen 1<> "$C/wake"; }
       if [ -r "$C/$A.json" ]; then
         printf 'Content-Type: application/json\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n'
         exec cat "$C/$A.json"
       fi
     fi ;;
-  hist)	# historique de diet-hwmon, déjà un fichier
+  hist)	# diet-hwmon history, already a file
     printf 'Content-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n'
     exec cat "$R/var/run/hwmon.hist" 2>/dev/null ;;
   esac
 fi
 
 CONF=$R/etc/diet.conf
-VCONF=$R/etc/ventilateur.conf
+VCONF=$R/etc/fan.conf
 KCONF=$R/etc/ksmbd/ksmbd.conf
 PWDDB=$R/etc/ksmbd/ksmbdpwd.db
 EXPORTS=$R/etc/exports
@@ -47,13 +47,13 @@ RUN=$R/var/run
 LOG=$R/var/log/diet.log
 INITD=$R/etc/init.d
 DATA=/c
-VKEYS="FAN_PWM_MIN FAN_PWM_MAX TEMP_LOW TEMP_HIGH DISK_HIGH DISK_CRIT PERIODE"
+VKEYS="FAN_PWM_MIN FAN_PWM_MAX TEMP_LOW TEMP_HIGH DISK_HIGH DISK_CRIT PERIOD"
 KEYS="SPINDOWN_MIN $VKEYS"
 
 hdr() { printf 'Content-Type: %s\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n' "$1"; }
 fail() { printf 'Status: %s\r\n' "$1"; hdr 'text/plain; charset=utf-8'; echo "$2"; exit 0; }
 ok() { hdr application/json; echo "{\"ok\":true,\"msg\":\"$(printf '%s' "$1" | esc)\"}"; }
-# qp nom : paramètre de la requête dans $QP ([A-Za-z0-9_] seulement, sinon vide)
+# qp name: query parameter in $QP ([A-Za-z0-9_] only, otherwise empty)
 qp() {
   QP="&$QUERY_STRING&"
   case $QP in *"&$1="*) QP=${QP#*&$1=}; QP=${QP%%&*};; *) QP=;; esac
@@ -62,15 +62,15 @@ qp() {
 qp l; case $QP in fr) L=fr;; de) L=de;; *) L=en;; esac
 tx() { case $L in fr) printf '%s' "$1";; de) printf '%s' "$2";; *) printf '%s' "$3";; esac; }
 esc() { sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\000-\037'; }
-# je texte : texte prêt pour une chaîne JSON dans $J (sed seulement s'il y a " \ ou un caractère de contrôle)
-je() { case $1 in *[\"\\]*|*[[:cntrl:]]*) J=$(printf '%s' "$1" | esc);; *) J=$1;; esac; }
-# nb VAR… : remet à 0 une variable qui n'est pas un entier positif (JSON toujours valide)
-nb() { for v; do eval "case \${$v} in ''|*[!0-9]*) $v=0;; esac"; done; }
+# jstr text: text ready for a JSON string in $J (sed only if there is " \ or a control character)
+jstr() { case $1 in *[\"\\]*|*[[:cntrl:]]*) J=$(printf '%s' "$1" | esc);; *) J=$1;; esac; }
+# int0 VAR...: resets to 0 a variable that is not a positive integer (JSON always valid)
+int0() { for v; do eval "case \${$v} in ''|*[!0-9]*) $v=0;; esac"; done; }
 bg() { setsid sh -c "$1" </dev/null >/dev/null 2>&1 & }
 note() { echo "[$(date '+%F %T')] $1 (${REMOTE_ADDR:-?})" >> "$LOG" 2>/dev/null; }
-# décodage application/x-www-form-urlencoded (octets, sans dépendre de httpd -d).
-# En shell pur, sans awk : l'awk du NAS calcule en flottants (émulés par le noyau).
-# Chaque octet devient un échappement octal \NNN pour un seul printf final.
+# application/x-www-form-urlencoded decoding (bytes, without relying on httpd -d).
+# Pure shell, no awk: the NAS awk computes in floating point (emulated by the kernel).
+# Each byte becomes an octal escape \NNN for a single final printf.
 urldec() {
   s=$1; f=
   while [ -n "$s" ]; do
@@ -93,9 +93,9 @@ isip() {
   case $1 in *[!0-9.]*|.*|*.|*..*) return 1;; esac
   ( IFS=.; set -- $1; [ $# = 4 ] || exit 1; for o; do [ ${#o} -le 3 ] && [ "$o" -le 255 ] || exit 1; done )
 }
-# disques SATA (libata) : sda, sdb… ; la baie vient du port ata (ata1 = baie 1)
+# SATA disks (libata): sda, sdb...; the bay comes from the ata port (ata1 = bay 1)
 disks() { for b in "$R"/sys/block/sd*; do [ -d "$b" ] && echo "${b##*/}"; done; }
-# dtemp disque : température drivetemp en °C dans $DT (vide si inconnue)
+# dtemp disk: drivetemp temperature in degrees C in $DT (empty if unknown)
 dtemp() { DT=; for f in "$R/sys/block/$1"/device/hwmon/hwmon*/temp1_input; do t=; read -r t 2>/dev/null < "$f"; case $t in ''|*[!0-9]*) ;; *) DT=$((t / 1000)); return;; esac; done; }
 mds() { awk '/^md[0-9]+ :/ { print $1 }' "$R/proc/mdstat" 2>/dev/null; }
 mounted() {
@@ -106,16 +106,16 @@ mounted() {
 NL='
 '
 
-# État général. Tout est lu par le shell (read, développements de variables, $((…))
-# en entiers 64 bits) : deux processus seulement (ifconfig, df), aucun flottant.
+# General status. Everything is read by the shell (read, parameter expansion, $((...))
+# in 64-bit integers): only two processes (ifconfig, df), no floating point.
 status() {
   read -r H < "$R/proc/sys/kernel/hostname"
   read -r UP _ < "$R/proc/uptime"
   read -r L1 L5 L15 _ < "$R/proc/loadavg"
   VER=; read -r VER 2>/dev/null < "$ETC/diet-version"
-  # état de padre-ventilateur : « temp=.. disques=.. fan=.. pwm=.. »
+  # padre-fan state: "temp=.. disks=.. fan=.. pwm=.."
   temp=; fan=; pwm=; E=
-  read -r E 2>/dev/null < "$RUN/ventilateur.etat"
+  read -r E 2>/dev/null < "$RUN/fan.state"
   for kv in $E; do
     v=${kv#*=}; case "$v" in ''|*[!0-9]*) continue;; esac
     case "${kv%%=*}" in temp) temp=$v;; fan) fan=$v;; pwm) pwm=$v;; esac
@@ -123,26 +123,26 @@ status() {
   [ "$temp" = 0 ] && temp=
   MODEL=
   [ -r "$R/proc/sys/dev/boot/info" ] && while read -r k v; do [ "$k" = model: ] && { MODEL=$v; break; }; done < "$R/proc/sys/dev/boot/info"
-  je "$MODEL"; MODEL=$J; je "$H"; H=$J; je "$VER"; VER=$J
+  jstr "$MODEL"; MODEL=$J; jstr "$H"; H=$J; jstr "$VER"; VER=$J
   I=$(ifconfig eth0 2>/dev/null); IP=
   case $I in *"inet addr:"*) IP=${I#*inet addr:}; IP=${IP%%[!0-9.]*};; esac
-  # services : un passage sur /proc/<pid>/comm (au lieu d'un pidof par service)
+  # services: one pass over /proc/<pid>/comm (instead of one pidof per service)
   ks=0; web=0; ssh=0; ntp=0
   for p in "$R"/proc/[0-9]*; do
     c=; read -r c 2>/dev/null < "$p/comm" || continue
     case $c in ksmbd.mountd) ks=1;; lighttpd) web=1;; dropbear) ssh=1;; ntpd) ntp=1;; esac
   done
   SVC="\"ksmbd\":$ks,\"web\":$web,\"ssh\":$ssh,\"ntpd\":$ntp,"
-  alive "$RUN/ventilateur.pid" && s=1 || s=0; SVC="$SVC\"fan\":$s,"
+  alive "$RUN/fan.pid" && s=1 || s=0; SVC="$SVC\"fan\":$s,"
   alive "$RUN/diet-hwmon.pid" && s=1 || s=0; SVC="$SVC\"hwmon\":$s"
   if [ -r "$EXPORTS" ]; then
     x=; while read -r l; do case $l in /*) x=1; break;; esac; done < "$EXPORTS"
     if [ -n "$x" ]; then
-      n=0; read -r n 2>/dev/null < "$R/proc/fs/nfsd/threads"; nb n
+      n=0; read -r n 2>/dev/null < "$R/proc/fs/nfsd/threads"; int0 n
       [ "$n" -gt 0 ] && s=1 || s=0; SVC="$SVC,\"nfs\":$s"
     fi
   fi
-  # RAID md : nom, état, niveau, carte [UU], synchronisation ; disques marqués (F)
+  # md RAID: name, state, level, map [UU], sync; disks marked (F)
   MD=; FAULTY=" "; name=
   mdflush() { [ -n "$name" ] && MD="$MD${MD:+,}{\"name\":\"$name\",\"state\":\"$st\",\"level\":\"$lvl\",\"map\":\"$map\",\"sync\":\"$sy\"}"; name=; }
   if [ -r "$R/proc/mdstat" ]; then
@@ -160,7 +160,7 @@ status() {
         *resync*%*|*recovery*%*|*reshape*%*|*check*%*)
           [ -n "$name" ] || continue
           for k in resync recovery reshape check; do case $l in *"$k"*) sy=$k${l#*"$k"}; break;; esac; done
-          je "$sy"; sy=$J ;;
+          jstr "$sy"; sy=$J ;;
         *\[[U_]*\]*)
           [ -n "$name" ] || continue
           for w in $l; do
@@ -175,28 +175,28 @@ status() {
   for b in "$R"/sys/block/sd*; do
     [ -d "$b" ] || continue
     d=${b##*/}; i=$((i + 1))
-    M=; read -r M 2>/dev/null < "$b/device/model"; je "$M"; M=$J
-    S=0; read -r S 2>/dev/null < "$b/size"; nb S
+    M=; read -r M 2>/dev/null < "$b/device/model"; jstr "$M"; M=$J
+    S=0; read -r S 2>/dev/null < "$b/size"; int0 S
     dtemp "$d"; case "$FAULTY" in *" $d "*) f=1;; *) f=0;; esac
-    # baie = numéro du port ata dans le chemin physique du disque, sinon le rang
+    # bay = ata port number in the physical path of the disk, otherwise the rank
     n=; if cd -P "$b/device" 2>/dev/null; then case $PWD in */ata[0-9]*/*) n=${PWD#*/ata}; n=${n%%/*};; esac; cd /; fi
     case $n in ''|*[!0-9]*) n=$i;; esac
     SM=null; health=""; realloc=0; pending=0; uncorr=0; hours=0
-    if [ -r "$RUN/smart.$d" ]; then . "$RUN/smart.$d"; nb realloc pending uncorr hours
+    if [ -r "$RUN/smart.$d" ]; then . "$RUN/smart.$d"; int0 realloc pending uncorr hours
       SM="{\"health\":\"$health\",\"realloc\":$realloc,\"pending\":$pending,\"uncorr\":$uncorr,\"hours\":$hours}"; fi
     DSK="$DSK{\"dev\":\"$d\",\"bay\":$n,\"model\":\"$M\",\"gb\":$((S / 1953125)),\"temp\":${DT:-null},\"faulty\":$f,\"smart\":$SM},"
   done
-  # mémoire, CPU (et heure de démarrage), réseau, disques : compteurs bruts,
-  # sommes en entiers du shell, jamais de printf %f
+  # memory, CPU (and boot time), network, disks: raw counters,
+  # sums in shell integers, never printf %f
   mt=; mf=; mb=; mc=; ma=; swt=; swf=
   while read -r k v _; do
     case $k in MemTotal:) mt=$v;; MemFree:) mf=$v;; Buffers:) mb=$v;; Cached:) mc=$v;; MemAvailable:) ma=$v;; SwapTotal:) swt=$v;; SwapFree:) swf=$v;; esac
   done < "$R/proc/meminfo"
-  nb mt mf mb mc ma swt swf
+  int0 mt mf mb mc ma swt swf
   busy=0; tot=0; bt=
   while read -r k a1 a2 a3 a4 a5 a6 a7 _; do
     case $k in
-      cpu) nb a1 a2 a3 a4 a5 a6 a7; busy=$((a1 + a2 + a3 + a6 + a7)); tot=$((busy + a4 + a5)) ;;
+      cpu) int0 a1 a2 a3 a4 a5 a6 a7; busy=$((a1 + a2 + a3 + a6 + a7)); tot=$((busy + a4 + a5)) ;;
       btime) bt=$a1; break ;;
     esac
   done < "$R/proc/stat"
@@ -204,15 +204,15 @@ status() {
   while read -r l; do case $l in eth0:*) set -- ${l#eth0:}; rx=$1; txb=$9; break;; esac; done < "$R/proc/net/dev"
   rd=0; wr=0
   while read -r _ _ dv _ _ r _ _ _ w _; do
-    case $dv in sd[a-z]|sd[a-z][a-z]) nb r w; rd=$((rd + r)); wr=$((wr + w));; esac
+    case $dv in sd[a-z]|sd[a-z][a-z]) int0 r w; rd=$((rd + r)); wr=$((wr + w));; esac
   done < "$R/proc/diskstats"
-  nb rx txb
+  int0 rx txb
   cs=0; cu=0; cf=0
   if mounted "$DATA"; then
-    D=$(df -P -k "$DATA" 2>/dev/null); set -- ${D##*"$NL"}; cs=${2:-0}; cu=${3:-0}; cf=${4:-0}; nb cs cu cf
+    D=$(df -P -k "$DATA" 2>/dev/null); set -- ${D##*"$NL"}; cs=${2:-0}; cu=${3:-0}; cf=${4:-0}; int0 cs cu cf
   fi
-  # heure : démarrage (btime) + uptime, sans lancer date ; t = uptime en centièmes (débits)
-  up=${UP%.*}; nb up
+  # time: boot (btime) + uptime, without running date; t = uptime in hundredths (rates)
+  up=${UP%.*}; int0 up
   case $bt in ''|*[!0-9]*) now=$(date +%s);; *) now=$((bt + up));; esac
   cent=${UP#*.}; case $cent in [0-9][0-9]) t=$((up * 100 + 1$cent - 100));; *) t=$((up * 100));; esac
   printf '{"host":"%s","ver":"%s","model":"%s","bays":2,"ip":"%s","uptime":%s,"now":%s,"t":%s,"load":[%s,%s,%s],' \
@@ -224,14 +224,14 @@ status() {
   printf '"md":[%s]}\n' "$MD"
 }
 
-# --- Réglages matériels : veille des disques (diet.conf) et courbe de padre-ventilateur (ventilateur.conf)
+# --- Hardware settings: disk spin-down (diet.conf) and padre-fan curve (fan.conf)
 config_get() {
   awk -F'[= \t]+' -v keys="$KEYS" 'BEGIN { n = split(keys, k, " "); for (i = 1; i <= n; i++) want[k[i]] = 1 }
     $1 in want { v[$1] = $2 }
     END { printf "{"; for (i = 1; i <= n; i++) printf "%s\"%s\":%d", (i>1?",":""), k[i], v[k[i]]; print "}" }' "$CONF" "$VCONF"
 }
 
-setkey() {	# setkey fichier clé valeur : remplace la valeur en gardant le commentaire
+setkey() {	# setkey file key value: replaces the value, keeping the comment
   if grep -q "^$2=" "$1"; then sed -i "s/^$2=[0-9]*/$2=$3/" "$1"; else echo "$2=$3" >> "$1"; fi
 }
 
@@ -249,28 +249,28 @@ config_set() {
   [ "$FAN_PWM_MIN" -ge 20 ] || fail "400 Bad Request" "$(tx "Un minimum de ventilateur sous 20 est trop risqué" "Lüfter-Minimum unter 20 ist zu riskant" "A fan minimum below 20 is too risky")"
   [ "$TEMP_LOW" -ge 20 ] && [ "$TEMP_LOW" -lt "$TEMP_HIGH" ] && [ "$TEMP_HIGH" -le 70 ] || fail "400 Bad Request" "$(tx "Température : 20 <= minimal < pleine vitesse <= 70" "Temperatur: 20 <= Ruhig < Voll <= 70" "Temperature: 20 <= minimum < full speed <= 70")"
   [ "$DISK_HIGH" -ge 30 ] && [ "$DISK_HIGH" -lt "$DISK_CRIT" ] && [ "$DISK_CRIT" -le 70 ] || fail "400 Bad Request" "$(tx "Disques : 30 <= pleine vitesse < arrêt d’urgence <= 70" "Platten: 30 <= Voll < Notaus <= 70" "Disks: 30 <= full speed < emergency shutdown <= 70")"
-  # padre_hwmon repasse à plein régime sans consigne pendant 5 min
-  [ "$PERIODE" -ge 10 ] && [ "$PERIODE" -le 240 ] || fail "400 Bad Request" "$(tx "Période : 10..240 secondes" "Intervall: 10..240 Sekunden" "Period: 10..240 seconds")"
+  # padre_hwmon goes back to full speed without a setpoint for 5 min
+  [ "$PERIOD" -ge 10 ] && [ "$PERIOD" -le 240 ] || fail "400 Bad Request" "$(tx "Période : 10..240 secondes" "Intervall: 10..240 Sekunden" "Period: 10..240 seconds")"
   [ "$SPINDOWN_MIN" -le 330 ] || fail "400 Bad Request" "$(tx "Veille : 0..330 minutes" "Standby: 0..330 Minuten" "Spin-down: 0..330 minutes")"
   [ -f "$CONF" ] || : > "$CONF"
   for k in $VKEYS; do eval "setkey \"\$VCONF\" $k \$$k"; done
   setkey "$CONF" SPINDOWN_MIN "$SPINDOWN_MIN"
-  # appliquer : veille des disques et régulation
+  # apply: disk spin-down and fan control
   if [ "$SPINDOWN_MIN" -le 20 ]; then S=$((SPINDOWN_MIN * 12)); else S=$((240 + SPINDOWN_MIN / 30)); fi
   for d in $(disks); do hdparm -S $S /dev/$d >/dev/null 2>&1; done
-  "$INITD/S45ventilateur" restart >/dev/null 2>&1
-  note "Réglages matériels modifiés depuis l’interface web"
+  "$INITD/S45fan" restart >/dev/null 2>&1
+  note "Hardware settings changed from the web interface"
   ok "$(tx "Enregistré et appliqué" "Gespeichert und angewendet" "Saved and applied")"
 }
 
-# --- Partages SMB (ksmbd.conf, même syntaxe que smb.conf) ---------------------
+# --- SMB shares (ksmbd.conf, same syntax as smb.conf) --------------------------
 shdr() { awk -v n="[$1]" '{ l = tolower($0); gsub(/^[ \t]+|[ \t]+$/, "", l) } l == n { print 1; exit }' "$KCONF" 2>/dev/null; }
 
-shares_list() {	# une ligne par partage : nom|chemin|lecture seule|sans mot de passe
-  # ksmbd : sans indication, un partage est en lecture seule et demande un compte
-  # Expressions régulières seulement, valeurs « 0 »/« 1 » en chaînes : aucune
-  # position ni longueur calculée (l'awk du NAS calcule en flottants émulés, ce qui
-  # a déjà donné un partage « c] » sans chemin).
+shares_list() {	# one line per share: name|path|read-only|guest
+  # ksmbd: by default a share is read-only and needs an account
+  # Regular expressions only, "0"/"1" values as strings: no computed position
+  # or length (the NAS awk computes in emulated floating point, which once
+  # produced a "c]" share without a path).
   [ -r "$KCONF" ] || return 0
   awk '
     function yes(v) { return tolower(v) ~ /^(1|yes|true)$/ }
@@ -292,8 +292,8 @@ shares_get() {
   LS=$(shares_list); O=; set -f
   while IFS='|' read -r n p r g; do
     [ -n "$n" ] || continue
-    [ -d "$R$p" ] && e=1 || e=0; nb r g
-    je "$n"; n=$J; je "$p"
+    [ -d "$R$p" ] && e=1 || e=0; int0 r g
+    jstr "$n"; n=$J; jstr "$p"
     O="$O${O:+,}{\"name\":\"$n\",\"path\":\"$J\",\"ro\":$r,\"guest\":$g,\"exists\":$e}"
   done <<EOF
 $LS
@@ -323,8 +323,8 @@ shares_change() {
       mounted "$DATA" || fail "500 Internal Server Error" "$(tx "Le volume de données $DATA n’est pas monté" "Das Datenvolume $DATA ist nicht eingehängt" "The data volume $DATA is not mounted")"
       if [ ! -d "$R$DATA/$name" ]; then
         mkdir "$R$DATA/$name" || fail "500 Internal Server Error" "$(tx "Impossible de créer $DATA/$name" "$DATA/$name kann nicht angelegt werden" "Cannot create $DATA/$name")"
-        # espace commun : groupe users hérité (setgid), écriture pour tous les
-        # protocoles (SMB invité ou compte, WebDAV « nas », rsync), sans bit collant
+        # shared space: users group inherited (setgid), writable for every protocol
+        # (SMB guest or account, WebDAV "nas", rsync), no sticky bit
         chown root:users "$R$DATA/$name" 2>/dev/null; chmod 2777 "$R$DATA/$name"
       fi
       cp "$KCONF" "$KCONF.bak"
@@ -348,17 +348,17 @@ shares_change() {
       MSG="$(tx "Partage $name mis à jour" "Freigabe $name geändert" "Share $name updated")" ;;
   esac
   ksmbd_reload
-  comptes_maj || MSG="$MSG ($(davko))"
+  accounts_update || MSG="$MSG ($(davko))"
   note "$MSG"; ok "$MSG"
 }
 
-# --- Comptes WebDAV et rsync : les comptes locaux -----------------------------
-# Le mot de passe d'un utilisateur, reçu en clair par user_set, est écrit en une
-# fois : ksmbd, htpasswd-users (crypt SHA-512, WebDAV) et rsyncd.secrets (600).
-# rsyncd.conf et webdav.conf (seconde instance lighttpd sous l'utilisateur nas,
-# S51webdav) sont régénérés à chaque changement d'utilisateur ou de partage.
-# Droits : /c/home/<nom> = <nom>:<nom> 2770 ; le groupe personnel <nom> a pour
-# membre nas (WebDAV, umask 002). Partages : root:users 2777. Voir docs/DIET.md.
+# --- WebDAV and rsync accounts: the local accounts ------------------------------
+# A user's password, received in clear by user_set, is written in one go:
+# ksmbd, htpasswd-users (SHA-512 crypt, WebDAV) and rsyncd.secrets (600).
+# rsyncd.conf and webdav.conf (second lighttpd instance as user nas, S51webdav)
+# are regenerated on every user or share change.
+# Permissions: /c/home/<name> = <name>:<name> 2770; the personal group <name> has
+# nas as member (WebDAV, umask 002). Shares: root:users 2777. See docs/DIET.md.
 HTUSERS=$ETC/lighttpd/htpasswd-users
 SECRETS=$ETC/rsyncd.secrets
 RSCONF=$ETC/rsyncd.conf
@@ -366,17 +366,17 @@ DAVCONF=$ETC/lighttpd/webdav.conf
 davko() { tx "conf WebDAV refusée par lighttpd -tt, ancienne gardée" "WebDAV-Konfiguration von lighttpd -tt abgelehnt, alte bleibt" "WebDAV configuration rejected by lighttpd -tt, old one kept"; }
 ckey() { sed -n "s/^$1=\([0-9]*\).*/\1/p" "$CONF" 2>/dev/null | tail -n 1; }
 
-ligne() {	# ligne fichier nom valeur mode : remplace « nom:… » (valeur vide = retire)
+setline() {	# setline file name value mode: replaces "name:..." (empty value = remove)
   ( umask 077
     { [ -f "$1" ] && awk -F: -v n="$2" '$1 != n' "$1"; [ -z "$3" ] || printf '%s:%s\n' "$2" "$3"; } > "$1.tmp" \
       && chmod "$4" "$1.tmp" && mv "$1.tmp" "$1" )
 }
 safe() { case "$1" in ''|-*|*[!A-Za-z0-9_-]*) return 1;; esac; }
 
-# utilisateurs locaux qui ont un mot de passe WebDAV/rsync (entrée dans htpasswd-users)
-comptes() { [ -f "$HTUSERS" ] && awk -F: 'FILENAME == ARGV[1] { ok[$1] = 1; next } $3 >= 1000 && $3 < 65534 && ($1 in ok) { print $1 }' "$HTUSERS" "$PASSWD"; }
-# partages exploitables (nom et chemin sûrs, dossier existant, nom distinct d'un utilisateur)
-partages() {
+# local users that have a WebDAV/rsync password (entry in htpasswd-users)
+accounts() { [ -f "$HTUSERS" ] && awk -F: 'FILENAME == ARGV[1] { ok[$1] = 1; next } $3 >= 1000 && $3 < 65534 && ($1 in ok) { print $1 }' "$HTUSERS" "$PASSWD"; }
+# usable shares (safe name and path, existing folder, name distinct from any user)
+usable_shares() {
   shares_list | while IFS='|' read -r n p ro g; do
     safe "$n" && [ "$n" != c ] && [ "$n" != home ] || continue
     case "$p" in /c/*) ;; *) continue;; esac
@@ -385,19 +385,19 @@ partages() {
   done
 }
 
-davbloc() {	# davbloc url chemin exigence lecture-seule
+davblock() {	# davblock url path requirement read-only
   printf '\n$HTTP["url"] =~ "^%s(/|$)" {\n\turl.access-deny = ()\n\talias.url = ( "%s" => "%s" )\n' "$1" "$1" "$2"
   printf '\tauth.require = ( "%s" => ( "method" => "basic", "realm" => "WebDAV", "require" => "%s" ) )\n' "$1" "$3"
   printf '\twebdav.activate = "enable"\n\twebdav.is-readonly = "%s"\n' "$4"
-  # COPY/MOVE : mod_webdav ne soumet pas la Destination à mod_auth ; la limiter à ce même espace
+  # COPY/MOVE: mod_webdav does not pass the Destination to mod_auth; restrict it to the same space
   printf '\t$REQUEST_HEADER["Destination"] =~ "." {\n\t\t$REQUEST_HEADER["Destination"] !~ "^(https?://[^/]+)?%s(/|$)" { url.access-deny = ( "" ) }\n' "$1"
   printf '\t\t$REQUEST_HEADER["Destination"] =~ "/[.][.]?(/|$)|%%2[eEfF]" { url.access-deny = ( "" ) }\n\t}\n}\n'
 }
 
-comptes_maj() {
-  [ -f "$HTUSERS" ] || { ligne "$HTUSERS" "" "" 640; chown root:nas "$HTUSERS" 2>/dev/null; }
-  CU=$(comptes); LISTE=$(echo $CU | tr ' ' ',')
-  # dossiers personnels (si /c est monté)
+accounts_update() {
+  [ -f "$HTUSERS" ] || { setline "$HTUSERS" "" "" 640; chown root:nas "$HTUSERS" 2>/dev/null; }
+  CU=$(accounts); LIST=$(echo $CU | tr ' ' ',')
+  # personal folders (if /c is mounted)
   if mounted "$DATA"; then
     [ -d "$R$DATA/home" ] || { mkdir -p "$R$DATA/home"; chmod 755 "$R$DATA/home"; }
     for u in $CU; do
@@ -405,26 +405,26 @@ comptes_maj() {
       mkdir "$R$DATA/home/$u" && chown "$u:$u" "$R$DATA/home/$u" 2>/dev/null; chmod 2770 "$R$DATA/home/$u"
     done
   fi
-  # rsyncd.conf : un module par utilisateur, un par partage en écriture, [c] sur demande
+  # rsyncd.conf: one module per user, one per writable share, [c] on request
   {
-    printf '# Généré par l’interface DIET à chaque changement d’utilisateur ou de\n# partage : ne pas modifier à la main (voir docs/DIET.md).\n'
+    printf '# Generated by the DIET interface on every user or share change:\n# do not edit by hand (see docs/DIET.md).\n'
     printf 'pid file = /var/run/rsyncd.pid\nuse chroot = yes\nmax connections = 4\nlog file = /var/log/rsyncd.log\n'
     printf 'hosts allow = 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.1\nhosts deny = *\n'
     printf 'secrets file = /etc/rsyncd.secrets\nstrict modes = yes\nread only = no\n'
-    [ "$(ckey RSYNC_C)" = 1 ] && printf '\n[c]\n\tcomment = Volume de données (sauvegarde de l’administrateur)\n\tpath = /c\n\tuid = root\n\tgid = root\n\tauth users = sauvegarde\n'
+    [ "$(ckey RSYNC_C)" = 1 ] && printf '\n[c]\n\tcomment = Data volume (administrator backup)\n\tpath = /c\n\tuid = root\n\tgid = root\n\tauth users = sauvegarde\n'
     for u in $CU; do
-      printf '\n[%s]\n\tcomment = Dossier personnel de %s\n\tpath = %s\n\tuid = %s\n\tgid = %s\n\tauth users = %s\n\tmunge symlinks = yes\n' "$u" "$u" "$DATA/home/$u" "$u" "$u" "$u"
+      printf '\n[%s]\n\tcomment = Personal folder of %s\n\tpath = %s\n\tuid = %s\n\tgid = %s\n\tauth users = %s\n\tmunge symlinks = yes\n' "$u" "$u" "$DATA/home/$u" "$u" "$u" "$u"
     done
-    [ -n "$CU" ] && partages | while IFS='|' read -r n p ro; do
-      [ "$ro" = 0 ] && printf '\n[%s]\n\tcomment = Partage %s\n\tpath = %s\n\tuid = nas\n\tgid = users\n\tauth users = %s\n\tmunge symlinks = yes\n' "$n" "$n" "$p" "$LISTE"
+    [ -n "$CU" ] && usable_shares | while IFS='|' read -r n p ro; do
+      [ "$ro" = 0 ] && printf '\n[%s]\n\tcomment = Share %s\n\tpath = %s\n\tuid = nas\n\tgid = users\n\tauth users = %s\n\tmunge symlinks = yes\n' "$n" "$n" "$p" "$LIST"
     done
     :
   } > "$RSCONF.tmp" && mv "$RSCONF.tmp" "$RSCONF"
-  # webdav.conf : /webdav/<nom>/ = dossier personnel (ce seul compte),
-  # /webdav/<partage>/ = partage (tout compte local), le reste refusé
+  # webdav.conf: /webdav/<name>/ = personal folder (that account only),
+  # /webdav/<share>/ = share (any local account), everything else denied
   {
-    printf '# Généré par l’interface DIET : ne pas modifier à la main (voir docs/DIET.md).\n'
-    printf '# Seconde instance lighttpd (S51webdav) sous l’utilisateur nas, sur 127.0.0.1:8081,\n# derrière le lighttpd principal (https://<nas>/webdav/, mod_proxy).\n'
+    printf '# Generated by the DIET interface: do not edit by hand (see docs/DIET.md).\n'
+    printf '# Second lighttpd instance (S51webdav) as user nas, on 127.0.0.1:8081,\n# behind the main lighttpd (https://<nas>/webdav/, mod_proxy).\n'
     printf 'server.modules = ( "mod_extforward", "mod_access", "mod_auth", "mod_authn_file", "mod_alias", "mod_webdav" )\n'
     printf 'server.bind = "127.0.0.1"\nserver.port = 8081\nserver.username = "nas"\nserver.groupname = "nas"\n'
     printf 'server.document-root = "/var/lib/lighttpd-webdav"\nserver.pid-file = "/var/run/lighttpd-webdav.pid"\n'
@@ -433,14 +433,14 @@ comptes_maj() {
     printf 'extforward.forwarder = ( "127.0.0.1" => "trust" )\n'
     printf 'auth.backend = "htpasswd"\nauth.backend.htpasswd.userfile = "/etc/lighttpd/htpasswd-users"\n'
     printf 'webdav.sqlite-db-name = "/var/lib/lighttpd-webdav/webdav.db"\nurl.access-deny = ( "" )\n'
-    for u in $CU; do davbloc "/webdav/$u" "$DATA/home/$u" "user=$u" disable; done
-    [ -n "$CU" ] && partages | while IFS='|' read -r n p ro; do
+    for u in $CU; do davblock "/webdav/$u" "$DATA/home/$u" "user=$u" disable; done
+    [ -n "$CU" ] && usable_shares | while IFS='|' read -r n p ro; do
       [ "$ro" = 1 ] && ro=enable || ro=disable
-      davbloc "/webdav/$n" "$p" valid-user "$ro"
+      davblock "/webdav/$n" "$p" valid-user "$ro"
     done
     :
   } > "$DAVCONF.tmp" || return 1
-  # lighttpd -tt ouvre aussi la base des verrous WebDAV : dossier à nas
+  # lighttpd -tt also opens the WebDAV lock database: folder owned by nas
   [ -d "$R/var/lib/lighttpd-webdav" ] || { mkdir -p "$R/var/lib/lighttpd-webdav"; chown nas:nas "$R/var/lib/lighttpd-webdav" 2>/dev/null; }
   lighttpd -tt -f "$DAVCONF.tmp" >/dev/null 2>&1 || { rm -f "$DAVCONF.tmp"; return 1; }
   if ! cmp -s "$DAVCONF.tmp" "$DAVCONF"; then
@@ -451,11 +451,11 @@ comptes_maj() {
   return 0
 }
 
-# --- Utilisateurs SMB (compte Unix sans shell + base ksmbdpwd.db) ---------------
+# --- SMB users (Unix account without shell + ksmbdpwd.db database) -------------
 users_get() {
-  # smb : mot de passe ksmbd ; dav : mot de passe WebDAV/rsync (absent pour un
-  # compte créé avant : à redéfinir). Un seul awk, fichiers absents remplacés par
-  # /dev/null (l'awk de busybox s'arrête sur un fichier introuvable).
+  # smb: ksmbd password; dav: WebDAV/rsync password (missing for an account
+  # created earlier: to be set again). A single awk, missing files replaced by
+  # /dev/null (busybox awk stops on a missing file).
   S=$PWDDB; [ -r "$S" ] || S=/dev/null
   D=$HTUSERS; [ -r "$D" ] || D=/dev/null
   P=$PASSWD; [ -r "$P" ] || P=/dev/null
@@ -468,7 +468,7 @@ users_get() {
 }
 
 users_change() {
-  set -f   # un mot de passe peut contenir * ? [
+  set -f   # a password may contain * ? [
   name=""; pw=""
   for kv in $(echo "$BODY" | tr '&' ' '); do
     k=${kv%%=*}; v=${kv#*=}
@@ -484,12 +484,12 @@ users_change() {
       [ ${#pw} -ge 6 ] || fail "400 Bad Request" "$(tx "Mot de passe trop court (6 caractères au moins)" "Passwort zu kurz (mindestens 6 Zeichen)" "Password too short (6 characters min.)")"
       [ ${#pw} -le 128 ] && [ "$(printf '%s' "$pw" | wc -l)" -eq 0 ] || fail "400 Bad Request" "$(tx "Mot de passe invalide" "Ungültiges Passwort" "Invalid password")"
       NEW=""
-      # groupe personnel <nom> (membre : nas, pour WebDAV) ; un nom déjà pris par
-      # un groupe système (audio, video, users…) ne convient pas
+      # personal group <name> (member: nas, for WebDAV); a name already used by a
+      # system group (audio, video, users...) is not allowed
       if [ -z "$uid" ]; then
         case "$name" in [a-z]*) ;; *) fail "400 Bad Request" "$(tx "Un nouveau nom doit commencer par une minuscule" "Ein neuer Name muss mit einem Kleinbuchstaben beginnen" "A new name must start with a lowercase letter")";; esac
         case "$name" in *[A-Z]*) fail "400 Bad Request" "$(tx "Un nouveau nom ne doit pas contenir de majuscules" "Ein neuer Name darf keine Großbuchstaben enthalten" "A new name must not contain uppercase letters")";; esac
-        # noms réservés : compte de sauvegarde rsync, compte WebDAV, modules rsync
+        # reserved names: rsync backup account, WebDAV account, rsync modules
         case "$name" in sauvegarde|nas|c|home|webdav|root) fail "400 Bad Request" "$(tx "Ce nom est réservé" "Dieser Name ist reserviert" "This name is reserved")";; esac
         uid=$(awk -F: '$3 >= 1000 && $3 < 65534 && $3 > m { m = $3 } END { print (m ? m + 1 : 1000) }' "$PASSWD")
         NEW=1
@@ -503,19 +503,19 @@ users_change() {
         pg=$uid; while awk -F: -v g="$pg" '$3 == g { f = 1 } END { exit !f }' "$ETC/group"; do pg=$((pg + 1)); done
         echo "$name:x:$pg:nas" >> "$ETC/group"
       fi
-      # groupe principal = groupe personnel (aussi pour un compte créé avant)
+      # primary group = personal group (also for an account created earlier)
       if [ -n "$NEW" ]; then echo "$name:x:$uid:$pg::$DATA/home/$name:/bin/false" >> "$PASSWD"
       else awk -F: -v OFS=: -v n="$name" -v g="$pg" '$1 == n { $4 = g } { print }' "$PASSWD.bak" > "$PASSWD.tmp" && cat "$PASSWD.tmp" > "$PASSWD"; rm -f "$PASSWD.tmp"; fi
-      # mot de passe sur l'entrée standard (deux fois), jamais sur la ligne de commande
+      # password on standard input (twice), never on the command line
       if ! printf '%s\n%s\n' "$pw" "$pw" | ksmbd.adduser -P "$PWDDB" -C "$KCONF" "$name" >/dev/null 2>&1; then
         cp "$PASSWD.bak" "$PASSWD"; cp "$ETC/group.bak" "$ETC/group"
         fail "500 Internal Server Error" "$(tx "ksmbd.adduser a refusé le mot de passe de $name" "ksmbd.adduser hat das Passwort von $name abgelehnt" "ksmbd.adduser refused the password of $name")"
       fi
-      # même mot de passe pour WebDAV (crypt SHA-512, lu par lighttpd sous nas) et rsync
+      # same password for WebDAV (SHA-512 crypt, read by lighttpd as nas) and rsync
       H=$(printf '%s\n' "$pw" | mkpasswd -m sha512 -S "$(head -c 12 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 16)" -P 0) && [ -n "$H" ] \
         || fail "500 Internal Server Error" "$(tx "mkpasswd a échoué" "mkpasswd fehlgeschlagen" "mkpasswd failed")"
-      ligne "$HTUSERS" "$name" "$H" 640; chown root:nas "$HTUSERS" 2>/dev/null
-      ligne "$SECRETS" "$name" "$pw" 600
+      setline "$HTUSERS" "$name" "$H" 640; chown root:nas "$HTUSERS" 2>/dev/null
+      setline "$SECRETS" "$name" "$pw" 600
       [ -n "$NEW" ] && MSG="$(tx "Utilisateur $name créé" "Benutzer $name angelegt" "User $name created")" || MSG="$(tx "Mot de passe de $name modifié" "Passwort von $name geändert" "Password of $name changed")" ;;
     user_del)
       [ -n "$uid" ] || fail "404 Not Found" "$(tx "Utilisateur $name introuvable" "Benutzer $name nicht gefunden" "User $name not found")"
@@ -523,32 +523,32 @@ users_change() {
       ksmbd.adduser -P "$PWDDB" -C "$KCONF" -d "$name" >/dev/null 2>&1
       awk -F: -v n="$name" '$1 != n' "$PASSWD" > "$PASSWD.tmp" || fail "500 Internal Server Error" "$(tx "Écriture impossible" "Schreiben nicht möglich" "Cannot write")"
       cp "$PASSWD" "$PASSWD.bak"; cat "$PASSWD.tmp" > "$PASSWD"; rm -f "$PASSWD.tmp"
-      # retiré partout : WebDAV, rsync, groupe personnel (le dossier est gardé)
-      ligne "$HTUSERS" "$name" "" 640; chown root:nas "$HTUSERS" 2>/dev/null
-      ligne "$SECRETS" "$name" "" 600
+      # removed everywhere: WebDAV, rsync, personal group (the folder is kept)
+      setline "$HTUSERS" "$name" "" 640; chown root:nas "$HTUSERS" 2>/dev/null
+      setline "$SECRETS" "$name" "" 600
       awk -F: -v n="$name" '!($1 == n && $3 >= 1000)' "$ETC/group" > "$ETC/group.tmp" && cat "$ETC/group.tmp" > "$ETC/group"; rm -f "$ETC/group.tmp"
       MSG="$(tx "Utilisateur $name supprimé (ses fichiers sont conservés)" "Benutzer $name gelöscht (seine Dateien bleiben erhalten)" "User $name deleted (their files are kept)")" ;;
   esac
   ksmbd_reload
-  comptes_maj || MSG="$MSG ($(davko))"
+  accounts_update || MSG="$MSG ($(davko))"
   note "$MSG"; ok "$MSG"
 }
 
-# --- Exports NFS (/etc/exports, une ligne par dossier et par client) ------------
+# --- NFS exports (/etc/exports, one line per folder and per client) -------------
 nfs_get() {
-  # « dossier client(options) client2(options)… », lu par le shell (aucun processus) ;
-  # client = avant la première « ( », options = entre « ( » et la « ) » finale
+  # "folder client(options) client2(options)...", read by the shell (no process);
+  # client = before the first "(", options = between "(" and the final ")"
   O=
   if [ -r "$EXPORTS" ]; then
     set -f
     while read -r p rest; do
       case $p in ''|\#*) continue;; esac
-      [ -d "$R$p" ] && e=1 || e=0; je "$p"; jp=$J
+      [ -d "$R$p" ] && e=1 || e=0; jstr "$p"; jp=$J
       for w in $rest; do
         c=${w%%\(*}; o=
         case $w in *\(*) o=${w#*\(}; o=${o%\)};; esac
         case ",$o," in *,ro,*) r=1;; *) r=0;; esac
-        je "$c"; c=$J; je "$o"
+        jstr "$c"; c=$J; jstr "$o"
         O="$O${O:+,}{\"path\":\"$jp\",\"client\":\"$c\",\"ro\":$r,\"opts\":\"$J\",\"exists\":$e}"
       done
     done < "$EXPORTS"
@@ -583,7 +583,7 @@ nfs_change() {
       MSG="$(tx "Export NFS de $path ajouté" "NFS-Freigabe von $path angelegt" "NFS export of $path added")" ;;
     nfs_del)
       [ -n "$have" ] || fail "404 Not Found" "$(tx "Export introuvable" "Freigabe nicht gefunden" "Export not found")"
-      # retire ce client de la ligne ; la ligne disparaît s'il n'en reste aucun
+      # removes this client from the line; the line goes away if none is left
       awk -v p="$path" -v c="$client" '$1 != p { print; next }
         { o = $1; for (i = 2; i <= NF; i++) { x = $i; sub(/\(.*/, "", x); if (x != c) o = o " " $i } if (o != $1) print o }' "$EXPORTS" > "$EXPORTS.tmp" \
         || fail "500 Internal Server Error" "$(tx "Écriture impossible" "Schreiben nicht möglich" "Cannot write")"
@@ -594,12 +594,12 @@ nfs_change() {
   note "$MSG"; ok "$MSG"
 }
 
-# --- Réglages système (nom, fuseau, réseau, Telegram) -----------------------------
+# --- System settings (name, time zone, network, Telegram) ------------------------
 IFACES=$ETC/network/interfaces
 sys_get() {
   TG_TOKEN=""; TG_CHAT=""
   [ -r "$ETC/diet-notify.conf" ] && . "$ETC/diet-notify.conf"
-  # eth0 dans /etc/network/interfaces (ifupdown de busybox), lu par le shell
+  # eth0 in /etc/network/interfaces (busybox ifupdown), read by the shell
   NET=; IPADDR=; NETMASK=; GATEWAY=; DNS=; e=
   set -f
   [ -r "$IFACES" ] && while read -r k a b c rest; do
@@ -615,7 +615,7 @@ sys_get() {
     esac
   done < "$IFACES"
   NET=${NET:-dhcp}
-  # valeurs actuelles en suggestion si rien n'est fixé
+  # current values as suggestions if nothing is set
   I=$(ifconfig eth0 2>/dev/null); CIP=; CMASK=
   case $I in *"inet addr:"*) CIP=${I#*inet addr:}; CIP=${CIP%%[!0-9.]*};; esac
   case $I in *"Mask:"*) CMASK=${I#*Mask:}; CMASK=${CMASK%%[!0-9.]*};; esac
@@ -627,11 +627,11 @@ EOF
   [ -r "$ETC/resolv.conf" ] && while read -r a b _; do [ "$a" = nameserver ] && CDNS="$CDNS${CDNS:+ }$b"; done < "$ETC/resolv.conf"
   set +f
   SL=; read -r SL 2>/dev/null < "$ETC/diet-lang"; case "$SL" in fr|de|en) ;; *) SL=en ;; esac
-  HN=; read -r HN 2>/dev/null < "$ETC/hostname"; je "$HN"; HN=$J
-  TZV=; read -r TZV 2>/dev/null < "$ETC/TZ"; je "$TZV"; TZV=$J
-  je "$TG_CHAT"; TGC=$J
+  HN=; read -r HN 2>/dev/null < "$ETC/hostname"; jstr "$HN"; HN=$J
+  TZV=; read -r TZV 2>/dev/null < "$ETC/TZ"; jstr "$TZV"; TZV=$J
+  jstr "$TG_CHAT"; TGC=$J
   [ -n "$TG_TOKEN" ] && tg=1 || tg=0
-  for v in NET IPADDR NETMASK GATEWAY DNS CIP CMASK CGW CDNS; do eval "je \"\$$v\"; $v=\$J"; done
+  for v in NET IPADDR NETMASK GATEWAY DNS CIP CMASK CGW CDNS; do eval "jstr \"\$$v\"; $v=\$J"; done
   printf '{"host":"%s","lang":"%s","tz":"%s","net":"%s","ip":"%s","mask":"%s","gw":"%s","dns":"%s","tgset":%d,"tgchat":"%s"}\n' \
     "$HN" "$SL" "$TZV" "$NET" "${IPADDR:-$CIP}" "${NETMASK:-$CMASK}" \
     "${GATEWAY:-$CGW}" "${DNS:-$CDNS}" "$tg" "$TGC"
@@ -662,8 +662,8 @@ sys_set() {
   case "$tgtoken" in '') ;; *[!A-Za-z0-9:_-]*|*:*:*) fail "400 Bad Request" "$(tx "Jeton Telegram invalide" "Ungültiges Telegram-Token" "Invalid Telegram token")";; [0-9]*:?*) ;; *) fail "400 Bad Request" "$(tx "Jeton Telegram invalide" "Ungültiges Telegram-Token" "Invalid Telegram token")";; esac
   case "$tgchat" in '') ;; -|-*[!0-9]*|[!0-9-]*|[0-9]*[!0-9]*) fail "400 Bad Request" "$(tx "Identifiant de discussion Telegram invalide" "Ungültige Telegram-Chat-ID" "Invalid Telegram chat ID")";; esac
 
-  # Telegram : identifiant vide = désactivé ; jeton vide = garder celui enregistré.
-  # Fichier créé à l'exécution sur le NAS (jamais dans l'image), lisible par root seul.
+  # Telegram: empty chat ID = disabled; empty token = keep the stored one.
+  # File created at run time on the NAS (never in the image), readable by root only.
   if [ -z "$tgchat" ]; then rm -f "$ETC/diet-notify.conf"
   else
     TG_TOKEN=""; [ -r "$ETC/diet-notify.conf" ] && . "$ETC/diet-notify.conf"
@@ -671,10 +671,10 @@ sys_set() {
     [ -n "$TG_TOKEN" ] || fail "400 Bad Request" "$(tx "Jeton Telegram manquant" "Telegram-Token fehlt" "Telegram token missing")"
     ( umask 077; printf 'TG_TOKEN=%s\nTG_CHAT=%s\n' "$TG_TOKEN" "$tgchat" > "$ETC/diet-notify.conf" )
   fi
-  # réseau : appliqué au prochain démarrage (S40network, ifup -a)
+  # network: applied at the next boot (S40network, ifup -a)
   mkdir -p "$ETC/network"
   {
-    printf '# écrit par l’interface web DIET\nauto lo\niface lo inet loopback\n\nauto eth0\n'
+    printf '# written by the DIET web interface\nauto lo\niface lo inet loopback\n\nauto eth0\n'
     if [ "$net" = static ]; then
       printf 'iface eth0 inet static\n  address %s\n  netmask %s\n' "$ip" "$mask"
       [ -n "$gw" ] && printf '  gateway %s\n' "$gw"
@@ -688,17 +688,17 @@ sys_set() {
   [ -n "$tz" ] && echo "$tz" > "$ETC/TZ"
   if [ -n "$lang" ] && [ "$lang" != "$(cat "$ETC/diet-lang" 2>/dev/null)" ]; then
     echo "$lang" > "$ETC/diet-lang"
-    "$INITD/S95diet" restart-hwmon >/dev/null 2>&1   # la surveillance relit la langue
+    "$INITD/S95diet" restart-hwmon >/dev/null 2>&1   # the monitor rereads the language
   fi
   OLD=$(cat "$ETC/hostname" 2>/dev/null)
   if [ "$host" != "$OLD" ]; then
     echo "$host" > "$ETC/hostname"
     sed -i "s/^\([ \t]*netbios name[ \t]*=\).*/\1 $(echo "$host" | tr 'a-z' 'A-Z')/" "$KCONF" 2>/dev/null
     hostname "$host"
-    bg "$INITD/S70ksmbd restart"   # ksmbd ne relit le nom NetBIOS qu'au démarrage
-    svc_on AVAHI && bg "$INITD/S50avahi-daemon restart"   # avahi aussi (<nom>.local)
+    bg "$INITD/S70ksmbd restart"   # ksmbd only rereads the NetBIOS name at startup
+    svc_on AVAHI && bg "$INITD/S50avahi-daemon restart"   # avahi too (<name>.local)
   fi
-  note "Réglages système modifiés"
+  note "System settings changed"
   ok "$(tx "Enregistré. Le nom et le fuseau horaire sont appliqués tout de suite ; le réseau au prochain redémarrage." "Gespeichert. Name und Zeitzone gelten sofort, das Netzwerk ab dem nächsten Neustart." "Saved. The name and time zone apply now; the network at the next reboot.")"
 }
 
@@ -709,22 +709,22 @@ notify_test() {
   fail "502 Bad Gateway" "$(tx "Échec de l’envoi" "Senden fehlgeschlagen" "Sending failed") : $(echo "$out" | tr -d '\r' | cut -c1-200)"
 }
 
-# --- Services : MiniDLNA, Avahi, rsync, WebDAV ----------------------------------
-# Marche/arrêt dans diet.conf (SVC_<NOM>=0|1, absent = en marche) : S50avahi-daemon,
-# S51webdav, S60minidlnad et S61rsyncd ne démarrent pas un service à 0.
+# --- Services: MiniDLNA, Avahi, rsync, WebDAV ------------------------------------
+# On/off in diet.conf (SVC_<NAME>=0|1, missing = on): S50avahi-daemon, S51webdav,
+# S60minidlnad and S61rsyncd do not start a service set to 0.
 DLNACONF=$ETC/minidlna.conf
 AVSVC=$ETC/avahi/services
 svc_on() { ! grep -qs "^SVC_$1=0" "$CONF"; }
-# b commande… : 1 si la commande réussit, sinon 0, dans $B (sans sous-shell)
+# b command...: 1 if the command succeeds, otherwise 0, in $B (no subshell)
 b() { if "$@"; then B=1; else B=0; fi; }
 
 services_get() {
-  # minidlna.conf, diet.conf et rsyncd.secrets lus par le shell (dernière valeur gardée)
+  # minidlna.conf, diet.conf and rsyncd.secrets read by the shell (last value wins)
   DBD=; PORT=; DNAME=; DIRS=
   [ -r "$DLNACONF" ] && while IFS= read -r l; do
     case $l in
       db_dir=*) DBD=${l#*=} ;; port=*) PORT=${l#*=} ;; friendly_name=*) DNAME=${l#*=} ;;
-      media_dir=*) je "${l#*=}"; DIRS="$DIRS${DIRS:+,}\"$J\"" ;;
+      media_dir=*) jstr "${l#*=}"; DIRS="$DIRS${DIRS:+,}\"$J\"" ;;
     esac
   done < "$DLNACONF"
   case "$PORT" in ''|*[!0-9]*) PORT=8200;; esac
@@ -737,8 +737,8 @@ services_get() {
   done < "$CONF"
   pw=0; [ -r "$SECRETS" ] && while IFS= read -r l; do case $l in sauvegarde:*) pw=1; break;; esac; done < "$SECRETS"
   DB=null; f=$R${DBD:-/var/lib/minidlna}/files.db
-  if [ -r "$f" ]; then set -- $(wc -c < "$f"); DB=${1:-0}; nb DB; fi
-  # pas de sqlite3 sur le NAS : nombres de fichiers lus sur la page d'état de minidlnad
+  if [ -r "$f" ]; then set -- $(wc -c < "$f"); DB=${1:-0}; int0 DB; fi
+  # no sqlite3 on the NAS: file counts read from the minidlnad status page
   FILES=null; b alive "$RUN/minidlna/minidlna.pid"; RUNDLNA=$B
   if [ "$RUNDLNA" = 1 ]; then
     W=$(wget -q -T 3 -O - "http://127.0.0.1:$PORT/status" 2>/dev/null)
@@ -747,7 +747,7 @@ services_get() {
       case "$fa$fv$fim" in *[!0-9]*) ;; *) [ -n "$fa" ] && [ -n "$fv" ] && [ -n "$fim" ] && FILES="[$fa,$fv,$fim]";; esac ;;
     esac
   fi
-  HN=; read -r HN 2>/dev/null < "$ETC/hostname"; je "$HN"; HN=$J; je "$DNAME"
+  HN=; read -r HN 2>/dev/null < "$ETC/hostname"; jstr "$HN"; HN=$J; jstr "$DNAME"
   b alive "$RUN/avahi-daemon/pid"; ra=$B; b alive "$RUN/rsyncd.pid"; rr=$B; b alive "$RUN/lighttpd-webdav.pid"; rw=$B
   printf '{"host":"%s","minidlna":{"on":%d,"run":%d,"name":"%s","dirs":[%s],"db":%s,"files":%s},' \
     "$HN" "$om" "$RUNDLNA" "$J" "$DIRS" "$DB" "$FILES"
@@ -759,7 +759,7 @@ svc_set() {
   s=""; on=""
   for kv in $(echo "$BODY" | tr '&' ' '); do case "${kv%%=*}" in s) s=${kv#*=};; on) on=${kv#*=};; esac; done
   case "$on" in 0|1) ;; *) fail "400 Bad Request" "$(tx "Réglage invalide" "Ungültige Einstellung" "Invalid setting")";; esac
-  # clé de diet.conf, script de démarrage, annonce Avahi propre au service
+  # diet.conf key, init script, Avahi announcement of the service
   case "$s" in
     minidlna) K=MINIDLNA; INIT=S60minidlnad; ANN="" ;;
     avahi)    K=AVAHI; INIT=S50avahi-daemon; ANN="" ;;
@@ -771,7 +771,7 @@ svc_set() {
   setkey "$CONF" SVC_$K "$on"
   if [ "$on" = 1 ]; then "$INITD/$INIT" start </dev/null >/dev/null 2>&1
   else "$INITD/$INIT" stop </dev/null >/dev/null 2>&1; fi
-  # l'annonce Avahi (*.service) d'un service arrêté est mise de côté (*.service.off)
+  # the Avahi announcement (*.service) of a stopped service is set aside (*.service.off)
   if [ -n "$ANN" ]; then
     if [ "$on" = 1 ]; then [ -f "$AVSVC/$ANN.service.off" ] && mv "$AVSVC/$ANN.service.off" "$AVSVC/$ANN.service"
     else [ -f "$AVSVC/$ANN.service" ] && mv "$AVSVC/$ANN.service" "$AVSVC/$ANN.service.off"; fi
@@ -781,7 +781,7 @@ svc_set() {
   note "$MSG"; ok "$MSG"
 }
 
-# MiniDLNA : nom affiché et dossiers (media_dir=[A|V|P,]/c/…, dossiers existants sous /c)
+# MiniDLNA: displayed name and folders (media_dir=[A|V|P,]/c/..., existing folders under /c)
 dlna_set() {
   set -f
   name=""; dirs=""
@@ -790,7 +790,7 @@ dlna_set() {
   done
   case "$name" in ''|*[!A-Za-z0-9\ ._-]*) fail "400 Bad Request" "$(tx "Nom invalide : lettres, chiffres, espace, . - et _" "Ungültiger Name: Buchstaben, Ziffern, Leerzeichen, . - und _" "Invalid name: letters, digits, space, . - and _")";; esac
   [ ${#name} -le 40 ] || fail "400 Bad Request" "$(tx "Nom trop long (40 caractères au plus)" "Name zu lang (höchstens 40 Zeichen)" "Name too long (40 characters max.)")"
-  RC=$(readlink -f "$R$DATA"); LIGNES=""; n=0
+  RC=$(readlink -f "$R$DATA"); LINES=""; n=0
   BAD="$(tx "Dossier invalide : [A|V|P,]/c/nom, lettres, chiffres, espace, - et _" "Ungültiger Ordner: [A|V|P,]/c/name, Buchstaben, Ziffern, Leerzeichen, - und _" "Invalid folder: [A|V|P,]/c/name, letters, digits, space, - and _")"
   while IFS= read -r l; do
     [ -n "$l" ] || continue
@@ -802,157 +802,157 @@ dlna_set() {
     case "$p" in /c|/c/*) ;; *) fail "400 Bad Request" "$BAD";; esac
     case "${p#/c}" in *[!A-Za-z0-9\ /_-]*|*//*|*/) fail "400 Bad Request" "$BAD";; esac
     [ -d "$R$p" ] || fail "404 Not Found" "$(tx "Dossier $p introuvable" "Ordner $p nicht gefunden" "Folder $p not found")"
-    # pas de lien symbolique qui sortirait de /c
+    # no symbolic link leading out of /c
     case "$(readlink -f "$R$p")/" in "$RC"/*) ;; *) fail "400 Bad Request" "$BAD";; esac
-    n=$((n + 1)); LIGNES="${LIGNES}media_dir=$typ$p
+    n=$((n + 1)); LINES="${LINES}media_dir=$typ$p
 "
   done <<EOF
 $dirs
 EOF
   [ $n -ge 1 ] && [ $n -le 10 ] || fail "400 Bad Request" "$(tx "De 1 à 10 dossiers" "1 bis 10 Ordner" "1 to 10 folders")"
   [ -f "$DLNACONF" ] || fail "404 Not Found" "minidlna.conf ?"
-  DIRS=$LIGNES NOM=$name awk '
+  DIRS=$LINES NAME=$name awk '
     /^media_dir=/ { if (!d++) printf "%s", ENVIRON["DIRS"]; next }
-    /^friendly_name=/ { if (!f++) print "friendly_name=" ENVIRON["NOM"]; next }
+    /^friendly_name=/ { if (!f++) print "friendly_name=" ENVIRON["NAME"]; next }
     { print }
-    END { if (!d) printf "%s", ENVIRON["DIRS"]; if (!f) print "friendly_name=" ENVIRON["NOM"] }' "$DLNACONF" > "$DLNACONF.tmp" \
+    END { if (!d) printf "%s", ENVIRON["DIRS"]; if (!f) print "friendly_name=" ENVIRON["NAME"] }' "$DLNACONF" > "$DLNACONF.tmp" \
     || fail "500 Internal Server Error" "$(tx "Écriture impossible" "Schreiben nicht möglich" "Cannot write")"
   cp "$DLNACONF" "$DLNACONF.bak"; mv "$DLNACONF.tmp" "$DLNACONF"
-  # minidlnad relit sa conf au démarrage et réindexe s'il voit de nouveaux dossiers
+  # minidlnad rereads its config at startup and rescans if it sees new folders
   svc_on MINIDLNA && "$INITD/S60minidlnad" restart </dev/null >/dev/null 2>&1
-  note "MiniDLNA : nom et dossiers modifiés"
+  note "MiniDLNA: name and folders changed"
   ok "$(tx "Enregistré" "Gespeichert" "Saved")"
 }
 
-# rsync : mot de passe du compte « sauvegarde » de l'administrateur (module [c],
-# tout /c en root, présent seulement si RSYNC_C=1) ; /etc/rsyncd.secrets (600)
+# rsync: password of the administrator's "sauvegarde" account (module [c],
+# all of /c as root, present only if RSYNC_C=1); /etc/rsyncd.secrets (600)
 rsync_pw() {
   set -f; pw=""
   for kv in $(echo "$BODY" | tr '&' ' '); do [ "${kv%%=*}" = pw ] && pw=$(urldec "${kv#*=}"); done
   [ ${#pw} -ge 6 ] || fail "400 Bad Request" "$(tx "Mot de passe trop court (6 caractères au moins)" "Passwort zu kurz (mindestens 6 Zeichen)" "Password too short (6 characters min.)")"
   case "$pw" in *"$(printf '\r')"*) pw="";; esac
   [ -n "$pw" ] && [ ${#pw} -le 128 ] && [ "$(printf '%s' "$pw" | wc -l)" -eq 0 ] || fail "400 Bad Request" "$(tx "Mot de passe invalide" "Ungültiges Passwort" "Invalid password")"
-  ligne "$SECRETS" sauvegarde "$pw" 600 || fail "500 Internal Server Error" "$(tx "Écriture impossible" "Schreiben nicht möglich" "Cannot write")"
-  note "rsync : mot de passe du compte sauvegarde modifié"
+  setline "$SECRETS" sauvegarde "$pw" 600 || fail "500 Internal Server Error" "$(tx "Écriture impossible" "Schreiben nicht möglich" "Cannot write")"
+  note "rsync: password of the sauvegarde account changed"
   ok "$(tx "Mot de passe rsync enregistré" "rsync-Passwort gespeichert" "rsync password saved")"
 }
 
-# --- Stockage : X-RAID (compatibilité) ou md, par nas-raid (paquet xraid-compat) ---
-[ -n "$R" ] && export NAS_RAID_RACINE="$R"
-stockage_get() {
-  if command -v nas-raid >/dev/null 2>&1; then nas-raid etat --json 2>/dev/null || echo '{"mode":"erreur"}'
+# --- Storage: X-RAID (compatibility) or md, through nas-raid (xraid-compat package) ---
+[ -n "$R" ] && export NAS_RAID_ROOT="$R"
+storage_get() {
+  if command -v nas-raid >/dev/null 2>&1; then nas-raid status --json 2>/dev/null || echo '{"mode":"error"}'
   else echo '{"mode":"absent"}'; fi
 }
 
-# raid_plan : essai à blanc (commandes affichées, rien d'exécuté) ;
-# raid_lancer : action en tâche de fond, avec la phrase tapée (confirm) ET la
-# case cochée (oui=1) ; nas-raid refuse si la phrase n'est pas la bonne.
+# raid_plan: dry run (commands shown, nothing executed);
+# raid_run: background action, with the typed phrase (confirm) AND the
+# ticked box (yes=1); nas-raid refuses if the phrase is not the right one.
 raid_do() {
   set -f
-  op=""; d=""; confirm=""; oui=""
+  op=""; d=""; confirm=""; yes=""
   for kv in $(echo "$BODY" | tr '&' ' '); do
     k=${kv%%=*}; v=$(urldec "${kv#*=}")
-    case "$k" in op) op=$v;; d) d=$v;; confirm) confirm=$v;; oui) oui=$v;; esac
+    case "$k" in op) op=$v;; d) d=$v;; confirm) confirm=$v;; yes) yes=$v;; esac
   done
-  case "$op" in migrer|finaliser|creer|ajouter|agrandir|reparer) ;; *) fail "400 Bad Request" "$(tx "opération inconnue" "unbekannter Vorgang" "unknown operation")";; esac
+  case "$op" in migrate|finalize|create|add|grow|repair) ;; *) fail "400 Bad Request" "$(tx "opération inconnue" "unbekannter Vorgang" "unknown operation")";; esac
   ARGS=""
   for x in $(echo "$d" | tr ',' ' '); do
     disks | grep -qx "$x" || fail "400 Bad Request" "$(tx "disque inconnu" "unbekannte Platte" "unknown disk")"
     ARGS="$ARGS /dev/$x"
   done
-  case "$op:$ARGS" in creer:|ajouter:|ajouter:*\ *\ *) fail "400 Bad Request" "$(tx "choisir le(s) disque(s)" "Platte(n) wählen" "choose the disk(s)")";; esac
-  if [ "$op" = finaliser ]; then CMD="nas-raid migrer --finaliser"; else CMD="nas-raid $op$ARGS"; fi
+  case "$op:$ARGS" in create:|add:|add:*\ *\ *) fail "400 Bad Request" "$(tx "choisir le(s) disque(s)" "Platte(n) wählen" "choose the disk(s)")";; esac
+  if [ "$op" = finalize ]; then CMD="nas-raid migrate --finalize"; else CMD="nas-raid $op$ARGS"; fi
   if [ "$1" = raid_plan ]; then
-    hdr 'text/plain; charset=utf-8'; $CMD --a-blanc 2>&1; return
+    hdr 'text/plain; charset=utf-8'; $CMD --dry-run 2>&1; return
   fi
   case "$confirm" in ''|*[!A-Za-z0-9\ ._-]*) fail "400 Bad Request" "$(tx "phrase de confirmation manquante ou invalide" "Bestätigungssatz fehlt oder ungültig" "confirmation phrase missing or invalid")";; esac
-  [ "$oui" = 1 ] || fail "400 Bad Request" "$(tx "seconde confirmation manquante" "zweite Bestätigung fehlt" "second confirmation missing")"
-  note "Stockage : nas-raid $op$ARGS lancé depuis l’interface"
-  bg "$CMD --confirmer '$confirm' --oui"
+  [ "$yes" = 1 ] || fail "400 Bad Request" "$(tx "seconde confirmation manquante" "zweite Bestätigung fehlt" "second confirmation missing")"
+  note "Storage: nas-raid $op$ARGS started from the interface"
+  bg "$CMD --confirm '$confirm' --yes"
   ok "$(tx "Lancé : suivre l’avancement dans le journal du stockage" "Gestartet: Fortschritt im Speicherprotokoll" "Started: follow the progress in the storage log")"
 }
 
-# --- Réponses en lecture et collecteur ------------------------------------------
+# --- Read answers and collector -------------------------------------------------
 hist_json() { [ -r "$RUN/hwmon.hist" ] && awk '{ printf "%s\\n", $0 }' "$RUN/hwmon.hist"; }
-calc() {	# calc clé : corps JSON de la réponse GET (sans en-tête)
+calc() {	# calc key: JSON body of the GET answer (without header)
   case $1 in
     status) status ;; config) config_get ;; shares) shares_get ;; users) users_get ;;
-    nfs) nfs_get ;; sys) sys_get ;; stockage) stockage_get ;; services) services_get ;;
-    # chargement de la page en une requête : état, stockage, historique
-    all) printf '{"status":'; status; printf ',"stockage":'; stockage_get; printf ',"hist":"'; hist_json; printf '"}\n' ;;
+    nfs) nfs_get ;; sys) sys_get ;; storage) storage_get ;; services) services_get ;;
+    # page load in one request: status, storage, history
+    all) printf '{"status":'; status; printf ',"storage":'; storage_get; printf ',"hist":"'; hist_json; printf '"}\n' ;;
   esac
 }
 
-# Collecteur (DIET_COLLECTE=1, lancé par S95diet) : recalcule les réponses dans
-# $C, fichier temporaire puis mv. Rythme : état toutes les 5 s et le reste toutes
-# les 60 s tant que l'interface est ouverte (requête vue depuis moins de 2 min,
-# fichier vu écrit par la lecture rapide) ; sinon 60 s et 5 min. Réveil immédiat
-# par une ligne dans la FIFO reveil : « vu » (interface rouverte) ou « tout »
-# (POST : réglages changés) → tout est recalculé. Un POST pose aussi inval : un
-# calcul en cours, commencé avant, est jeté au lieu d'écraser le cache vidé.
-LENTS="stockage services shares nfs sys users config"
-ecrit() {	# ecrit clé
-  if calc "$1" > "$C/.$1.tmp" 2>/dev/null && [ -s "$C/.$1.tmp" ] && [ ! -e "$C/inval" ]; then
+# Collector (DIET_COLLECT=1, started by S95diet): recomputes the answers in $C,
+# temporary file then mv. Pace: status every 5 s and the rest every 60 s while
+# the interface is open (request seen less than 2 min ago, "seen" file written by
+# the fast path); otherwise 60 s and 5 min. Immediate wake-up through a line in
+# the "wake" FIFO: "seen" (interface reopened) or "all" (POST: settings changed)
+# -> everything is recomputed. A POST also creates "invalid": a computation in
+# progress, started before, is dropped instead of overwriting the emptied cache.
+SLOW="storage services shares nfs sys users config"
+write_cache() {	# write_cache key
+  if calc "$1" > "$C/.$1.tmp" 2>/dev/null && [ -s "$C/.$1.tmp" ] && [ ! -e "$C/invalid" ]; then
     mv -f "$C/.$1.tmp" "$C/$1.json"
   else rm -f "$C/.$1.tmp"; fi
 }
-assemble() {	# all.json à partir des fichiers du cache (même contenu que calc all)
-  { printf '{"status":'; cat "$C/status.json"; printf ',"stockage":'; cat "$C/stockage.json" 2>/dev/null || printf null
-    printf ',"hist":"'; cat "$C/hist.frag" 2>/dev/null; printf '"}\n'; } > "$C/.all.tmp" && [ ! -e "$C/inval" ] \
+assemble() {	# all.json from the cache files (same content as calc all)
+  { printf '{"status":'; cat "$C/status.json"; printf ',"storage":'; cat "$C/storage.json" 2>/dev/null || printf null
+    printf ',"hist":"'; cat "$C/hist.frag" 2>/dev/null; printf '"}\n'; } > "$C/.all.tmp" && [ ! -e "$C/invalid" ] \
     && mv -f "$C/.all.tmp" "$C/all.json" || rm -f "$C/.all.tmp"
 }
-collecte() {
+collect() {
   mkdir -p "$C" || exit 1
-  if read -r P 2>/dev/null < "$C/pid" && [ "$P" != $$ ] && kill -0 "$P" 2>/dev/null; then exit 0; fi	# déjà lancé
-  [ -p "$C/reveil" ] || { rm -f "$C/reveil"; mkfifo -m 600 "$C/reveil"; } || exit 1
-  exec 3<> "$C/reveil"
+  if read -r P 2>/dev/null < "$C/pid" && [ "$P" != $$ ] && kill -0 "$P" 2>/dev/null; then exit 0; fi	# already running
+  [ -p "$C/wake" ] || { rm -f "$C/wake"; mkfifo -m 600 "$C/wake"; } || exit 1
+  exec 3<> "$C/wake"
   echo $$ > "$C/pid"
-  trap 'rm -f "$C"/*.json "$C"/.*.tmp "$C/pid" "$C/actif"; exit 0' TERM INT HUP
+  trap 'rm -f "$C"/*.json "$C"/.*.tmp "$C/pid" "$C/active"; exit 0' TERM INT HUP
   _ct=1; _cl=0; _cs=0; _ca=
   while :; do
     read -r UP _ < "$R/proc/uptime"; _cn=${UP%.*}
-    _cv=0; read -r _cv 2>/dev/null < "$C/vu"; nb _cv
+    _cv=0; read -r _cv 2>/dev/null < "$C/seen"; int0 _cv
     if [ $((_cn - _cv)) -lt 120 ]; then
-      [ -n "$_ca" ] || { : > "$C/actif"; _ca=1; }
-    elif [ -n "$_ca" ]; then rm -f "$C/actif"; _ca=; fi
+      [ -n "$_ca" ] || { : > "$C/active"; _ca=1; }
+    elif [ -n "$_ca" ]; then rm -f "$C/active"; _ca=; fi
     if [ -n "$_ct" ] || [ "$_cn" -ge "$_cl" ]; then
-      rm -f "$C/inval"
-      ecrit status
+      rm -f "$C/invalid"
+      write_cache status
       hist_json > "$C/.hist.tmp" && mv -f "$C/.hist.tmp" "$C/hist.frag"
-      for _ck in $LENTS; do ecrit "$_ck"; done
+      for _ck in $SLOW; do write_cache "$_ck"; done
       [ -n "$_ca" ] && _cl=$((_cn + 60)) || _cl=$((_cn + 300))
       _cs=$_cn
     elif [ "$_cn" -ge "$_cs" ]; then
-      ecrit status
+      write_cache status
     fi
     [ -r "$C/status.json" ] && assemble
     [ -n "$_ca" ] && _cs=$((_cn + 5)) || _cs=$((_cn + 60))
     _ct=; _cw=$((_cs < _cl ? _cs - _cn : _cl - _cn)); [ "$_cw" -ge 1 ] || _cw=1
-    # attente sans processus : lecture de la FIFO avec délai (read -t de ash)
+    # wait without a process: FIFO read with a timeout (ash read -t)
     if read -t "$_cw" -r _cm <&3; then
       _ct=1; _cd=0; while [ $_cd -lt 50 ] && read -t 0.05 -r _cm <&3; do _cd=$((_cd + 1)); done
     fi
   done
 }
-# collecte une : un seul tour complet (essais sur le PC, sans FIFO ni attente)
-if [ -n "${DIET_COLLECTE:-}" ]; then
-  if [ "$DIET_COLLECTE" = une ]; then
-    mkdir -p "$C"; rm -f "$C/inval"; ecrit status; hist_json > "$C/hist.frag"
-    for _ck in $LENTS; do ecrit "$_ck"; done; assemble; exit 0
+# DIET_COLLECT=once: a single full round (tests on a PC, no FIFO, no wait)
+if [ -n "${DIET_COLLECT:-}" ]; then
+  if [ "$DIET_COLLECT" = once ]; then
+    mkdir -p "$C"; rm -f "$C/invalid"; write_cache status; hist_json > "$C/hist.frag"
+    for _ck in $SLOW; do write_cache "$_ck"; done; assemble; exit 0
   fi
-  collecte
+  collect
 fi
 
-# POST : réglages changés → cache vidé, collecteur réveillé (tout recalculé)
-invalide() {
+# POST: settings changed -> cache emptied, collector woken up (everything recomputed)
+invalidate() {
   [ -d "$C" ] || return 0
-  : > "$C/inval"; rm -f "$C"/*.json
-  [ -p "$C/reveil" ] && echo tout 1<> "$C/reveil"
+  : > "$C/invalid"; rm -f "$C"/*.json
+  [ -p "$C/wake" ] && echo all 1<> "$C/wake"
 }
 
 qp a; A=$QP
 if [ "$REQUEST_METHOD" = "POST" ]; then
-  # protection CSRF : un formulaire d'un autre site ne peut pas poser cet en-tête
+  # CSRF protection: a form from another site cannot set this header
   [ "$HTTP_X_DIET" = "1" ] || fail "403 Forbidden" "$(tx "Action réservée à l’interface" "Aktion nur über die Oberfläche" "Action only through the web interface")"
   BODY=""; CL=${CONTENT_LENGTH:-0}
   case "$CL" in *[!0-9]*) CL=0;; esac
@@ -982,30 +982,30 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
     dlna_scan)
       svc_on MINIDLNA || fail "409 Conflict" "$(tx "MiniDLNA est arrêté" "MiniDLNA ist gestoppt" "MiniDLNA is stopped")"
       "$INITD/S60minidlnad" force-reload </dev/null >/dev/null 2>&1   # minidlnad -R
-      note "MiniDLNA : réindexation complète"
+      note "MiniDLNA: full rescan"
       ok "$(tx "Réindexation complète lancée (longue sur ce processeur)" "Vollständige Neuindizierung gestartet (dauert auf diesem Prozessor)" "Full rescan started (slow on this processor)")" ;;
     rsync_pw) rsync_pw ;;
     rsync_c)
       on=""; for kv in $(echo "$BODY" | tr '&' ' '); do [ "${kv%%=*}" = on ] && on=${kv#*=}; done
       case "$on" in 0|1) ;; *) fail "400 Bad Request" "$(tx "Réglage invalide" "Ungültige Einstellung" "Invalid setting")";; esac
       [ -f "$CONF" ] || : > "$CONF"; setkey "$CONF" RSYNC_C "$on"
-      comptes_maj || :
-      note "rsync : module c (sauvegarde de l’administrateur) = $on"
+      accounts_update || :
+      note "rsync: module c (administrator backup) = $on"
       ok "$(tx "Enregistré" "Gespeichert" "Saved")" ;;
-    raid_verifier)
+    raid_verify)
       command -v nas-raid >/dev/null 2>&1 || fail "404 Not Found" "nas-raid ?"
-      bg "nas-raid verifier"; note "Stockage : vérification du miroir lancée"
+      bg "nas-raid verify"; note "Storage: mirror check started"
       ok "$(tx "Vérification lancée (plusieurs heures, disques en lecture seule)" "Prüfung gestartet (mehrere Stunden, nur Lesen)" "Check started (several hours, read-only)")" ;;
-    raid_plan|raid_lancer) raid_do "$A" ;;
+    raid_plan|raid_run) raid_do "$A" ;;
     *) fail "400 Bad Request" "$(tx "action inconnue" "unbekannte Aktion" "unknown action")" ;;
   esac
-  invalide
+  invalidate
   exit 0
 fi
 
-# lecture sans cache (collecteur arrêté, ou cache vidé par un POST) : calcul direct
+# read without cache (collector stopped, or cache emptied by a POST): direct computation
 case "$A" in
-  ""|status|all|config|shares|users|nfs|sys|stockage|services) hdr application/json; calc "${A:-status}" ;;
+  ""|status|all|config|shares|users|nfs|sys|storage|services) hdr application/json; calc "${A:-status}" ;;
   hist) hdr 'text/plain; charset=utf-8'; cat "$RUN/hwmon.hist" 2>/dev/null ;;
   log)
     hdr 'text/plain; charset=utf-8'
@@ -1013,7 +1013,7 @@ case "$A" in
       diet)     tail -n 300 "$LOG" 2>/dev/null ;;
       messages) tail -n 300 "$R/var/log/messages" 2>/dev/null ;;
       dmesg)    dmesg | tail -n 300 ;;
-      stockage) tail -n 300 "$R/var/lib/nas-raid/journal" 2>/dev/null ;;
+      storage) tail -n 300 "$R/var/lib/nas-raid/log" 2>/dev/null ;;
       *) tx "journal inconnu" "unbekanntes Protokoll" "unknown log"; echo ;;
     esac ;;
   smart)
@@ -1022,7 +1022,7 @@ case "$A" in
     hdr 'text/plain; charset=utf-8'
     if [ -x "$R/usr/sbin/smartctl" ]; then "$R/usr/sbin/smartctl" -H -i -A /dev/$d 2>&1
     else
-      # pas de smartctl (chaîne sans C++) : modèle, température drivetemp et messages du noyau
+      # no smartctl (toolchain without C++): model, drivetemp temperature and kernel messages
       echo "$(tx "smartctl absent de ce système ; informations disponibles :" "smartctl fehlt auf diesem System; verfügbare Angaben:" "smartctl is not on this system; available information:")"
       echo "  /dev/$d : $(cat "$R/sys/block/$d/device/model" 2>/dev/null), $(($(cat "$R/sys/block/$d/size" 2>/dev/null || echo 0) / 1953125)) GB, $(dtemp "$d"; echo "${DT:-?}") °C (drivetemp)"
       echo; dmesg | grep -w "$d" | tail -n 50

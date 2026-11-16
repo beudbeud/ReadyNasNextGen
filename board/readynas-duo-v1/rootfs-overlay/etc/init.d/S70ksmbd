@@ -1,10 +1,10 @@
 #!/bin/sh
-# Démarre ksmbd (serveur SMB du noyau) avec ksmbd-tools.
+# Starts ksmbd (in-kernel SMB server) with ksmbd-tools.
 case "$1" in
 start)
 	mkdir -p /c /var/run
-	printf "Démarrage de ksmbd : "
-	ksmbd.mountd && echo OK || echo ÉCHEC
+	printf "Starting ksmbd: "
+	ksmbd.mountd && echo OK || echo FAIL
 	;;
 stop)
 	ksmbd.control -s
@@ -13,6 +13,6 @@ restart)
 	"$0" stop; "$0" start
 	;;
 *)
-	echo "Usage : $0 {start|stop|restart}"; exit 1
+	echo "Usage: $0 {start|stop|restart}"; exit 1
 	;;
 esac

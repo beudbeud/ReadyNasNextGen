@@ -1,8 +1,8 @@
 #!/bin/sh
-# lighttpd : interface web DIET en HTTPS (443 ; 80 redirige). Remplace le
-# S50lighttpd de Buildroot pour créer le certificat au premier démarrage :
-# aucune clé privée dans l'image. ECDSA P-256 auto-signé, 10 ans,
-# subjectAltName = adresse d'eth0 + nom d'hôte (outils gen_key/cert_write de mbedTLS).
+# lighttpd: DIET web interface over HTTPS (443; 80 redirects). Replaces the
+# Buildroot S50lighttpd to create the certificate at first boot: no private
+# key in the image. Self-signed ECDSA P-256, 10 years, subjectAltName = eth0
+# address + host name (mbedTLS gen_key/cert_write tools).
 NAME=lighttpd
 DAEMON=/usr/sbin/$NAME
 PID_FILE=/var/run/$NAME.pid
@@ -16,7 +16,7 @@ make_cert() {
 	ip=$(ifconfig eth0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')
 	san="DNS:$host"
 	[ -n "$ip" ] && san="IP:$ip;$san"
-	# horloge encore en 1970 : le certificat expirerait en 1980
+	# clock still in 1970: the certificate would expire in 1980
 	now=$(date -u +%Y%m%d%H%M%S)
 	[ "${now%??????????}" -lt 2026 ] && now=20260101000000
 	end=$((${now%??????????} + 10))${now#????}
@@ -36,15 +36,15 @@ make_cert() {
 
 start() {
 	if [ ! -s "$KEY" ] || [ ! -s "$CRT" ]; then
-		printf "Certificat HTTPS : "
-		make_cert && echo OK || { echo ÉCHEC; return 1; }
+		printf "Creating HTTPS certificate: "
+		make_cert && echo OK || { echo FAIL; return 1; }
 	fi
-	[ -s /etc/lighttpd/htpasswd ] || echo "Interface web : aucun mot de passe, lancer diet-webpass"
-	printf "Démarrage de lighttpd : "
-	start-stop-daemon -S -q -p $PID_FILE -x $DAEMON -- -f $CONF_FILE && echo OK || echo ÉCHEC
+	[ -s /etc/lighttpd/htpasswd ] || echo "Web interface: no password set, run diet-webpass"
+	printf "Starting lighttpd: "
+	start-stop-daemon -S -q -p $PID_FILE -x $DAEMON -- -f $CONF_FILE && echo OK || echo FAIL
 }
 stop() {
-	printf "Arrêt de lighttpd : "
+	printf "Stopping lighttpd: "
 	start-stop-daemon -K -q -p $PID_FILE
 	echo OK
 }
@@ -53,6 +53,6 @@ case "$1" in
 	start) start ;;
 	stop) stop ;;
 	restart|reload) stop; sleep 1; start ;;
-	newcert) rm -f "$KEY" "$CRT"; make_cert ;;	# nouveau nom ou adresse, puis restart
-	*) echo "Usage : $0 {start|stop|restart|newcert}"; exit 1 ;;
+	newcert) rm -f "$KEY" "$CRT"; make_cert ;;	# new name or address, then restart
+	*) echo "Usage: $0 {start|stop|restart|newcert}"; exit 1 ;;
 esac

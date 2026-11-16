@@ -1,9 +1,8 @@
 #!/bin/sh
-# DIET : bouton d'alimentation (assistant /sbin/hotplug), veille des disques,
-# voyants, mise à l'heure (ntpd), surveillance (diet-hwmon) et collecteur de
-# l'interface (l'API en tâche de fond, réponses prêtes dans /var/run/diet). La régulation du
-# ventilateur est S45ventilateur, les partages S60nfs et S70ksmbd, l'interface
-# web S50lighttpd.
+# DIET: power button (/sbin/hotplug helper), disk spin-down, LEDs, time
+# sync (ntpd), monitoring (diet-hwmon) and the interface collector (the API in
+# the background, ready answers in /var/run/diet). Fan control is S45fan, the
+# shares S60nfs and S70ksmbd, the web interface S50lighttpd.
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 [ -r /etc/diet-lang.sh ] && . /etc/diet-lang.sh || tx() { printf "%s" "$3"; }
 LOG=/var/log/diet.log
@@ -17,17 +16,17 @@ hwmon_start() {
 hwmon_stop() {
 	start-stop-daemon -K -q -p $PID && rm -f $PID
 }
-# collecteur : /www/cgi-bin/api avec DIET_COLLECTE=1 (pid dans /var/run/diet/pid)
-collecte_start() {
-	DIET_COLLECTE=1 start-stop-daemon -S -b -x /www/cgi-bin/api
+# collector: /www/cgi-bin/api with DIET_COLLECT=1 (pid in /var/run/diet/pid)
+collector_start() {
+	DIET_COLLECT=1 start-stop-daemon -S -b -x /www/cgi-bin/api
 }
-collecte_stop() {
+collector_stop() {
 	start-stop-daemon -K -q -p /var/run/diet/pid
 }
 
 start() {
 	log "$(tx "==== DIET $(cat /etc/diet-version) démarre ====" "==== DIET $(cat /etc/diet-version) startet ====" "==== DIET $(cat /etc/diet-version) starting ====")"
-	# bouton : padre_hwmon appelle /sbin/hotplug (CONFIG_UEVENT_HELPER_PATH)
+	# button: padre_hwmon calls /sbin/hotplug (CONFIG_UEVENT_HELPER_PATH)
 	echo /sbin/hotplug > /proc/sys/kernel/hotplug 2>/dev/null
 	[ -e /proc/sys/dev/hwmon/POWER_SWITCH ] && echo 1 > /proc/sys/dev/hwmon/POWER_SWITCH
 	if [ "$SPINDOWN_MIN" -gt 0 ]; then
@@ -35,34 +34,34 @@ start() {
 		for b in /sys/block/sd*; do [ -d "$b" ] && hdparm -S $S /dev/${b##*/} >/dev/null 2>&1; done
 		log "$(tx "Veille des disques après $SPINDOWN_MIN min" "Platten-Standby nach $SPINDOWN_MIN min" "Disk spin-down after $SPINDOWN_MIN min")"
 	fi
-	# voyants : disque présent = voyant de la baie allumé ; alimentation fixe
+	# LEDs: disk present = bay LED on; power LED steady
 	for b in /sys/block/sd*; do
 		n=$(readlink -f $b/device 2>/dev/null | sed -n 's#.*/ata\([0-9]*\)/.*#\1#p')
 		[ -n "$n" ] && echo 1 > /proc/sys/dev/led/disk_${n}_fault 2>/dev/null
 	done
 	echo 1 > /proc/sys/dev/led/power 2>/dev/null
-	# heure : premier réglage puis ntpd en tâche de fond
+	# time: first sync, then ntpd keeps running in the background
 	start-stop-daemon -S -b -x /usr/sbin/ntpd -- -p pool.ntp.org
 	hwmon_start
-	collecte_start
+	collector_start
 	log "$(tx "prêt" "bereit" "ready")"
 }
 
 stop() {
-	collecte_stop
+	collector_stop
 	hwmon_stop
 	killall ntpd 2>/dev/null
-	echo 2 > /proc/sys/dev/led/power 2>/dev/null	# clignote pendant l'arrêt
+	echo 2 > /proc/sys/dev/led/power 2>/dev/null	# blinks during shutdown
 	[ -f /var/run/poweroff ] && M=poweroff || M=reboot
 	log "$(tx "Arrêt du système ($M)" "Herunterfahren ($M)" "Shutting down ($M)")"
 }
 
 case "$1" in
-	start) printf "DIET : "; start; echo OK ;;
+	start) printf "Starting DIET: "; start; echo OK ;;
 	stop) stop ;;
 	restart) stop; start ;;
 	restart-hwmon) hwmon_stop; hwmon_start ;;
-	restart-collecte) collecte_stop; sleep 1; collecte_start ;;
-	*) echo "Usage : $0 {start|stop|restart|restart-hwmon|restart-collecte}"; exit 1 ;;
+	restart-collector) collector_stop; sleep 1; collector_start ;;
+	*) echo "Usage: $0 {start|stop|restart|restart-hwmon|restart-collector}"; exit 1 ;;
 esac
 exit 0

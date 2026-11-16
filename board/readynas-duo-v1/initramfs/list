@@ -1,0 +1,15 @@
+# gen_init_cpio: minimal initramfs built into the kernel (CONFIG_INITRAMFS_SOURCE)
+# @SRC@ = board/readynas-duo-v1/initramfs
+# @BIN@ = $(BINARIES_DIR)/readynas-initramfs (readynas-initramfs package)
+dir /dev 0755 0 0
+nod /dev/console 0600 0 0 c 5 1
+dir /bin 0755 0 0
+dir /proc 0755 0 0
+dir /sys 0755 0 0
+dir /mnt 0755 0 0
+dir /newroot 0755 0 0
+file /init @SRC@/init 0755 0 0
+file /bin/busybox @BIN@/busybox 0755 0 0
+file /bin/windows @BIN@/windows 0755 0 0
+file /bin/load @BIN@/load 0755 0 0
+file /bin/float @BIN@/float 0755 0 0

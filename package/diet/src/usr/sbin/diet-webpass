@@ -1,7 +1,7 @@
 #!/bin/sh
-# Mot de passe de l'interface web (utilisateur $1, admin par défaut) :
-# /etc/lighttpd/htpasswd (crypt SHA-512, lu par mod_authn_file). Sans ce fichier
-# l'interface refuse tout accès. Le fichier n'est jamais dans l'image.
+# Web interface password (user $1, admin by default): /etc/lighttpd/htpasswd
+# (SHA-512 crypt, read by mod_authn_file). Without this file the interface
+# denies all access. The file is never in the image.
 U=${1:-admin}
 [ -r /etc/diet-lang.sh ] && . /etc/diet-lang.sh || tx() { printf "%s" "$3"; }
 case "$U" in *[!a-zA-Z0-9_-]*|"") echo "$(tx "Nom d’utilisateur invalide" "Ungültiger Benutzername" "Invalid user name")"; exit 1;; esac

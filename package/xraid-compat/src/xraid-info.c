@@ -1,29 +1,29 @@
 /*
- * xraid-info : analyse en LECTURE SEULE des disques X-RAID (ReadyNAS Duo v1,
- * RAIDiator-Sparc 4.x) pour la couche de compatibilité de Linux 6.18.
+ * xraid-info: READ-ONLY analysis of X-RAID disks (ReadyNAS Duo v1,
+ * RAIDiator-Sparc 4.x) for the Linux 6.18 compatibility layer.
  *
- * Écrit d'après la description fonctionnelle du format (docs/XRAID.md) ;
- * aucun code d'Infrant/NETGEAR n'est repris. Le programme n'ouvre jamais un
- * disque en écriture.
+ * Written from the functional description of the format (docs/XRAID.md);
+ * no Infrant/NETGEAR code is reused. The program never opens a disk for
+ * writing.
  *
- *   xraid-info [--json] [--echantillons K] DISQUE...
- *        superbloc « WGao » (courant en N-4096, secours en N-4048, et leurs
- *        copies), rôle de chaque disque, sections, partitions du disque base,
- *        état (propre, synchronisation, disques), comparaison de K blocs de
- *        64 Kio par section aux mêmes LBA sur les deux disques, et verdict :
- *        rw (miroir assemblable), ro (lecture seule d'un disque) ou aucun.
- *        Sortie texte = lignes CLE='valeur' évaluables par sh (nas-raid).
- *   xraid-info verifier [--json] [--zone MIO] DISQUE_A DISQUE_B
- *        compare tout le contenu des sections des deux disques (lecture
- *        seule) ; code 0 = identiques, 1 = différences, 2 = erreurs.
- *   xraid-info smart [--json] DISQUE
- *        SMART par ATA PASS-THROUGH (SG_IO) : santé, secteurs réalloués,
- *        en attente, illisibles, heures (format de /var/run/smart.sdX).
+ *   xraid-info [--json] [--samples K] DISK...
+ *        "WGao" superblock (current at N-4096, backup at N-4048, and their
+ *        copies), role of each disk, sections, partitions of the base disk,
+ *        state (clean, synchronisation, disks), comparison of K blocks of
+ *        64 KiB per section at the same LBAs on both disks, and verdict:
+ *        rw (mirror can be assembled), ro (one disk read-only) or none.
+ *        Text output = KEY='value' lines that sh can eval (nas-raid).
+ *   xraid-info verify [--json] [--zone MIB] DISK_A DISK_B
+ *        compares the whole content of the sections of both disks
+ *        (read-only); exit code 0 = identical, 1 = differences, 2 = errors.
+ *   xraid-info smart [--json] DISK
+ *        SMART through ATA PASS-THROUGH (SG_IO): health, reallocated,
+ *        pending, uncorrectable sectors, hours (format of /var/run/smart.sdX).
  *
- * Entiers du superbloc : 32 bits gros-boutistes (écrits tels quels par le
- * SPARC). Table de partitions MBR : petit-boutiste, comme sur un PC.
- * Compilé pour SPARC v7 (Buildroot) : aucune instruction sdiv ni casa,
- * contrôlé par board/readynas-duo-v1/post-image.sh.
+ * Superblock integers: 32-bit big-endian (written as is by the SPARC).
+ * MBR partition table: little-endian, as on a PC.
+ * Built for SPARC v7 (Buildroot): no sdiv nor casa instruction, checked by
+ * board/readynas-duo-v1/post-image.sh.
  */
 #define _FILE_OFFSET_BITS 64
 #include <errno.h>
@@ -39,23 +39,23 @@
 typedef unsigned long long u64;
 
 #define SB_LEN     0x24E0
-#define WGAO       0x5747616Fu	/* configuration valide */
-#define WGAN       0x5747616Eu	/* disque initialisé, prêt à être ajouté */
+#define WGAO       0x5747616Fu	/* valid configuration */
+#define WGAN       0x5747616Eu	/* disk initialised, ready to be added */
 #define MD_MAGIC   0xa92b4efcu
-#define MAXD       4		/* le Duo n'a que 2 baies ; 4 pour les NV */
+#define MAXD       4		/* the Duo has only 2 bays; 4 for the NV */
 #define MAXP       16
-#define ECH        (64 * 1024)	/* bloc d'échantillonnage */
+#define SAMPLE_LEN (64 * 1024)	/* sampling block */
 
-/* les 4 copies : courant, courant bis, secours, secours bis (N - x) */
-static const unsigned COPIE[4] = { 4096, 4072, 4048, 4024 };
-static const char *NOM_COPIE[4] = { "courant", "courant_bis", "secours", "secours_bis" };
+/* the 4 copies: current, current bis, backup, backup bis (N - x) */
+static const unsigned COPY[4] = { 4096, 4072, 4048, 4024 };
+static const char *COPY_NAME[4] = { "current", "current_bis", "backup", "backup_bis" };
 
 static int json;
 
 static unsigned be32(const unsigned char *p) { return (unsigned)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
 static unsigned le32(const unsigned char *p) { return (unsigned)p[3] << 24 | p[2] << 16 | p[1] << 8 | p[0]; }
 
-static const char *etat_nom(unsigned e)
+static const char *state_name(unsigned e)
 {
 	switch (e) {
 	case 0: return "faulty";
@@ -63,32 +63,32 @@ static const char *etat_nom(unsigned e)
 	case 2: return "spare";
 	case 8: return "ready";
 	}
-	return "inconnu";
+	return "unknown";
 }
 
-struct disque {
-	const char *chemin;
+struct disk {
+	const char *path;
 	int fd;
-	u64 n;				/* secteurs natifs */
+	u64 n;				/* native sectors */
 	unsigned char sb[4][SB_LEN];
 	unsigned magic[4];
-	int wgam;			/* marque « WGam » en N-2 */
-	int md;				/* superbloc md trouvé (déjà migré) */
+	int wgam;			/* "WGam" mark at N-2 */
+	int md;				/* md superblock found (already migrated) */
 	unsigned char mbr[512];
 	int mbr_ok;
-	int canal;			/* index hwif d'après this_disk (1 = SATA 0) */
-	int role;			/* 'b' base, 'm' miroir, 0 inconnu */
-	int ref;			/* copie retenue (0 courant, 2 secours), -1 aucune */
+	int channel;			/* hwif index from this_disk (1 = SATA 0) */
+	int role;			/* 'b' base, 'm' mirror, 0 unknown */
+	int ref;			/* copy used (0 current, 2 backup), -1 none */
 };
 
-struct section { unsigned debut, nb, fin, raid, init, dmap, init_mark, alive; };
-struct part { int num; unsigned debut, nb, type; int sec; unsigned dec; };
+struct section { unsigned start, nb, end, raid, init, dmap, init_mark, alive; };
+struct part { int num; unsigned start, nb, type; int sec; unsigned off; };
 
-static int lire(int fd, u64 octet, void *buf, size_t len)
+static int read_at(int fd, u64 byte, void *buf, size_t len)
 {
 	size_t f = 0;
 	while (f < len) {
-		ssize_t r = pread(fd, (char *)buf + f, len - f, (off_t)(octet + f));
+		ssize_t r = pread(fd, (char *)buf + f, len - f, (off_t)(byte + f));
 		if (r < 0 && errno == EINTR)
 			continue;
 		if (r <= 0)
@@ -98,153 +98,153 @@ static int lire(int fd, u64 octet, void *buf, size_t len)
 	return 0;
 }
 
-static void meurt(const char *fmt, ...)
+static void die(const char *fmt, ...)
 {
 	va_list a;
 	va_start(a, fmt);
-	fputs("xraid-info : ", stderr);
+	fputs("xraid-info: ", stderr);
 	vfprintf(stderr, fmt, a);
 	fputc('\n', stderr);
 	va_end(a);
 	exit(2);
 }
 
-static void ouvrir(struct disque *d, const char *chemin)
+static void open_disk(struct disk *d, const char *path)
 {
 	off_t t;
 	memset(d, 0, sizeof(*d));
-	/* le chemin est réinjecté dans du sh entre apostrophes : pas d'apostrophe */
-	if (strchr(chemin, '\'') || strchr(chemin, '"') || strchr(chemin, '\\'))
-		meurt("chemin refusé : %s", chemin);
-	d->chemin = chemin;
+	/* the path is fed back to sh between single quotes: no quote allowed */
+	if (strchr(path, '\'') || strchr(path, '"') || strchr(path, '\\'))
+		die("path refused: %s", path);
+	d->path = path;
 	d->ref = -1;
-	d->fd = open(chemin, O_RDONLY);
+	d->fd = open(path, O_RDONLY);
 	if (d->fd < 0)
-		meurt("%s : %s", chemin, strerror(errno));
+		die("%s: %s", path, strerror(errno));
 	t = lseek(d->fd, 0, SEEK_END);
 	if (t < 0)
-		meurt("%s : taille illisible", chemin);
+		die("%s: unreadable size", path);
 	d->n = (u64)t / 512;
 }
 
-/* superbloc md (1.0 en fin, 1.1 au début, 1.2 à 4 Kio, 0.90 en fin, 64 Kio) */
-static void chercher_md(struct disque *d)
+/* md superblock (1.0 at the end, 1.1 at the start, 1.2 at 4 KiB, 0.90 at the end, 64 KiB) */
+static void find_md(struct disk *d)
 {
 	unsigned char b[4];
-	u64 taille = d->n * 512, pos[4];
+	u64 size = d->n * 512, pos[4];
 	int i;
 	pos[0] = 0;
 	pos[1] = 4096;
-	pos[2] = taille >= 8192 ? (taille - 8192) & ~(u64)4095 : 0;
-	pos[3] = taille >= 65536 ? (taille & ~(u64)65535) - 65536 : 0;
+	pos[2] = size >= 8192 ? (size - 8192) & ~(u64)4095 : 0;
+	pos[3] = size >= 65536 ? (size & ~(u64)65535) - 65536 : 0;
 	for (i = 0; i < 4; i++)
-		if (lire(d->fd, pos[i], b, 4) == 0 && (le32(b) == MD_MAGIC || be32(b) == MD_MAGIC))
+		if (read_at(d->fd, pos[i], b, 4) == 0 && (le32(b) == MD_MAGIC || be32(b) == MD_MAGIC))
 			d->md = 1;
 }
 
-static void lire_disque(struct disque *d)
+static void read_disk(struct disk *d)
 {
 	unsigned char b[4];
 	int c;
-	if (d->n < 0x200000)	/* < 1 Go : X-RAID ne se configure pas (§2) */
+	if (d->n < 0x200000)	/* < 1 GB: X-RAID does not configure it (§2) */
 		return;
 	for (c = 0; c < 4; c++) {
-		if (lire(d->fd, (d->n - COPIE[c]) * 512, d->sb[c], SB_LEN) == 0)
+		if (read_at(d->fd, (d->n - COPY[c]) * 512, d->sb[c], SB_LEN) == 0)
 			d->magic[c] = be32(d->sb[c]);
 	}
-	if (lire(d->fd, (d->n - 2) * 512, b, 4) == 0)
+	if (read_at(d->fd, (d->n - 2) * 512, b, 4) == 0)
 		d->wgam = memcmp(b, "WGam", 4) == 0;
-	if (lire(d->fd, 0, d->mbr, 512) == 0)
+	if (read_at(d->fd, 0, d->mbr, 512) == 0)
 		d->mbr_ok = d->mbr[510] == 0x55 && d->mbr[511] == 0xAA;
-	chercher_md(d);
+	find_md(d);
 	if (d->magic[0] == WGAO)
 		d->ref = 0;
 	else if (d->magic[2] == WGAO)
 		d->ref = 2;
 	if (d->ref >= 0) {
 		const unsigned char *t = d->sb[d->ref] + 0x1460;	/* this_disk */
-		d->canal = t[2];
+		d->channel = t[2];
 		d->role = t[1] ? 'b' : t[0] ? 'm' : 0;
 	}
 }
 
-/* même configuration : tout sauf this_disk (0x0F80 .. 0x14DF) */
-static int meme_sb(const unsigned char *a, const unsigned char *b)
+/* same configuration: everything but this_disk (0x0F80 .. 0x14DF) */
+static int same_sb(const unsigned char *a, const unsigned char *b)
 {
 	return memcmp(a, b, 0xF80) == 0 && memcmp(a + 0x14E0, b + 0x14E0, SB_LEN - 0x14E0) == 0;
 }
 
-/* ---------- sortie texte (CLE='valeur') ou JSON ---------- */
-static int premier = 1;
-static void cle_json(const char *k)	/* clés JSON en minuscules */
+/* ---------- text (KEY='value') or JSON output ---------- */
+static int first = 1;
+static void key_json(const char *k)	/* JSON keys in lower case */
 {
-	printf("%s\"", premier ? "" : ",");
+	printf("%s\"", first ? "" : ",");
 	for (; *k; k++)
 		putchar(*k >= 'A' && *k <= 'Z' ? *k + 32 : *k);
 	printf("\":");
 }
-static void cle_s(const char *k, const char *v)
+static void key_s(const char *k, const char *v)
 {
 	if (json)
-		cle_json(k), printf("\"%s\"", v);
+		key_json(k), printf("\"%s\"", v);
 	else
 		printf("XR_%s='%s'\n", k, v);
-	premier = 0;
+	first = 0;
 }
-static void cle_n(const char *k, u64 v)
+static void key_n(const char *k, u64 v)
 {
 	if (json)
-		cle_json(k), printf("%llu", v);
+		key_json(k), printf("%llu", v);
 	else
 		printf("XR_%s=%llu\n", k, v);
-	premier = 0;
+	first = 0;
 }
 
-/* raisons : code court (pour sh) et texte (pour l'interface) */
+/* reasons: short code (for sh) and text (for humans) */
 #define MAXR 24
-static const char *r_code[MAXR], *r_texte[MAXR];
+static const char *r_code[MAXR], *r_text[MAXR];
 static int nr;
-static int bloque_rw, bloque_tout;
-static void raison(int grave, const char *code, const char *texte)
+static int block_rw, block_all;
+static void reason(int severity, const char *code, const char *text)
 {
 	if (nr < MAXR) {
 		r_code[nr] = code;
-		r_texte[nr] = texte;
+		r_text[nr] = text;
 		nr++;
 	}
-	if (grave >= 1)
-		bloque_rw = 1;
-	if (grave >= 2)
-		bloque_tout = 1;
+	if (severity >= 1)
+		block_rw = 1;
+	if (severity >= 2)
+		block_all = 1;
 }
 
-/* partitions d'après un MBR ; EBR lus sur le disque de lecture */
-static int lire_parts(const unsigned char *mbr, int fd, struct part *p)
+/* partitions from an MBR; EBRs read from the read disk */
+static int read_parts(const unsigned char *mbr, int fd, struct part *p)
 {
 	int i, n = 0;
 	unsigned ext = 0;
 	for (i = 0; i < 4; i++) {
 		const unsigned char *e = mbr + 0x1BE + 16 * i;
-		unsigned type = e[4], deb = le32(e + 8), nb = le32(e + 12);
+		unsigned type = e[4], st = le32(e + 8), nb = le32(e + 12);
 		if (!type || !nb)
 			continue;
 		if (type == 0x05 || type == 0x0f || type == 0x85) {
-			ext = deb;
+			ext = st;
 			continue;
 		}
 		if (n < MAXP) {
-			p[n].num = i + 1; p[n].debut = deb; p[n].nb = nb; p[n].type = type;
+			p[n].num = i + 1; p[n].start = st; p[n].nb = nb; p[n].type = type;
 			n++;
 		}
 	}
 	if (ext) {
-		unsigned ebr = ext, num = 5, garde = 0;
+		unsigned ebr = ext, num = 5, guard = 0;
 		unsigned char b[512];
-		while (ebr && garde++ < 64 && lire(fd, (u64)ebr * 512, b, 512) == 0
+		while (ebr && guard++ < 64 && read_at(fd, (u64)ebr * 512, b, 512) == 0
 		       && b[510] == 0x55 && b[511] == 0xAA) {
 			const unsigned char *e = b + 0x1BE;
 			if (e[4] && le32(e + 12) && n < MAXP) {
-				p[n].num = num; p[n].debut = ebr + le32(e + 8);
+				p[n].num = num; p[n].start = ebr + le32(e + 8);
 				p[n].nb = le32(e + 12); p[n].type = e[4];
 				n++;
 			}
@@ -255,50 +255,50 @@ static int lire_parts(const unsigned char *mbr, int fd, struct part *p)
 	return n;
 }
 
-/* compare k blocs de 64 Kio par section ; nombre d'écarts, -1 si erreur */
-static int echantillonner(int fa, int fb, const struct section *s, int ns, int k)
+/* compares k blocks of 64 KiB per section; number of differences, -1 on error */
+static int sample(int fa, int fb, const struct section *s, int ns, int k)
 {
-	static unsigned char a[ECH], b[ECH];
+	static unsigned char a[SAMPLE_LEN], b[SAMPLE_LEN];
 	int i, j, diff = 0;
 	for (i = 0; i < ns; i++) {
-		u64 lg = s[i].fin - s[i].debut, pas;
-		if (lg < ECH / 512 || k < 1)
+		u64 lg = s[i].end - s[i].start, stride;
+		if (lg < SAMPLE_LEN / 512 || k < 1)
 			continue;
-		pas = k > 1 ? (lg - ECH / 512) / (u64)(k - 1) : 0;
+		stride = k > 1 ? (lg - SAMPLE_LEN / 512) / (u64)(k - 1) : 0;
 		for (j = 0; j < k; j++) {
-			u64 lba = s[i].debut + pas * (u64)j;
-			if (lire(fa, lba * 512, a, ECH) || lire(fb, lba * 512, b, ECH))
+			u64 lba = s[i].start + stride * (u64)j;
+			if (read_at(fa, lba * 512, a, SAMPLE_LEN) || read_at(fb, lba * 512, b, SAMPLE_LEN))
 				return -1;
-			diff += memcmp(a, b, ECH) != 0;
+			diff += memcmp(a, b, SAMPLE_LEN) != 0;
 		}
 	}
 	return diff;
 }
 
-/* ---------- analyse ---------- */
-static int analyser(int argc, char **argv, int k)
+/* ---------- analysis ---------- */
+static int analyse(int argc, char **argv, int k)
 {
-	static struct disque D[MAXD];
+	static struct disk D[MAXD];
 	struct section S[7];
 	struct part P[MAXP];
-	int nd = argc, i, j, ref = -1, ns = 0, np = 0, base = -1, miroir = -1, lect = -1;
+	int nd = argc, i, j, ref = -1, ns = 0, np = 0, base = -1, mirror = -1, rd = -1;
 	int diffsb = 0, diff = -2;
 	const unsigned char *sb;
-	unsigned v, nr_disks, raid_disks, fake, propre, nb_lun, ver[3];
+	unsigned v, nr_disks, raid_disks, fake, clean, nb_lun, ver[3];
 	char buf[64];
 
 	if (nd < 1 || nd > MAXD)
-		meurt("1 à %d disques", MAXD);
+		die("1 to %d disks", MAXD);
 	for (i = 0; i < nd; i++) {
-		ouvrir(&D[i], argv[i]);
-		lire_disque(&D[i]);
+		open_disk(&D[i], argv[i]);
+		read_disk(&D[i]);
 	}
-	/* superbloc de référence : identique sur la majorité, sinon le plus récent */
+	/* reference superblock: identical on the majority, otherwise the newest */
 	for (i = 0; i < nd; i++) {
 		if (D[i].ref < 0)
 			continue;
 		if (ref < 0) { ref = i; continue; }
-		if (!meme_sb(D[i].sb[D[i].ref], D[ref].sb[D[ref].ref])) {
+		if (!same_sb(D[i].sb[D[i].ref], D[ref].sb[D[ref].ref])) {
 			diffsb = 1;
 			if (be32(D[i].sb[D[i].ref] + 0x18) > be32(D[ref].sb[D[ref].ref] + 0x18))
 				ref = i;
@@ -308,11 +308,11 @@ static int analyser(int argc, char **argv, int k)
 	if (json)
 		printf("{");
 	if (ref < 0) {
-		cle_s("MODE", "aucun");
+		key_s("MODE", "none");
 		for (i = 0; i < nd; i++)
-			if (D[i].md) { cle_s("MD", "1"); break; }
-		if (json) printf(",\"raisons\":[{\"code\":\"pas_de_xraid\",\"texte\":\"aucun superbloc X-RAID (WGao)\"}]}\n");
-		else printf("XR_RAISONS='pas_de_xraid'\n");
+			if (D[i].md) { key_s("MD", "1"); break; }
+		if (json) printf(",\"reasons\":[{\"code\":\"no_xraid\",\"text\":\"no X-RAID superblock (WGao)\"}]}\n");
+		else printf("XR_REASONS='no_xraid'\n");
 		return 0;
 	}
 	sb = D[ref].sb[D[ref].ref];
@@ -321,313 +321,313 @@ static int analyser(int argc, char **argv, int k)
 	nr_disks = be32(sb + 0x24);
 	raid_disks = be32(sb + 0x28);
 	fake = sb[0x33];
-	propre = be32(sb + 0x84) & 1;
+	clean = be32(sb + 0x84) & 1;
 	nb_lun = be32(sb + 0x100);
 
-	/* contrôles */
+	/* checks */
 	if (ver[0] != 0 || ver[1] != 1 || ver[2] != 0)
-		raison(2, "version", "version de superbloc inconnue (attendu 0.1.0)");
+		reason(2, "version", "unknown superblock version (expected 0.1.0)");
 	if (be32(sb + 0x1C) != 1)
-		raison(2, "level", "champ level différent de 1");
+		reason(2, "level", "level field is not 1");
 	if (D[ref].ref != 0)
-		raison(1, "superbloc_secours", "superbloc courant absent : lecture du secours");
+		reason(1, "backup_superblock", "current superblock missing: reading the backup");
 	if (diffsb)
-		raison(1, "superblocs_differents", "les superblocs des disques diffèrent");
-	if (!propre)
-		raison(1, "arret_brutal", "superbloc marqué « arrêt non propre » (clean shutdown à 0)");
+		reason(1, "superblocks_differ", "the superblocks of the disks differ");
+	if (!clean)
+		reason(1, "unclean_shutdown", "superblock marked as not cleanly shut down (clean shutdown = 0)");
 	if (nr_disks != 2 || raid_disks != 2 || fake)
-		raison(1, "pas_2_disques", "configuration à un disque (miroir fictif) ou à plus de 2 disques");
+		reason(1, "not_2_disks", "one-disk configuration (fake mirror) or more than 2 disks");
 	if (v == 0 || v > D[ref].n - 4096)
-		raison(2, "taille", "taille visible V incohérente");
+		reason(2, "size", "inconsistent visible size V");
 	if (nb_lun < 1 || nb_lun > 7)
-		raison(2, "sections", "nombre de sections incohérent");
+		reason(2, "sections", "inconsistent number of sections");
 
-	/* sections, bornées à la zone visible V (jamais la zone protégée) */
+	/* sections, bounded by the visible zone V (never the protected zone) */
 	for (i = 0; i < 7; i++) {
 		const unsigned char *e = sb + 0x800 + 32 * i;
 		if (!e[6])
 			continue;
 		S[ns].alive = 1;
 		S[ns].raid = e[5];
-		/* +4 disques porteurs (bits 0 et 1 : dmap du pilote), +7 « initialized »
-		 * (1 = miroir synchronisé). +8 n'est PAS un point de reprise : il reste
-		 * non nul sur un volume sain (initialized=1, redundant sous RAIDiator). */
+		/* +4 carrying disks (bits 0 and 1: driver dmap), +7 "initialized"
+		 * (1 = mirror synchronised). +8 is NOT a resume point: it stays
+		 * non-zero on a healthy volume (initialized=1, redundant under RAIDiator). */
 		S[ns].dmap = e[4];
 		S[ns].init = e[7];
 		S[ns].init_mark = be32(e + 8);
-		S[ns].debut = be32(e + 0x10);
+		S[ns].start = be32(e + 0x10);
 		S[ns].nb = be32(e + 0x18);
-		S[ns].fin = S[ns].debut + S[ns].nb;
-		if (S[ns].fin > v || S[ns].fin < S[ns].debut)
-			S[ns].fin = v;
+		S[ns].end = S[ns].start + S[ns].nb;
+		if (S[ns].end > v || S[ns].end < S[ns].start)
+			S[ns].end = v;
 		if (S[ns].raid != 1)
-			raison(1, "pas_raid1", "section qui n'est pas un miroir (RAID 4)");
+			reason(1, "not_raid1", "section that is not a mirror (RAID 4)");
 		if (S[ns].init != 1)
-			raison(1, "synchro_en_cours", "synchronisation X-RAID inachevée (section non initialisée)");
+			reason(1, "sync_in_progress", "unfinished X-RAID synchronisation (section not initialised)");
 		if ((S[ns].dmap & 3) != 3)
-			raison(1, "section_degradee", "section portée par un seul disque (dmap)");
-		if (S[ns].debut >= S[ns].fin)
-			raison(2, "sections", "section vide ou hors zone visible");
+			reason(1, "degraded_section", "section carried by a single disk (dmap)");
+		if (S[ns].start >= S[ns].end)
+			reason(2, "sections", "empty section or outside the visible zone");
 		ns++;
 	}
 	for (i = 1; i < ns; i++)
-		if (S[i].debut < S[i - 1].fin)
-			raison(2, "sections", "sections qui se chevauchent");
+		if (S[i].start < S[i - 1].end)
+			reason(2, "sections", "overlapping sections");
 
-	/* disques : rôle, état dans la table de référence */
+	/* disks: role, state in the reference table */
 	for (i = 0; i < nd; i++) {
 		if (D[i].ref < 0)
 			continue;
-		/* tailles différentes admises : mêmes LBA, bornées à V (le plus petit) */
+		/* different sizes allowed: same LBAs, bounded by V (the smallest) */
 		if (v > D[i].n - 4096)
-			raison(2, "taille", "taille visible V au-delà d'un disque");
-		if (D[i].canal < 1 || D[i].canal > 11) {
-			raison(1, "role_inconnu", "this_disk illisible");
+			reason(2, "size", "visible size V beyond the end of a disk");
+		if (D[i].channel < 1 || D[i].channel > 11) {
+			reason(1, "unknown_role", "unreadable this_disk");
 			continue;
 		}
 		if (D[i].role == 'b') {
-			if (base >= 0) raison(2, "deux_bases", "deux disques se disent « base »");
+			if (base >= 0) reason(2, "two_bases", "two disks claim to be \"base\"");
 			base = i;
 		} else if (D[i].role == 'm') {
-			if (miroir >= 0) raison(2, "deux_miroirs", "deux disques se disent « miroir »");
-			miroir = i;
+			if (mirror >= 0) reason(2, "two_mirrors", "two disks claim to be \"mirror\"");
+			mirror = i;
 		}
 	}
 	for (i = 0; i < nd; i++)
 		for (j = i + 1; j < nd; j++)
-			if (D[i].ref >= 0 && D[j].ref >= 0 && D[i].canal == D[j].canal)
-				raison(2, "meme_canal", "deux disques déclarent le même canal");
-	if (base < 0 || miroir < 0) {
-		raison(1, "disque_manquant", "un des deux disques X-RAID est absent : lecture seule");
+			if (D[i].ref >= 0 && D[j].ref >= 0 && D[i].channel == D[j].channel)
+				reason(2, "same_channel", "two disks declare the same channel");
+	if (base < 0 || mirror < 0) {
+		reason(1, "missing_disk", "one of the two X-RAID disks is missing: read-only");
 	}
 	for (i = 0; i < nd; i++) {
-		unsigned et;
+		unsigned st;
 		if (D[i].ref < 0)
 			continue;
-		et = be32(sb + 0x200 + 128 * D[i].canal + 0x10);
-		if (et != 1)
-			raison(1, "disque_pas_online", "un disque n'est pas « online » (en reconstruction, de secours ou en panne)");
+		st = be32(sb + 0x200 + 128 * D[i].channel + 0x10);
+		if (st != 1)
+			reason(1, "disk_not_online", "a disk is not \"online\" (rebuilding, spare or faulty)");
 	}
-	/* disque lu en lecture seule : base online, sinon miroir online */
+	/* disk read in read-only mode: base if online, otherwise mirror if online */
 	for (i = 0; i < nd; i++)
-		if (i == base && be32(sb + 0x200 + 128 * D[i].canal + 0x10) == 1)
-			lect = i;
-	if (lect < 0)
+		if (i == base && be32(sb + 0x200 + 128 * D[i].channel + 0x10) == 1)
+			rd = i;
+	if (rd < 0)
 		for (i = 0; i < nd; i++)
-			if (i == miroir && be32(sb + 0x200 + 128 * D[i].canal + 0x10) == 1)
-				lect = i;
-	if (lect < 0)
-		raison(2, "aucun_disque_lisible", "aucun disque « online » à lire");
+			if (i == mirror && be32(sb + 0x200 + 128 * D[i].channel + 0x10) == 1)
+				rd = i;
+	if (rd < 0)
+		reason(2, "no_readable_disk", "no \"online\" disk to read");
 
-	/* partitions : MBR du disque base, sinon p_table recopiée dans le superbloc */
-	if (lect >= 0) {
+	/* partitions: MBR of the base disk, otherwise the p_table copied into the superblock */
+	if (rd >= 0) {
 		unsigned char mbr[512];
 		memset(mbr, 0, sizeof(mbr));
 		if (base >= 0 && D[base].mbr_ok)
 			memcpy(mbr, D[base].mbr, 512);
-		else if (base >= 0 || miroir >= 0) {
-			/* entrée du disque base dans la table : celle qui a b_drive */
+		else if (base >= 0 || mirror >= 0) {
+			/* entry of the base disk in the table: the one with b_drive */
 			for (i = 1; i < 12; i++)
 				if (sb[0x200 + 128 * i + 1]) {
 					memcpy(mbr + 0x1C0, sb + 0x200 + 128 * i + 0x18, 64);
 					break;
 				}
-			raison(1, "mbr_reconstitue", "MBR du disque base absent : table reprise du superbloc");
+			reason(1, "mbr_rebuilt", "MBR of the base disk missing: table taken from the superblock");
 		}
 		if (mbr[510] == 0x55 && mbr[511] == 0xAA)
-			np = lire_parts(mbr, D[lect].fd, P);
+			np = read_parts(mbr, D[rd].fd, P);
 		if (!np)
-			raison(2, "pas_de_partition", "aucune partition trouvée sur le disque base");
+			reason(2, "no_partition", "no partition found on the base disk");
 	}
 	for (i = 0; i < np; i++) {
 		P[i].sec = -1;
 		for (j = 0; j < ns; j++)
-			if (P[i].debut >= S[j].debut && (u64)P[i].debut + P[i].nb <= S[j].fin) {
+			if (P[i].start >= S[j].start && (u64)P[i].start + P[i].nb <= S[j].end) {
 				P[i].sec = j;
-				P[i].dec = P[i].debut - S[j].debut;
+				P[i].off = P[i].start - S[j].start;
 			}
 		if (P[i].sec < 0)
-			raison(1, "partition_hors_section", "une partition déborde des sections (ou de la zone visible)");
+			reason(1, "partition_outside_section", "a partition goes beyond the sections (or the visible zone)");
 	}
 
-	/* échantillonnage aux mêmes LBA */
-	if (base >= 0 && miroir >= 0 && k > 0 && !bloque_tout) {
-		diff = echantillonner(D[base].fd, D[miroir].fd, S, ns, k);
+	/* sampling at the same LBAs */
+	if (base >= 0 && mirror >= 0 && k > 0 && !block_all) {
+		diff = sample(D[base].fd, D[mirror].fd, S, ns, k);
 		if (diff < 0)
-			raison(1, "erreur_lecture", "erreur de lecture pendant l'échantillonnage");
+			reason(1, "read_error", "read error while sampling");
 		else if (diff > 0)
-			raison(1, "miroir_different", "des blocs diffèrent entre les deux disques aux mêmes LBA");
+			reason(1, "mirror_differs", "blocks differ between the two disks at the same LBAs");
 	}
 
-	cle_s("MODE", bloque_tout ? "aucun" : bloque_rw ? "ro" : "rw");
+	key_s("MODE", block_all ? "none" : block_rw ? "ro" : "rw");
 	for (i = 0; i < nd; i++)
-		if (D[i].md) { cle_s("MD", "1"); break; }
-	cle_n("N", D[ref].n);
-	cle_n("V", v);
-	cle_n("ZONE_PROTEGEE", v);
+		if (D[i].md) { key_s("MD", "1"); break; }
+	key_n("N", D[ref].n);
+	key_n("V", v);
+	key_n("PROTECTED_ZONE", v);
 	snprintf(buf, sizeof(buf), "%u.%u.%u", ver[0], ver[1], ver[2]);
-	cle_s("VERSION", buf);
+	key_s("VERSION", buf);
 	snprintf(buf, sizeof(buf), "%08x", be32(sb + 0x14));
-	cle_s("ID", buf);
-	cle_n("CTIME", be32(sb + 0x18));
-	cle_n("PROPRE", propre);
-	cle_n("NB_DISQUES", nr_disks);
-	cle_s("BASE", base >= 0 ? D[base].chemin : "");
-	cle_s("MIROIR", miroir >= 0 ? D[miroir].chemin : "");
-	cle_s("LECTURE", lect >= 0 ? D[lect].chemin : "");
-	cle_n("ECHANTILLONS", (u64)(diff == -2 ? 0 : k));
+	key_s("ID", buf);
+	key_n("CTIME", be32(sb + 0x18));
+	key_n("CLEAN", clean);
+	key_n("NR_DISKS", nr_disks);
+	key_s("BASE", base >= 0 ? D[base].path : "");
+	key_s("MIRROR", mirror >= 0 ? D[mirror].path : "");
+	key_s("READ_DISK", rd >= 0 ? D[rd].path : "");
+	key_n("SAMPLES", (u64)(diff == -2 ? 0 : k));
 	if (diff >= 0)
-		cle_n("DIFFERENCES", (u64)diff);
+		key_n("DIFFERENCES", (u64)diff);
 
-	/* disques */
-	if (json) printf(",\"disques\":[");
-	else printf("XR_NB_DISQUES_LUS=%d\n", nd);
+	/* disks */
+	if (json) printf(",\"disks\":[");
+	else printf("XR_NR_DISKS_READ=%d\n", nd);
 	for (i = 0; i < nd; i++) {
-		const char *role = D[i].role == 'b' ? "base" : D[i].role == 'm' ? "miroir" : "";
-		const char *et = D[i].ref >= 0 ? etat_nom(be32(sb + 0x200 + 128 * D[i].canal + 0x10)) : "";
+		const char *role = D[i].role == 'b' ? "base" : D[i].role == 'm' ? "mirror" : "";
+		const char *st = D[i].ref >= 0 ? state_name(be32(sb + 0x200 + 128 * D[i].channel + 0x10)) : "";
 		char copies[64] = "";
 		int c;
 		for (c = 0; c < 4; c++)
 			if (D[i].magic[c] == WGAO || D[i].magic[c] == WGAN) {
 				strcat(copies, *copies ? "," : "");
-				strcat(copies, NOM_COPIE[c]);
+				strcat(copies, COPY_NAME[c]);
 			}
 		if (json)
-			printf("%s{\"chemin\":\"%s\",\"secteurs\":%llu,\"role\":\"%s\",\"canal\":%d,\"etat\":\"%s\",\"copies\":\"%s\",\"wgam\":%d,\"mbr\":%d,\"md\":%d}",
-			       i ? "," : "", D[i].chemin, D[i].n, role, D[i].canal - 1, et, copies, D[i].wgam, D[i].mbr_ok, D[i].md);
+			printf("%s{\"path\":\"%s\",\"sectors\":%llu,\"role\":\"%s\",\"channel\":%d,\"state\":\"%s\",\"copies\":\"%s\",\"wgam\":%d,\"mbr\":%d,\"md\":%d}",
+			       i ? "," : "", D[i].path, D[i].n, role, D[i].channel - 1, st, copies, D[i].wgam, D[i].mbr_ok, D[i].md);
 		else
-			printf("XR_D%d='%s %llu %s %d %s %s %d %d %d'\n", i, D[i].chemin, D[i].n, *role ? role : "-",
-			       D[i].canal - 1, *et ? et : "-", *copies ? copies : "-", D[i].wgam, D[i].mbr_ok, D[i].md);
+			printf("XR_D%d='%s %llu %s %d %s %s %d %d %d'\n", i, D[i].path, D[i].n, *role ? role : "-",
+			       D[i].channel - 1, *st ? st : "-", *copies ? copies : "-", D[i].wgam, D[i].mbr_ok, D[i].md);
 	}
-	/* sections : début, secteurs utilisables (bornés à V), niveau, initialisée */
+	/* sections: start, usable sectors (bounded by V), level, initialised */
 	if (json) printf("],\"sections\":[");
-	else printf("XR_NB_SECTIONS=%d\n", ns);
+	else printf("XR_NR_SECTIONS=%d\n", ns);
 	for (i = 0; i < ns; i++) {
 		if (json)
-			printf("%s{\"debut\":%u,\"secteurs\":%u,\"secteurs_declares\":%u,\"raid\":%u,\"init\":%u,\"dmap\":%u,\"init_mark\":%u}",
-			       i ? "," : "", S[i].debut, S[i].fin - S[i].debut, S[i].nb, S[i].raid, S[i].init, S[i].dmap, S[i].init_mark);
+			printf("%s{\"start\":%u,\"sectors\":%u,\"declared_sectors\":%u,\"raid\":%u,\"init\":%u,\"dmap\":%u,\"init_mark\":%u}",
+			       i ? "," : "", S[i].start, S[i].end - S[i].start, S[i].nb, S[i].raid, S[i].init, S[i].dmap, S[i].init_mark);
 		else
-			printf("XR_S%d='%u %u %u %u'\n", i, S[i].debut, S[i].fin - S[i].debut, S[i].raid, S[i].init);
+			printf("XR_S%d='%u %u %u %u'\n", i, S[i].start, S[i].end - S[i].start, S[i].raid, S[i].init);
 	}
-	/* partitions : numéro, début, taille, type, section, décalage dans la section */
+	/* partitions: number, start, size, type, section, offset in the section */
 	if (json) printf("],\"partitions\":[");
-	else printf("XR_NB_PARTS=%d\n", np);
+	else printf("XR_NR_PARTS=%d\n", np);
 	for (i = 0; i < np; i++) {
 		if (json)
-			printf("%s{\"num\":%d,\"debut\":%u,\"secteurs\":%u,\"type\":\"%02x\",\"section\":%d,\"decalage\":%u}",
-			       i ? "," : "", P[i].num, P[i].debut, P[i].nb, P[i].type, P[i].sec, P[i].dec);
+			printf("%s{\"num\":%d,\"start\":%u,\"sectors\":%u,\"type\":\"%02x\",\"section\":%d,\"offset\":%u}",
+			       i ? "," : "", P[i].num, P[i].start, P[i].nb, P[i].type, P[i].sec, P[i].off);
 		else
-			printf("XR_P%d='%d %u %u %02x %d %u'\n", i, P[i].num, P[i].debut, P[i].nb, P[i].type, P[i].sec, P[i].dec);
+			printf("XR_P%d='%d %u %u %02x %d %u'\n", i, P[i].num, P[i].start, P[i].nb, P[i].type, P[i].sec, P[i].off);
 	}
 	if (json) {
-		printf("],\"raisons\":[");
+		printf("],\"reasons\":[");
 		for (i = 0; i < nr; i++)
-			printf("%s{\"code\":\"%s\",\"texte\":\"%s\"}", i ? "," : "", r_code[i], r_texte[i]);
+			printf("%s{\"code\":\"%s\",\"text\":\"%s\"}", i ? "," : "", r_code[i], r_text[i]);
 		printf("]}\n");
 	} else {
-		printf("XR_RAISONS='");
+		printf("XR_REASONS='");
 		for (i = 0; i < nr; i++)
 			printf("%s%s", i ? " " : "", r_code[i]);
 		printf("'\n");
 		for (i = 0; i < nr; i++)
-			printf("# %s : %s\n", r_code[i], r_texte[i]);
+			printf("# %s: %s\n", r_code[i], r_text[i]);
 	}
 	return 0;
 }
 
-/* ---------- vérification complète du miroir (lecture seule) ---------- */
-static int verifier(int argc, char **argv, unsigned zone_mio)
+/* ---------- full mirror verification (read-only) ---------- */
+static int verify(int argc, char **argv, unsigned zone_mib)
 {
-	static struct disque A, B;
+	static struct disk A, B;
 	struct section S[7];
 	const unsigned char *sb;
 	unsigned char *a, *b;
 	unsigned v;
-	int i, ns = 0, erreurs = 0;
-	u64 total = 0, fait = 0, zones = 0, premiere = 0;
-	const unsigned bloc = 1024 * 1024;
+	int i, ns = 0, errors = 0;
+	u64 total = 0, done = 0, zones = 0, first_diff = 0;
+	const unsigned block = 1024 * 1024;
 	unsigned pct = 101;
 
 	if (argc != 2)
-		meurt("verifier : deux disques attendus");
-	ouvrir(&A, argv[0]);
-	ouvrir(&B, argv[1]);
-	lire_disque(&A);
-	lire_disque(&B);
+		die("verify: two disks expected");
+	open_disk(&A, argv[0]);
+	open_disk(&B, argv[1]);
+	read_disk(&A);
+	read_disk(&B);
 	if (A.ref < 0 && B.ref < 0)
-		meurt("aucun superbloc X-RAID");
+		die("no X-RAID superblock");
 	sb = A.ref >= 0 ? A.sb[A.ref] : B.sb[B.ref];
 	v = be32(sb + 0x20);
 	for (i = 0; i < 7; i++) {
 		const unsigned char *e = sb + 0x800 + 32 * i;
 		if (!e[6])
 			continue;
-		S[ns].debut = be32(e + 0x10);
-		S[ns].fin = S[ns].debut + be32(e + 0x18);
-		if (S[ns].fin > v || S[ns].fin < S[ns].debut)
-			S[ns].fin = v;
-		if (S[ns].fin > S[ns].debut)
-			total += S[ns].fin - S[ns].debut, ns++;
+		S[ns].start = be32(e + 0x10);
+		S[ns].end = S[ns].start + be32(e + 0x18);
+		if (S[ns].end > v || S[ns].end < S[ns].start)
+			S[ns].end = v;
+		if (S[ns].end > S[ns].start)
+			total += S[ns].end - S[ns].start, ns++;
 	}
-	if (!zone_mio)
-		zone_mio = 64;
-	a = malloc(bloc);
-	b = malloc(bloc);
+	if (!zone_mib)
+		zone_mib = 64;
+	a = malloc(block);
+	b = malloc(block);
 	if (!a || !b)
-		meurt("mémoire");
+		die("out of memory");
 	for (i = 0; i < ns; i++) {
-		u64 lba = S[i].debut, zone_diff = (u64)-1;
-		while (lba < S[i].fin) {
-			u64 nb = S[i].fin - lba;
+		u64 lba = S[i].start, zone_diff = (u64)-1;
+		while (lba < S[i].end) {
+			u64 nb = S[i].end - lba;
 			size_t len;
-			int essai, d = 1;
-			if (nb > bloc / 512)
-				nb = bloc / 512;
+			int attempt, d = 1;
+			if (nb > block / 512)
+				nb = block / 512;
 			len = (size_t)nb * 512;
-			/* un écart peut venir d'une écriture en cours : relire 3 fois */
-			for (essai = 0; essai < 3 && d; essai++) {
-				if (essai)
+			/* a difference may come from a write in progress: read again 3 times */
+			for (attempt = 0; attempt < 3 && d; attempt++) {
+				if (attempt)
 					sleep(1);
-				if (lire(A.fd, lba * 512, a, len) || lire(B.fd, lba * 512, b, len)) {
-					fprintf(stderr, "erreur de lecture vers le LBA %llu\n", lba);
-					erreurs++;
+				if (read_at(A.fd, lba * 512, a, len) || read_at(B.fd, lba * 512, b, len)) {
+					fprintf(stderr, "read error near LBA %llu\n", lba);
+					errors++;
 					d = 0;
 					break;
 				}
 				d = memcmp(a, b, len) != 0;
 			}
 			if (d) {
-				u64 z = (lba - S[i].debut) / ((u64)zone_mio * 2048);
+				u64 z = (lba - S[i].start) / ((u64)zone_mib * 2048);
 				if (z != zone_diff) {
 					zone_diff = z;
 					if (!zones)
-						premiere = lba;
+						first_diff = lba;
 					zones++;
 					printf("# difference section %d zone %llu (LBA %llu)\n", i, z,
-					       S[i].debut + z * (u64)zone_mio * 2048);
+					       S[i].start + z * (u64)zone_mib * 2048);
 				}
 			}
 			lba += nb;
-			fait += nb;
-			if (fait * 100 / total != pct) {
-				pct = (unsigned)(fait * 100 / total);
-				fprintf(stderr, "progression %u%%\n", pct);
+			done += nb;
+			if (done * 100 / total != pct) {
+				pct = (unsigned)(done * 100 / total);
+				fprintf(stderr, "progress %u%%\n", pct);
 			}
 		}
 	}
-	premier = 1;
+	first = 1;
 	if (json) printf("{");
-	cle_s("RESULTAT", erreurs ? "erreurs" : zones ? "differences" : "identiques");
-	cle_n("SECTEURS_COMPARES", fait);
-	cle_n("ZONES_DIFFERENTES", zones);
-	cle_n("ZONE_MIO", zone_mio);
-	cle_n("PREMIERE_DIFFERENCE", premiere);
-	cle_n("ERREURS_LECTURE", (u64)erreurs);
+	key_s("RESULT", errors ? "errors" : zones ? "differences" : "identical");
+	key_n("SECTORS_COMPARED", done);
+	key_n("DIFFERENT_ZONES", zones);
+	key_n("ZONE_MIB", zone_mib);
+	key_n("FIRST_DIFFERENCE", first_diff);
+	key_n("READ_ERRORS", (u64)errors);
 	if (json) printf("}\n");
-	return erreurs ? 2 : zones ? 1 : 0;
+	return errors ? 2 : zones ? 1 : 0;
 }
 
-/* ---------- SMART par ATA PASS-THROUGH (16), sans smartctl ---------- */
+/* ---------- SMART through ATA PASS-THROUGH (16), without smartctl ---------- */
 static int ata16(int fd, unsigned char *cdb, unsigned char *data, int lg, unsigned char *sense)
 {
 	sg_io_hdr_t h;
@@ -645,56 +645,56 @@ static int ata16(int fd, unsigned char *cdb, unsigned char *data, int lg, unsign
 	return ioctl(fd, SG_IO, &h);
 }
 
-static int smart(const char *chemin)
+static int smart(const char *path)
 {
 	unsigned char cdb[16], data[512], sense[32], sum = 0, mid = 0, high = 0;
-	unsigned long long realloc = 0, pending = 0, uncorr = 0, heures = 0;
-	const char *sante = "";
-	int fd = open(chemin, O_RDONLY | O_NONBLOCK), i;
+	unsigned long long realloc = 0, pending = 0, uncorr = 0, hours = 0;
+	const char *health = "";
+	int fd = open(path, O_RDONLY | O_NONBLOCK), i;
 	if (fd < 0)
-		meurt("%s : %s", chemin, strerror(errno));
-	/* SMART READ DATA : PIO data-in, 1 secteur */
+		die("%s: %s", path, strerror(errno));
+	/* SMART READ DATA: PIO data-in, 1 sector */
 	memset(cdb, 0, 16);
 	cdb[0] = 0x85; cdb[1] = 4 << 1; cdb[2] = 0x0e;
 	cdb[4] = 0xD0; cdb[6] = 1; cdb[10] = 0x4f; cdb[12] = 0xc2; cdb[14] = 0xB0;
 	if (ata16(fd, cdb, data, 512, sense) < 0)
-		meurt("%s : SG_IO refusé (%s)", chemin, strerror(errno));
+		die("%s: SG_IO refused (%s)", path, strerror(errno));
 	for (i = 0; i < 512; i++)
 		sum += data[i];
 	if (sum)
-		meurt("%s : données SMART illisibles (somme de contrôle)", chemin);
+		die("%s: unreadable SMART data (checksum)", path);
 	for (i = 0; i < 30; i++) {
 		const unsigned char *e = data + 2 + 12 * i;
-		u64 brut = (u64)e[5] | (u64)e[6] << 8 | (u64)e[7] << 16 | (u64)e[8] << 24;
+		u64 raw = (u64)e[5] | (u64)e[6] << 8 | (u64)e[7] << 16 | (u64)e[8] << 24;
 		switch (e[0]) {
-		case 5: realloc = brut; break;
-		case 9: heures = brut; break;
-		case 197: pending = brut; break;
-		case 198: uncorr = brut; break;
+		case 5: realloc = raw; break;
+		case 9: hours = raw; break;
+		case 197: pending = raw; break;
+		case 198: uncorr = raw; break;
 		}
 	}
-	/* SMART RETURN STATUS : non-data, CK_COND pour relire LBA mid/high */
+	/* SMART RETURN STATUS: non-data, CK_COND to read back LBA mid/high */
 	memset(cdb, 0, 16);
 	cdb[0] = 0x85; cdb[1] = 3 << 1; cdb[2] = 0x20;
 	cdb[4] = 0xDA; cdb[10] = 0x4f; cdb[12] = 0xc2; cdb[14] = 0xB0;
 	if (ata16(fd, cdb, NULL, 0, sense) == 0) {
-		if ((sense[0] & 0x7f) == 0x72 && sense[8] == 0x09) {	/* descripteur ATA */
+		if ((sense[0] & 0x7f) == 0x72 && sense[8] == 0x09) {	/* ATA descriptor */
 			mid = sense[8 + 9]; high = sense[8 + 11];
-		} else if ((sense[0] & 0x7f) == 0x70) {			/* format fixe (libata) */
+		} else if ((sense[0] & 0x7f) == 0x70) {			/* fixed format (libata) */
 			mid = sense[10]; high = sense[11];
 		}
 		if (mid == 0x4f && high == 0xc2)
-			sante = "PASSED";
+			health = "PASSED";
 		else if (mid == 0xf4 && high == 0x2c)
-			sante = "FAILED";
+			health = "FAILED";
 	}
 	close(fd);
 	if (json)
 		printf("{\"health\":\"%s\",\"realloc\":%llu,\"pending\":%llu,\"uncorr\":%llu,\"hours\":%llu}\n",
-		       sante, realloc, pending, uncorr, heures);
-	else	/* même format que /var/run/smart.sdX (diet-hwmon) */
+		       health, realloc, pending, uncorr, hours);
+	else	/* same format as /var/run/smart.sdX (diet-hwmon) */
 		printf("health=%s realloc=%llu pending=%llu uncorr=%llu hours=%llu\n",
-		       sante, realloc, pending, uncorr, heures);
+		       health, realloc, pending, uncorr, hours);
 	return 0;
 }
 
@@ -702,30 +702,30 @@ int main(int argc, char **argv)
 {
 	int k = 0;
 	unsigned zone = 0;
-	const char *cmd = "analyser";
+	const char *cmd = "analyse";
 
 	argc--, argv++;
-	if (argc && (!strcmp(argv[0], "verifier") || !strcmp(argv[0], "smart")))
+	if (argc && (!strcmp(argv[0], "verify") || !strcmp(argv[0], "smart")))
 		cmd = argv[0], argc--, argv++;
 	while (argc && argv[0][0] == '-' && argv[0][1] == '-') {
 		if (!strcmp(argv[0], "--json"))
 			json = 1;
-		else if (!strcmp(argv[0], "--echantillons") && argc > 1)
+		else if (!strcmp(argv[0], "--samples") && argc > 1)
 			k = atoi(argv[1]), argc--, argv++;
 		else if (!strcmp(argv[0], "--zone") && argc > 1)
 			zone = (unsigned)atoi(argv[1]), argc--, argv++;
 		else
-			meurt("option inconnue %s (voir l'en-tête de xraid-info.c)", argv[0]);
+			die("unknown option %s (see the header of xraid-info.c)", argv[0]);
 		argc--, argv++;
 	}
 	if (k < 0 || k > 100000)
-		meurt("--echantillons : 0..100000");
-	if (!strcmp(cmd, "verifier"))
-		return verifier(argc, argv, zone);
+		die("--samples: 0..100000");
+	if (!strcmp(cmd, "verify"))
+		return verify(argc, argv, zone);
 	if (!strcmp(cmd, "smart")) {
 		if (argc != 1)
-			meurt("smart : un disque");
+			die("smart: one disk");
 		return smart(argv[0]);
 	}
-	return analyser(argc, argv, k);
+	return analyse(argc, argv, k);
 }

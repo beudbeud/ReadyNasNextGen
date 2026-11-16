@@ -10,8 +10,8 @@ l'interopérabilité, sans reprendre de code d'Infrant/NETGEAR) et essayé sur P
 avec des images disque factices (§8). Les relevés à faire sur le NAS avant
 toute écriture sont au §9.
 
-Par défaut le X-RAID est monté **en lecture seule** (`XRAID_RW=non`). L'écriture
-ne s'active qu'après validation, en écrivant `XRAID_RW=oui` dans
+Par défaut le X-RAID est monté **en lecture seule** (`XRAID_RW=no`). L'écriture
+ne s'active qu'après validation, en écrivant `XRAID_RW=yes` dans
 `/etc/nas-raid.conf`.
 
 ## 1. Le format X-RAID en bref
@@ -49,7 +49,7 @@ ne s'active qu'après validation, en écrivant `XRAID_RW=oui` dans
 
 ## 2. Ce que fait la compatibilité
 
-Au démarrage, `S35stockage` lance `nas-raid monter` (avant NFS et SMB) :
+Au démarrage, `S35storage` lance `nas-raid mount` (avant NFS et SMB) :
 
 1. **Analyse** (`xraid-info`, C, lecture seule) des disques SATA (pas la clé
    USB) : les quatre copies du superbloc, choix du superbloc de référence
@@ -57,8 +57,8 @@ Au démarrage, `S35stockage` lance `nas-raid monter` (avant NFS et SMB) :
    sections bornées à V, partitions (MBR du disque **base** ; s'il manque,
    table recopiée dans le superbloc et EBR lus sur le miroir), puis
    **comparaison de 256 blocs de 64 Kio par section** aux mêmes LBA sur les
-   deux disques. Verdict : `rw`, `ro` ou `aucun`, avec les raisons.
-2. **Lecture et écriture** (tous les garde-fous passent et `XRAID_RW=oui`) :
+   deux disques. Verdict : `rw`, `ro` ou `none`, avec les raisons.
+2. **Lecture et écriture** (tous les garde-fous passent et `XRAID_RW=yes`) :
 
         disque base   ──dm-linear [début, début+lg)──┐
                                                     ├─ mdadm --build (RAID 1, AUCUN superbloc)
@@ -77,7 +77,7 @@ Au démarrage, `S35stockage` lance `nas-raid monter` (avant NFS et SMB) :
 4. Si un disque porte un superbloc md (déjà migré), c'est le md qui est monté
    sur `/c` (`mdadm --assemble --scan`, VG `donnees`, ext4).
 
-À l'arrêt (`nas-raid demonter`) : démontage, LVM désactivé, md arrêtés, dm
+À l'arrêt (`nas-raid unmount`) : démontage, LVM désactivé, md arrêtés, dm
 retirés.
 
 Le swap (`p2`) et la racine RAIDiator (`p1`) ne sont pas utilisés (le swap de
@@ -96,7 +96,7 @@ RAIDiator a des pages de 16 Kio).
 | Section qui n'est pas un miroir (RAID 4 des NV+) | lecture seule |
 | **Échantillons différents** aux mêmes LBA | lecture seule |
 | Partition qui déborde des sections ou de V | lecture seule |
-| Arrêt brutal **sous Linux** (marque `/var/lib/nas-raid/xraid-sale` restée) | lecture seule, jusqu'à une vérification complète réussie |
+| Arrêt brutal **sous Linux** (marque `/var/lib/nas-raid/xraid-dirty` restée) | lecture seule, jusqu'à une vérification complète réussie |
 | md X-RAID dégradé à l'arrêt (un disque a lâché en cours de route) | la marque reste : lecture seule au démarrage suivant |
 | Migration en cours | X-RAID en lecture seule |
 
@@ -111,8 +111,8 @@ Une seule action `nas-raid` à la fois (verrou).
 - **Pas de suivi de resynchronisation** : sans superbloc md ni mise à jour du
   superbloc X-RAID, une coupure de courant pendant une écriture peut laisser
   les deux disques différents, sans que rien ne le note sur les disques. La
-  marque `xraid-sale` (sur la clé USB) le détecte et repasse en lecture seule ;
-  il faut alors `nas-raid verifier`. Si la clé USB est remplacée, la marque est
+  marque `xraid-dirty` (sur la clé USB) le détecte et repasse en lecture seule ;
+  il faut alors `nas-raid verify`. Si la clé USB est remplacée, la marque est
   perdue : faire une vérification complète.
 - Après un passage sous Linux, RAIDiator voit toujours son superbloc comme avant
   (rien n'y est écrit) : il ne sait pas que les données ont changé ; elles sont
@@ -131,25 +131,25 @@ Une seule action `nas-raid` à la fois (verrou).
 
 ## 5. Vérification et réparation du miroir
 
-- `nas-raid verifier` (ou « Vérifier le miroir » dans DIET) compare **tout le
+- `nas-raid verify` (ou « Vérifier le miroir » dans DIET) compare **tout le
   contenu des sections** des deux disques par blocs de 1 Mio, en lecture seule
-  (`xraid-info verifier`), relit trois fois un bloc différent (écriture en
-  cours), note les zones de 64 Mio différentes (`/var/lib/nas-raid/verif.res`)
+  (`xraid-info verify`), relit trois fois un bloc différent (écriture en
+  cours), note les zones de 64 Mio différentes (`/var/lib/nas-raid/verify.res`)
   et les erreurs de lecture. Plusieurs heures pour 2 × 750 Go. Mieux vaut le
   faire volume en lecture seule. Réussie hors écriture, elle retire la marque
-  `xraid-sale` et accepte un superbloc RAIDiator « non propre ».
-- `nas-raid reparer --confirmer REPARER --oui` : seulement si les raisons sont
+  `xraid-dirty` et accepte un superbloc RAIDiator « non propre ».
+- `nas-raid repair --confirm REPAIR --yes` : seulement si les raisons sont
   « arrêt non propre » ou « échantillons différents ». Assemble en écriture et
   lance `repair` sur chaque md : la base est recopiée sur le miroir là où ils
-  diffèrent. Ensuite `nas-raid verifier`, puis redémarrer.
+  diffèrent. Ensuite `nas-raid verify`, puis redémarrer.
 
 ## 6. Bascule vers md
 
 Toutes ces actions effacent des disques. Elles demandent **deux
-confirmations** : `--confirmer PHRASE` (phrase exacte affichée en cas de refus)
-**et** `--oui` ; dans DIET, une case à cocher et la phrase à taper. Chacune a un
-mode **à blanc** (`--a-blanc`) qui affiche les commandes sans rien exécuter ni
-écrire. Journal : `/var/lib/nas-raid/journal` (onglet Journaux de DIET).
+confirmations** : `--confirm PHRASE` (phrase exacte affichée en cas de refus)
+**et** `--yes` ; dans DIET, une case à cocher et la phrase à taper. Chacune a un
+mode **à blanc** (`--dry-run`) qui affiche les commandes sans rien exécuter ni
+écrire. Journal : `/var/lib/nas-raid/log` (onglet Journaux de DIET).
 
 Le md créé : RAID 1 sur disques entiers, métadonnées 1.2, bitmap interne, nom
 `donnees` (`/dev/md/donnees`, `/etc/mdadm.conf`), LVM (VG `donnees`, LV `c`),
@@ -157,15 +157,15 @@ ext4 à blocs de 4 Kio, monté sur `/c` par le noyau (plus de fuse2fs).
 
 ### 6.1 Migration sur place des deux disques (sans 3ᵉ disque)
 
-    nas-raid migrer --a-blanc                       # voir ce qui sera fait
-    nas-raid verifier                               # obligatoire, < 7 jours
-    nas-raid migrer --confirmer MIGRER --oui        # étapes 1 à 3
-    nas-raid migrer --finaliser --confirmer 'EFFACER sdX' --oui   # étape 4
+    nas-raid migrate --dry-run                      # voir ce qui sera fait
+    nas-raid verify                                 # obligatoire, < 7 jours
+    nas-raid migrate --confirm MIGRATE --yes        # étapes 1 à 3
+    nas-raid migrate --finalize --confirm 'ERASE sdX' --yes   # étape 4
 
 Contrôles préalables : X-RAID sain (deux disques online, pas de synchronisation,
 échantillons identiques, pas d'arrêt brutal non vérifié), vérification complète
 réussie de moins de 7 jours, SMART des deux disques lisible et sans secteur
-en attente ni illisible (`--sans-smart` pour passer outre, déconseillé), données
+en attente ni illisible (`--no-smart` pour passer outre, déconseillé), données
 de `/c` assez petites pour le md.
 
 1. **casser** : le disque miroir B quitte le X-RAID : début et zone X-RAID de B
@@ -173,23 +173,23 @@ de `/c` assez petites pour le md.
    **lecture seule** sur le disque base A seul (toujours lisible par RAIDiator
    comme un X-RAID dégradé). Le md est monté sur `/mnt/md`.
 2. **copier** : `rsync -aH --numeric-ids --delete /c/ /mnt/md/`, reprenable
-   (relancer la même commande après une coupure ; au démarrage, `S35stockage`
+   (relancer la même commande après une coupure ; au démarrage, `S35storage`
    remonte X-RAID en lecture seule et le md sur `/mnt/md`). Refusé si `/c` n'est
    pas le X-RAID en lecture seule ou si `/mnt/md` n'est pas monté.
-3. **vérifier** : `rsync -n -c` (sommes de contrôle ; `VERIF_RSYNC=` dans
+3. **vérifier** : `rsync -n -c` (sommes de contrôle ; `VERIFY_RSYNC=` dans
    `/etc/nas-raid.conf` pour comparer taille et date seulement) ; toute
    différence arrête la migration. La migration s'arrête ici : contrôler
    `/mnt/md`.
-4. **finaliser** (`--finaliser`, phrase `EFFACER <disque base>`) : refusé si le
+4. **finaliser** (`--finalize`, phrase `ERASE <disque base>`) : refusé si le
    md contient moins de la moitié des données du X-RAID ; A est effacé (début
    et zone X-RAID) puis ajouté au md : **resynchronisation** (`/proc/mdstat`) ;
    `/c` = md. **Le retour au X-RAID/RAIDiator n'est plus possible.**
 
-Étapes et journal dans `/var/lib/nas-raid/` (`migration`, `journal`).
+Étapes et journal dans `/var/lib/nas-raid/` (`migration`, `log`).
 
 ### 6.2 Nouveau RAID md (disques neufs ou existants)
 
-    nas-raid creer /dev/sda /dev/sdb --confirmer 'EFFACER sda sdb' --oui
+    nas-raid create /dev/sda /dev/sdb --confirm 'ERASE sda sdb' --yes
 
 Efface les disques (y compris un X-RAID), crée le md (un seul disque : md
 dégradé, compléter avec `ajouter`), LVM, ext4, monte `/c`. Seuls les disques
@@ -197,8 +197,8 @@ SATA du NAS sont acceptés.
 
 ### 6.3 Remplacement et extension verticale
 
-    nas-raid ajouter /dev/sdb --confirmer 'EFFACER sdb' --oui   # disque neuf à la place d'un ancien
-    nas-raid agrandir --confirmer AGRANDIR --oui                 # quand les deux sont plus grands
+    nas-raid add /dev/sdb --confirm 'ERASE sdb' --yes         # disque neuf à la place d'un ancien
+    nas-raid grow --confirm GROW --yes                           # quand les deux sont plus grands
 
 Remplacer un disque à la fois (retirer l'ancien, insérer le nouveau,
 `ajouter`, attendre la fin de la resynchronisation), puis `agrandir` : bitmap
@@ -212,16 +212,16 @@ lecture seule, RAID md), les raisons d'une lecture seule, l'état des sections,
 la dernière vérification du miroir et l'étape d'une migration. Boutons :
 « Vérifier le miroir », « Migrer vers md », « Terminer la migration »,
 « Créer un RAID md » (assistant : essai à blanc, case à cocher, phrase à
-taper) et « Journal du stockage ». API : `GET ?a=stockage` (`nas-raid etat
+taper) et « Journal du stockage ». API : `GET ?a=storage` (`nas-raid status
 --json`, sans accès aux disques : résultat mis en cache au montage), `POST
-?a=raid_verifier|raid_plan|raid_lancer`, journal `?a=log&f=stockage`.
+?a=raid_verify|raid_plan|raid_run`, journal `?a=log&f=storage`.
 
 ## 8. Essais sur PC (sans NAS, sans root)
 
-    sh package/xraid-compat/tests/essai.sh
-    sh package/diet/tests/essai-api.sh
+    sh package/xraid-compat/tests/test.sh
+    sh package/diet/tests/test-api.sh
 
-`tests/fabrique-images.py` fabrique des images en fichiers creux (750 Go
+`tests/make-images.py` fabrique des images en fichiers creux (750 Go
 apparents, quelques Mo réels) : superbloc, copies, secours, « WGam », MBR sur
 la base seulement, EBR, sections, avec les scénarios propre, sale, dégradé,
 synchronisation inachevée, miroir différent, disque md. Les essais vérifient
@@ -233,7 +233,7 @@ périphérique dm ou loop n'est créé (il faudrait root).
 
 ## 9. Relevés à faire sur le NAS (lecture seule)
 
-Sous le système 6.18 avec `XRAID_RW=non` (défaut). Les fichiers produits
+Sous le système 6.18 avec `XRAID_RW=no` (défaut). Les fichiers produits
 contiennent des **numéros de série** (IDENTIFY dans le superbloc), une partie
 de l'**adresse MAC** et le **nom d'hôte** (métadonnées LVM) : ne pas les publier.
 Les écrire sur la clé USB, pas sur les disques. Pour chaque disque `X` = `a`,
@@ -246,20 +246,20 @@ Les écrire sur la clé USB, pas sur les disques. Pour chaque disque `X` = `a`,
 
 puis :
 
-    xraid-info --echantillons 64 /dev/sda /dev/sdb
+    xraid-info --samples 64 /dev/sda /dev/sdb
     xraid-info --json /dev/sda /dev/sdb
     dd if=/dev/sdB of=/pv-debut.bin bs=512 skip=4608040 count=2048     # sdB = le disque base : étiquette et métadonnées LVM
     cat /proc/partitions; dmesg | grep -i -E 'sd[ab]|ata[12]'
-    nas-raid etat; nas-raid monter --a-blanc; nas-raid migrer --a-blanc
-    cat /var/run/nas-raid.mode; ls /c; df /c                           # montage en lecture seule fait par S35stockage
+    nas-raid status; nas-raid mount --dry-run; nas-raid migrate --dry-run
+    cat /var/run/nas-raid.mode; ls /c; df /c                           # montage en lecture seule fait par S35storage
     lvm lvs --config 'devices { filter = [ "a|^/dev/mapper/xr-p|", "r|.*|" ] }'
 
 À vérifier : `od -A d -t x1 -j 8388608 -N 4 /fin-sdX.bin` donne `57 47 61 6f`
 (« WGao » en N − 4096, gros-boutiste) ; `xraid-info` répond `rw` ou `ro` avec
 des raisons cohérentes ; sections 32 / 4 096 000 et 4 096 032 / 1 461 032 686 ;
 base = le disque qui a un MBR ; `ls /c` lisible ; LVM sans instantané ; valeurs
-SMART plausibles (heures de marche). Ensuite seulement : `nas-raid verifier`, puis
-`XRAID_RW=oui` et un redémarrage.
+SMART plausibles (heures de marche). Ensuite seulement : `nas-raid verify`, puis
+`XRAID_RW=yes` et un redémarrage.
 
 ## Fichiers
 
@@ -267,7 +267,7 @@ SMART plausibles (heures de marche). Ensuite seulement : `nas-raid verifier`, pu
 |---|---|
 | `package/xraid-compat/src/xraid-info.c` | analyse, vérification complète, SMART (lecture seule) |
 | `package/xraid-compat/src/nas-raid` | montage, démontage, vérification, réparation, migration, md |
-| `package/xraid-compat/src/S35stockage` | démarrage et arrêt |
+| `package/xraid-compat/src/S35storage` | démarrage et arrêt |
 | `package/xraid-compat/tests/` | images factices et essais |
-| `/etc/nas-raid.conf` (sur le NAS, facultatif) | `XRAID_RW`, `ECHANTILLONS`, `VERIF_RSYNC`, `FUSE2FS_OPTS`… (variables en tête de `nas-raid`) |
-| `/var/lib/nas-raid/` (sur le NAS) | marques, vérification, migration, journal |
+| `/etc/nas-raid.conf` (sur le NAS, facultatif) | `XRAID_RW`, `SAMPLES`, `VERIFY_RSYNC`, `FUSE2FS_OPTS`… (variables en tête de `nas-raid`) |
+| `/var/lib/nas-raid/` (sur le NAS) | marques, vérification, migration, journal (`log`) |

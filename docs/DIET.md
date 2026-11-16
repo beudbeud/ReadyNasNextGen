@@ -39,8 +39,8 @@ dans `package/diet/src/`, rangées comme sur le système cible.
 | NFS | programmes RAIDiator en chroot (`diet-nfs`) | nfsd du noyau + nfs-utils 2.x : l'interface édite `/etc/exports` et lance `exportfs -ra` |
 | Stockage | X-RAID (`/proc/xraid`), LVM `/dev/c/c` | md (`/proc/mdstat`, `mdadm --detail`), `df /c`, disques libata `sda`/`sdb` (baie = port ata) ; X-RAID existant et bascule vers md par `nas-raid` (docs/XRAID.md) |
 | Températures | `smartctl` toutes les 5 min | drivetemp (`/sys/block/sdX/device/hwmon/*/temp1_input`) ; `smartctl` utilisé seulement s'il est présent |
-| Ventilateur | régulé par `diet-hwmon` | régulé par `padre-ventilateur` (S45ventilateur) ; l'interface affiche son état (`/var/run/ventilateur.etat`) et modifie `/etc/ventilateur.conf` (courbe, période, seuils), puis relance le service |
-| `diet-hwmon` | régulation, SMART, historique, alertes, arrêt d'urgence | surveillance seule : historique, SMART si présent, alertes Telegram. L'arrêt d'urgence est fait par `padre-ventilateur` |
+| Ventilateur | régulé par `diet-hwmon` | régulé par `padre-fan` (S45fan) ; l'interface affiche son état (`/var/run/fan.state`) et modifie `/etc/fan.conf` (courbe, période, seuils), puis relance le service |
+| `diet-hwmon` | régulation, SMART, historique, alertes, arrêt d'urgence | surveillance seule : historique, SMART si présent, alertes Telegram. L'arrêt d'urgence est fait par `padre-fan` |
 | Bouton d'alimentation | `diet-hotplug` (`/proc/sys/kernel/hotplug`) | `/sbin/hotplug` → `diet-hotplug` (CONFIG_UEVENT_HELPER) : maintenu 3 s = extinction |
 | Réseau | `/etc/diet-net.conf` + `S41diet-net` | `/etc/network/interfaces` (ifupdown de busybox), appliqué au prochain démarrage |
 | Heure | `ntpd -q` au démarrage | `ntpd` en tâche de fond + bouton « Mettre l'heure à jour » |
@@ -142,19 +142,19 @@ Lancer un programme coûte ~60 ms sur ce SPARC et les flottants sont émulés pa
 le noyau. Donc :
 
 - **Collecteur** : `S95diet` lance l'API elle-même en tâche de fond
-  (`DIET_COLLECTE=1 /www/cgi-bin/api`, pid dans `/var/run/diet/pid`). Elle écrit
+  (`DIET_COLLECT=1 /www/cgi-bin/api`, pid dans `/var/run/diet/pid`). Elle écrit
   les réponses JSON prêtes dans `/var/run/diet/<clé>.json` (fichier temporaire
-  puis `mv`) : `status` toutes les 5 s et le reste (`stockage services shares nfs
+  puis `mv`) : `status` toutes les 5 s et le reste (`storage services shares nfs
   sys users config`) toutes les 60 s quand l'interface est ouverte (requête vue
   depuis moins de 2 min) ; sinon 60 s et 5 min. `all.json` = état + stockage +
   historique, lu en une requête au chargement de la page.
 - **Lecture** : en tête de l'API, avant le reste du script, un GET de ces clés
   fait `exec cat` du fichier si le collecteur tourne (commandes internes du
   shell seulement). Sans collecteur ou sans fichier : calcul direct, comme avant.
-- **Réveil** : FIFO `/var/run/diet/reveil` (attente par `read -t`, sans
-  processus). La lecture y écrit `vu` quand le collecteur est au repos (pas de
-  fichier `actif`) ; un POST réussi vide le cache, pose `inval` (un calcul
-  commencé avant est jeté) et écrit `tout` : tout est recalculé aussitôt.
+- **Réveil** : FIFO `/var/run/diet/wake` (attente par `read -t`, sans
+  processus). La lecture y écrit `seen` quand le collecteur est au repos (pas de
+  fichier `active`) ; un POST réussi vide le cache, pose `invalid` (un calcul
+  commencé avant est jeté) et écrit `all` : tout est recalculé aussitôt.
 - **Calcul** : `/proc`, `/sys` et les fichiers de configuration sont lus par le
   shell (`read`, développements de variables, `$((…))` en entiers 64 bits) :
   `status` lance 2 programmes (`ifconfig`, `df`) au lieu d'une soixantaine ;
@@ -165,7 +165,7 @@ le noyau. Donc :
   `printf`, `test`…) sans créer de processus. Un programme de même nom qu'un
   applet n'est lancé que par son chemin complet.
 
-`/etc/init.d/S95diet restart-collecte` relance le collecteur.
+`/etc/init.d/S95diet restart-collector` relance le collecteur.
 
 ## Paquets et applets utilisés
 
@@ -178,13 +178,13 @@ que ni la chaîne interne ni la chaîne précompilée n'ont.
 
 ## Essai sur le PC
 
-    sh package/diet/tests/essai-api.sh
+    sh package/diet/tests/test-api.sh
 
-crée une racine factice (`DIET_RACINE`) avec `/proc`, `/sys` et `/etc`
+crée une racine factice (`DIET_ROOT`) avec `/proc`, `/sys` et `/etc`
 simulés (RAID1 sain puis dégradé, drivetemp, ksmbd.conf, exports), remplace
 les commandes du NAS par des scripts qui notent leurs arguments, appelle
 l'API comme le ferait lighttpd et vérifie le JSON et les fichiers écrits.
-`--servir` lance l'interface sur http://127.0.0.1:8080/ avec ces données
+`--serve` lance l'interface sur http://127.0.0.1:8080/ avec ces données
 (busybox httpd de l'hôte).
 
 ## Limites connues
@@ -201,6 +201,6 @@ l'API comme le ferait lighttpd et vérifie le JSON et les fichiers écrits.
   MiniDLNA aux noms accentués ne sont pas acceptés par l'interface (les
   écrire à la main dans `/etc/minidlna.conf`) ; le nombre de fichiers
   indexés dépend du format de la page d'état de minidlnad.
-- `/c` est monté par `S35stockage` (paquet xraid-compat, docs/XRAID.md) :
+- `/c` est monté par `S35storage` (paquet xraid-compat, docs/XRAID.md) :
   X-RAID existant (lecture seule par défaut) ou md. Sans volume monté,
   l'interface ne crée pas de partage et affiche « non monté ».

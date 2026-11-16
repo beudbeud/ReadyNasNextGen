@@ -1,11 +1,10 @@
 #!/bin/sh
-# Assistant d'événements du noyau (/sbin/hotplug, CONFIG_UEVENT_HELPER) :
-# padre_hwmon appelle « powerdown » (bouton maintenu 3 s) et « powersave »
-# (appui court, sans effet : le Duo n'a pas d'écran). Tous les autres uevents
-# passent aussi ici : sortir tout de suite.
+# Kernel event helper (/sbin/hotplug, CONFIG_UEVENT_HELPER): padre_hwmon calls
+# "powerdown" (button held 3 s) and "powersave" (short press, ignored: the Duo
+# has no display). Every other uevent comes here too: exit right away.
 case "$1" in
 powerdown)
-	echo "[$(date '+%F %T')] bouton d'alimentation : extinction" >> /var/log/diet.log
+	echo "[$(date '+%F %T')] power button: shutting down" >> /var/log/diet.log
 	: > /var/run/poweroff
 	exec poweroff ;;
 esac

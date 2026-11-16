@@ -1,0 +1,20 @@
+#!/bin/sh
+# Starts the fan control loop (padre-fan).
+case "$1" in
+start)
+	printf "Starting fan control: "
+	start-stop-daemon -S -b -m -p /var/run/fan.pid -x /usr/sbin/padre-fan && echo OK || echo FAIL
+	;;
+stop)
+	printf "Stopping fan control: "
+	start-stop-daemon -K -p /var/run/fan.pid && rm -f /var/run/fan.pid
+	echo 255 > /proc/sys/dev/hwmon/fan0_speed_control	# full speed without control
+	echo OK
+	;;
+restart)
+	"$0" stop; "$0" start
+	;;
+*)
+	echo "Usage: $0 {start|stop|restart}"; exit 1
+	;;
+esac

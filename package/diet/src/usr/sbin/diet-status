@@ -1,9 +1,9 @@
 #!/bin/sh
-# Résumé en console (SSH) : ventilateur, disques, RAID, /c, mémoire, services.
+# Console summary (SSH): fan, disks, RAID, /c, memory, services.
 [ -r /etc/diet-lang.sh ] && . /etc/diet-lang.sh || tx() { printf "%s" "$3"; }
-temp=; disques=; fan=; pwm=
-for kv in $(cat /var/run/ventilateur.etat 2>/dev/null); do case "$kv" in temp=*|disques=*|fan=*|pwm=*) eval "$kv";; esac; done
-echo "$(tx "Température : ${temp}C (disques ${disques}C)   Ventilateur : ${fan} tr/min (consigne ${pwm})" "Temperatur: ${temp}C (Platten ${disques}C)   Lüfter: ${fan} U/min (Stufe ${pwm})" "Temperature: ${temp}C (disks ${disques}C)   Fan: ${fan} rpm (level ${pwm})")"
+temp=; disks=; fan=; pwm=
+for kv in $(cat /var/run/fan.state 2>/dev/null); do case "$kv" in temp=*|disks=*|fan=*|pwm=*) eval "$kv";; esac; done
+echo "$(tx "Température : ${temp}C (disques ${disks}C)   Ventilateur : ${fan} tr/min (consigne ${pwm})" "Temperatur: ${temp}C (Platten ${disks}C)   Lüfter: ${fan} U/min (Stufe ${pwm})" "Temperature: ${temp}C (disks ${disks}C)   Fan: ${fan} rpm (level ${pwm})")"
 for b in /sys/block/sd*; do
 	[ -d "$b" ] || continue
 	t=$(cat $b/device/hwmon/hwmon*/temp1_input 2>/dev/null | head -n 1)

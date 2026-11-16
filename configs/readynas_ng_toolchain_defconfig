@@ -1,6 +1,6 @@
-# Chaîne de compilation seule (pour « make toolchain-sdk ») : mêmes options
-# que readynas_ng_defconfig, sans paquets ni noyau. Résultat : archive SDK
-# relocalisable publiée dans les releases GitHub et utilisée par
+# Toolchain only (for "make toolchain-sdk"): same options as
+# readynas_ng_defconfig, without packages nor kernel. Result: relocatable
+# SDK archive published in the GitHub releases and used by
 # readynas_ng_rapide_defconfig.
 BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_READYNAS_NG_PATH)/board/readynas-duo-v1/patches"
 BR2_sparc=y
@@ -8,23 +8,23 @@ BR2_sparc_v7=y
 BR2_DL_DIR="$(BR2_EXTERNAL_READYNAS_NG_PATH)/dl"
 BR2_CCACHE=y
 BR2_CCACHE_DIR="$(HOME)/.buildroot-ccache"
-# Pas de répertoires par paquet ici : à la fusion finale de host/, Buildroot
-# a gardé le limits.h de host-gcc-initial au lieu de celui de host-gcc-final
-# (NAME_MAX, LONG_BIT absents dans le SDK). Installation séquentielle = sûr.
+# No per-package directories here: when merging host/ at the end, Buildroot
+# kept the limits.h of host-gcc-initial instead of the host-gcc-final one
+# (NAME_MAX, LONG_BIT missing in the SDK). Sequential install = safe.
 # BR2_PER_PACKAGE_DIRECTORIES is not set
 
 BR2_TOOLCHAIN_BUILDROOT=y
 BR2_TOOLCHAIN_BUILDROOT_UCLIBC=y
 BR2_PTHREADS_NATIVE=y
 BR2_TOOLCHAIN_BUILDROOT_WCHAR=y
-# en-têtes de la même version que le noyau du système
+# headers of the same version as the system kernel
 BR2_KERNEL_HEADERS_VERSION=y
 BR2_DEFAULT_KERNEL_VERSION="6.18.63"
 BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_18=y
 BR2_SHARED_LIBS=y
 BR2_OPTIMIZE_S=y
 
-# rien d'autre que la chaîne
+# nothing but the toolchain
 BR2_INIT_NONE=y
 BR2_SYSTEM_BIN_SH_NONE=y
 # BR2_PACKAGE_BUSYBOX is not set

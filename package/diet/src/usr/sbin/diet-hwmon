@@ -1,10 +1,10 @@
 #!/bin/sh
-# Surveillance DIET (une mesure par minute) : historique température/ventilateur
-# pour l'interface web, résumé SMART (si smartctl existe), alertes Telegram au
-# changement d'état. La régulation du ventilateur et l'arrêt d'urgence restent à
-# padre-ventilateur (/etc/ventilateur.conf), dont on lit /var/run/ventilateur.etat.
-# DIET_RACINE et DIET_UNE_FOIS=1 ne servent qu'aux essais sur PC.
-R=${DIET_RACINE:-}
+# DIET monitoring (one sample per minute): temperature/fan history for the web
+# interface, SMART summary (if smartctl exists), Telegram alerts on state
+# change. Fan control and the emergency shutdown stay with padre-fan
+# (/etc/fan.conf), whose /var/run/fan.state is read here.
+# DIET_ROOT and DIET_ONCE=1 are only for tests on a PC.
+R=${DIET_ROOT:-}
 [ -r $R/etc/diet-lang.sh ] && . $R/etc/diet-lang.sh || tx() { printf "%s" "$3"; }
 RUN=$R/var/run
 LOG=$R/var/log/diet.log
@@ -12,11 +12,11 @@ log() { echo "[$(date '+%F %T')] hwmon: $*" >> $LOG; }
 N=0
 while true; do
 	temp=0; fan=; pwm=
-	for kv in $(cat $RUN/ventilateur.etat 2>/dev/null); do
+	for kv in $(cat $RUN/fan.state 2>/dev/null); do
 		v=${kv#*=}; case "$v" in ''|*[!0-9]*) continue;; esac
 		case "${kv%%=*}" in temp) temp=$v;; fan) fan=$v;; pwm) pwm=$v;; esac
 	done
-	# SMART toutes les 5 minutes, sans réveiller un disque en veille
+	# SMART every 5 minutes, without waking up a sleeping disk
 	if [ $((N % 5)) -eq 0 ] && [ -x $R/usr/sbin/smartctl ]; then
 		for b in $R/sys/block/sd*; do
 			d=${b##*/}; [ -d "$b" ] || continue
@@ -27,10 +27,10 @@ while true; do
 				END{printf "health=%s realloc=%d pending=%d uncorr=%d hours=%d\n", h, r, c, u, p}' > $RUN/smart.$d
 		done
 	fi
-	# historique : heure, température (- = inconnue), tr/min, consigne ; environ 12 h
+	# history: time, temperature (- = unknown), rpm, setpoint; about 12 h
 	echo "$(date +%s) $([ "$temp" -gt 0 ] && echo $temp || echo -) ${fan:-0} ${pwm:-0}" >> $RUN/hwmon.hist
 	[ $((N % 60)) -eq 59 ] && tail -n 720 $RUN/hwmon.hist > $RUN/hwmon.hist.tmp && mv $RUN/hwmon.hist.tmp $RUN/hwmon.hist
-	# alertes : notification seulement quand la ligne change
+	# alerts: notification only when the line changes
 	AL=$(diet-alerts 2>/dev/null)
 	[ -n "$fan" ] && [ "${pwm:-0}" -gt 0 ] && [ "$fan" -lt 300 ] && AL="${AL:+$AL ; }$(tx "ventilateur à ${fan} tr/min" "Lüfter bei ${fan} U/min" "fan at ${fan} rpm")"
 	if [ "$AL" != "$(cat $RUN/alert.last 2>/dev/null)" ]; then
@@ -38,6 +38,6 @@ while true; do
 		if [ -n "$AL" ]; then M="$(tx "ALERTE : $AL" "ALARM: $AL" "ALERT: $AL")"; else M="$(tx "Retour à la normale" "Wieder normal" "Back to normal")"; fi
 		log "$M"; diet-notify "$M" >/dev/null 2>&1 &
 	fi
-	[ -n "$DIET_UNE_FOIS" ] && break
+	[ -n "$DIET_ONCE" ] && break
 	N=$((N + 1)); sleep 60
 done

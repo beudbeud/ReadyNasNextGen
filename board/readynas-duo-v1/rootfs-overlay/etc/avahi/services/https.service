@@ -1,6 +1,6 @@
 <?xml version="1.0" standalone="no"?>
 <!DOCTYPE service-group SYSTEM "avahi-service.dtd">
-<!-- Interface web DIET (HTTPS) -->
+<!-- DIET web interface (HTTPS) -->
 <service-group>
   <name replace-wildcards="yes">%h</name>
   <service>

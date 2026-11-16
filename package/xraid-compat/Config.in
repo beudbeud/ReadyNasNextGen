@@ -1,5 +1,5 @@
 config BR2_PACKAGE_XRAID_COMPAT
-	bool "xraid-compat (X-RAID du ReadyNAS en lecture/écriture, bascule md)"
+	bool "xraid-compat (ReadyNAS X-RAID read/write, switch to md)"
 	depends on BR2_USE_MMU # lvm2, rsync
 	depends on BR2_TOOLCHAIN_HAS_THREADS # lvm2
 	depends on !BR2_STATIC_LIBS # lvm2 standard install
@@ -11,13 +11,13 @@ config BR2_PACKAGE_XRAID_COMPAT
 	select BR2_PACKAGE_E2FSPROGS_RESIZE2FS
 	select BR2_PACKAGE_RSYNC
 	help
-	  Couche de compatibilité X-RAID (ReadyNAS Duo v1, RAIDiator
-	  4.x) pour Linux 6.18 : xraid-info (analyse en lecture seule
-	  du superbloc « WGao », vérification du miroir, SMART),
-	  nas-raid (assemblage dm-linear + md sans superbloc, LVM,
-	  /c par fuse2fs ; migration vers md) et S35stockage.
-	  Noyau : CONFIG_BLK_DEV_DM, CONFIG_MD_RAID1, CONFIG_FUSE_FS.
-	  Voir docs/XRAID.md.
+	  X-RAID compatibility layer (ReadyNAS Duo v1, RAIDiator 4.x)
+	  for Linux 6.18: xraid-info (read-only analysis of the "WGao"
+	  superblock, mirror check, SMART), nas-raid (dm-linear + md
+	  assembly without superblock, LVM, /c through fuse2fs;
+	  migration to md) and S35storage.
+	  Kernel: CONFIG_BLK_DEV_DM, CONFIG_MD_RAID1, CONFIG_FUSE_FS.
+	  See docs/XRAID.md.
 
 comment "xraid-compat needs a toolchain w/ threads, dynamic library"
 	depends on BR2_USE_MMU

@@ -1,8 +1,8 @@
-ldso/sparc : FLUSH après réécriture des instructions de la PLT
+ldso/sparc: FLUSH after rewriting PLT instructions
 
-SPARC V8 exige FLUSH après une écriture dans du code. Sur l'Infrant Padre
-(antémémoire D à écriture différée, I non cohérente), ld.so exécutait sinon
-l'entrée PLT non patchée -> _dl_linux_resolver avec tpnt = %g1 -> segfault.
+SPARC V8 requires FLUSH after a write to code. On the Infrant Padre
+(write-back D-cache, non-coherent I-cache), ld.so otherwise executed the
+unpatched PLT entry -> _dl_linux_resolver with tpnt = %g1 -> segfault.
 
 --- a/ldso/ldso/sparc/dl-startup.h
 +++ b/ldso/ldso/sparc/dl-startup.h
@@ -21,11 +21,11 @@ l'entrée PLT non patchée -> _dl_linux_resolver avec tpnt = %g1 -> segfault.
   *		nop
   *		.word implementation_dependent
   */
-+/* SPARC V8 : FLUSH obligatoire sur chaque double mot d'instructions réécrit
-+ * (PLT, relocations de texte), sinon l'antémémoire d'instructions peut
-+ * exécuter l'ancien code (antémémoire D à écriture différée non surveillée
-+ * par la I, p. ex. Infrant Padre : PLT non patchée exécutée -> segfault
-+ * dans _dl_linux_resolver). Comme sparc_fixup_plt de la glibc. */
++/* SPARC V8: FLUSH is required on every rewritten instruction doubleword
++ * (PLT, text relocations), otherwise the instruction cache may execute
++ * the old code (write-back D-cache not snooped by the I-cache, e.g. the
++ * Infrant Padre: unpatched PLT executed -> segfault in
++ * _dl_linux_resolver). Like sparc_fixup_plt in glibc. */
 +#define SPARC_IFLUSH(ADDR) __asm__ __volatile__("flush %0" : : "r" (ADDR) : "memory")
 +
  #define INIT_GOT(GOT_BASE,MODULE) \

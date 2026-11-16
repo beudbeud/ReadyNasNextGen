@@ -1,14 +1,14 @@
 #!/bin/sh
-# Régulation du ventilateur du ReadyNAS Duo v1 sous Linux 6.18 (padre_hwmon).
-# Courbe de diet-hwmon (DIET) : le Duo n'a pas de LM75 (temp_0 = 0), la
-# température vient des disques SATA, lue par le pilote noyau drivetemp
-# (/sys/class/hwmon/hwmonN/temp1_input, millidegrés). Consigne écrite à chaque
-# tour : padre_hwmon repasse à plein régime s'il ne reçoit rien pendant 5 min.
-. /etc/ventilateur.conf
+# Fan control for the ReadyNAS Duo v1 under Linux 6.18 (padre_hwmon).
+# Curve taken from diet-hwmon (DIET): the Duo has no LM75 (temp_0 = 0), the
+# temperature comes from the SATA disks, read by the drivetemp kernel driver
+# (/sys/class/hwmon/hwmonN/temp1_input, millidegrees). The setpoint is written
+# on every round: padre_hwmon goes back to full speed after 5 min without one.
+. /etc/fan.conf
 H=/proc/sys/dev/hwmon
 HOT=0
 
-disques() {	# température max des disques (°C), 0 si inconnue
+disks() {	# hottest disk temperature (°C), 0 if unknown
 	max=0
 	for d in /sys/class/hwmon/hwmon*; do
 		[ "$(cat $d/name 2>/dev/null)" = drivetemp ] || continue
@@ -21,10 +21,10 @@ disques() {	# température max des disques (°C), 0 si inconnue
 
 while true; do
 	T=$(cut -d. -f1 $H/temp_0 2>/dev/null); T=${T:-0}
-	DT=$(disques)
+	DT=$(disks)
 	[ "$T" -eq 0 ] && T=$DT
 	if [ "$T" -eq 0 ]; then
-		P=$FAN_PWM_MAX			# aucune température : prudence
+		P=$FAN_PWM_MAX			# no temperature at all: play safe
 	elif [ $T -le $TEMP_LOW ]; then
 		P=$FAN_PWM_MIN
 	elif [ $T -ge $TEMP_HIGH ]; then
@@ -37,14 +37,14 @@ while true; do
 	[ -e $H/fan1_speed_control ] && echo $P > $H/fan1_speed_control
 	if [ $DT -ge $DISK_CRIT ]; then
 		HOT=$((HOT + 1))
-		logger -t ventilateur "SURCHAUFFE disques ${DT}C ($HOT)"
+		logger -t padre-fan "disks OVERHEATING ${DT}C ($HOT)"
 		if [ $HOT -ge 2 ]; then
-			logger -t ventilateur "arrêt d'urgence"
+			logger -t padre-fan "emergency shutdown"
 			poweroff
 		fi
 	else
 		HOT=0
 	fi
-	echo "temp=$T disques=$DT fan=$(cat $H/fan_0 2>/dev/null) pwm=$P" > /var/run/ventilateur.etat
-	sleep $PERIODE
+	echo "temp=$T disks=$DT fan=$(cat $H/fan_0 2>/dev/null) pwm=$P" > /var/run/fan.state
+	sleep $PERIOD
 done

@@ -1,23 +1,23 @@
-# NETGEAR ReadyNAS Duo v1 (Infrant IT3107 « Padre », SPARC v8 sans FPU,
-# sdiv faux) : noyau Linux 6.18 porté, ksmbd et NFS du noyau.
-# Variante « rapide » : même système, chaîne précompilée téléchargée.
-#   make rapide     (Makefile racine, sortie dans output-rapide/)
+# NETGEAR ReadyNAS Duo v1 (Infrant IT3107 "Padre", SPARC v8 without FPU,
+# broken sdiv): ported Linux 6.18 kernel, in-kernel ksmbd and NFS.
+# "rapide" (fast) variant: same system, downloaded prebuilt toolchain.
+#   make rapide     (top Makefile, output in output-rapide/)
 
 BR2_sparc=y
 BR2_sparc_v7=y
 BR2_DL_DIR="$(BR2_EXTERNAL_READYNAS_NG_PATH)/dl"
-# Correctifs par paquet : linux/ (plateforme Padre), e2fsprogs/ (fuse2fs)
+# Per-package patches: linux/ (Padre platform), e2fsprogs/ (fuse2fs)
 BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_READYNAS_NG_PATH)/board/readynas-duo-v1/patches"
-# Cache de compilation hors de output/ (survit à « make clean ») et
-# répertoires par paquet (construction parallèle au niveau Buildroot, make -jN)
+# Compiler cache outside output/ (survives "make clean") and per-package
+# directories (parallel build at the Buildroot level, make -jN)
 BR2_CCACHE=y
 BR2_CCACHE_DIR="$(HOME)/.buildroot-ccache"
 BR2_PER_PACKAGE_DIRECTORIES=y
 
-# Chaîne PRÉCOMPILÉE (release GitHub toolchain-v7-2026.08.1-r2, ld.so corrigé ;
-# empreinte : board/readynas-duo-v1/patches/toolchain-external-custom/), construite par
-# « make toolchain-sdk » avec readynas_ng_toolchain_defconfig : uClibc-ng,
-# gcc 15, en-têtes 6.18, WCHAR, NPTL, sans C++.
+# PREBUILT toolchain (GitHub release toolchain-v7-2026.08.1-r2, fixed ld.so;
+# hash: board/readynas-duo-v1/patches/toolchain-external-custom/), built by
+# "make toolchain-sdk" with readynas_ng_toolchain_defconfig: uClibc-ng,
+# gcc 15, 6.18 headers, WCHAR, NPTL, no C++.
 BR2_TOOLCHAIN_EXTERNAL=y
 BR2_TOOLCHAIN_EXTERNAL_CUSTOM=y
 BR2_TOOLCHAIN_EXTERNAL_DOWNLOAD=y
@@ -54,26 +54,26 @@ BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="$(BR2_EXTERNAL_READYNAS_NG_PATH)/board/read
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_READYNAS_NG_PATH)/board/readynas-duo-v1/linux-padre-nas.fragment"
 BR2_LINUX_KERNEL_VMLINUX=y
 
-# Initramfs minimal intégré au noyau (busybox statique sans flottant + tests)
+# Minimal initramfs built into the kernel (static busybox without floating point + tests)
 BR2_PACKAGE_READYNAS_INITRAMFS=y
-# essais du portage à la console (package/readynas-tests)
+# port tests at the console (package/readynas-tests)
 BR2_PACKAGE_READYNAS_TESTS=y
 
-# Services de fichiers
+# File services
 BR2_PACKAGE_KSMBD_TOOLS=y
 BR2_PACKAGE_NFS_UTILS=y
 BR2_PACKAGE_NFS_UTILS_NFSV4=y
-# Disques : RAID1 md, ext4 ; fuse2fs pour les ext3 à blocs de 16 Ko (X-RAID)
+# Disks: md RAID1, ext4; fuse2fs for ext3 with 16 KiB blocks (X-RAID)
 BR2_PACKAGE_MDADM=y
 BR2_PACKAGE_E2FSPROGS=y
 BR2_PACKAGE_E2FSPROGS_FUSE2FS=y
-# X-RAID existant en lecture/écriture (dm-linear + md sans superbloc, LVM,
-# fuse2fs), bascule vers md : package/xraid-compat, docs/XRAID.md
-# (sélectionne lvm2, rsync, resize2fs)
+# Existing X-RAID read/write (dm-linear + md without superblock, LVM,
+# fuse2fs), switch to md: package/xraid-compat, docs/XRAID.md
+# (selects lvm2, rsync, resize2fs)
 BR2_PACKAGE_XRAID_COMPAT=y
 BR2_PACKAGE_DROPBEAR=y
-# Tableau de bord web DIET (package/diet, docs/DIET.md) : lighttpd en HTTPS
-# avec mbedTLS (gen_key/cert_write pour le certificat du premier démarrage)
+# DIET web dashboard (package/diet, docs/DIET.md): lighttpd over HTTPS
+# with mbedTLS (gen_key/cert_write for the first-boot certificate)
 BR2_PACKAGE_DIET=y
 BR2_PACKAGE_LIGHTTPD=y
 BR2_PACKAGE_LIGHTTPD_MBEDTLS=y
@@ -81,15 +81,15 @@ BR2_PACKAGE_LIGHTTPD_PCRE=y
 BR2_PACKAGE_MBEDTLS=y
 BR2_PACKAGE_MBEDTLS_PROGRAMS=y
 
-# Racine : rootfs.tar à extraire dans /rootfs-6.18 d'une clé USB ext3/ext4 ;
-# l'initramfs du noyau cherche ce dossier et y bascule (voir README.md).
+# Root: rootfs.tar to extract into /rootfs-6.18 on an ext3/ext4 USB key;
+# the kernel initramfs looks for that folder and switches to it (see README.md).
 BR2_TARGET_ROOTFS_TAR=y
 BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_READYNAS_NG_PATH)/board/readynas-duo-v1/post-image.sh"
-# Serveur DLNA/UPnP-AV (ReadyMedia, ex-MiniDLNA de Netgear) : partage /c/media
+# DLNA/UPnP-AV server (ReadyMedia, formerly MiniDLNA by Netgear): shares /c/media
 BR2_PACKAGE_MINIDLNA=y
-# ffmpeg réduit au strict nécessaire pour minidlnad (libavformat, libavcodec, libavutil :
-# lecture des métadonnées, pas de transcodage) : sans programmes, encodeurs, filtres,
-# mise à l'échelle, périphériques ni réseau ; décodeurs limités aux formats courants.
+# ffmpeg cut down to what minidlnad needs (libavformat, libavcodec, libavutil:
+# metadata reading, no transcoding): no programs, encoders, filters, scaling,
+# devices nor network; decoders limited to common formats.
 # BR2_PACKAGE_FFMPEG_FFMPEG is not set
 # BR2_PACKAGE_FFMPEG_SWSCALE is not set
 BR2_PACKAGE_FFMPEG_ENCODERS=""
@@ -101,13 +101,13 @@ BR2_PACKAGE_FFMPEG_BSFS=""
 # BR2_PACKAGE_FFMPEG_INDEVS is not set
 # BR2_PACKAGE_FFMPEG_OUTDEVS is not set
 BR2_PACKAGE_FFMPEG_EXTRACONF="--disable-avdevice --disable-avfilter --disable-network --disable-swresample"
-# Annonce sur le réseau local (mDNS/DNS-SD, « Bonjour ») : <nom>.local et services
+# Local network announcement (mDNS/DNS-SD, "Bonjour"): <name>.local and services
 BR2_PACKAGE_AVAHI=y
 BR2_PACKAGE_AVAHI_DAEMON=y
-# Démon de sauvegarde rsync (/etc/rsyncd.conf, S61rsyncd)
+# rsync backup daemon (/etc/rsyncd.conf, S61rsyncd)
 BR2_PACKAGE_RSYNC=y
-# WebDAV par lighttpd (/webdav, voir package/diet/src/etc/lighttpd/lighttpd.conf)
+# WebDAV through lighttpd (/webdav, see package/diet/src/etc/lighttpd/lighttpd.conf)
 BR2_PACKAGE_LIGHTTPD_WEBDAV=y
-# hdparm complet (veille des disques réglée par DIET)
+# full hdparm (disk standby set by DIET)
 BR2_PACKAGE_BUSYBOX_SHOW_OTHERS=y
 BR2_PACKAGE_HDPARM=y

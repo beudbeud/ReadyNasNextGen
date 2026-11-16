@@ -1,0 +1,34 @@
+#!/bin/sh
+# Time at boot, right after the network (S40network) and before the services:
+#  1. restore the time saved at the previous shutdown (never back to 1970);
+#  2. set the time by NTP (15 s at most; ntpd is then kept running by S95diet);
+#  3. on shutdown, save the time.
+# ponytail: no hardware clock read under 6.18: the saved time does not count
+# the time the NAS spent powered off; NTP corrects it as soon as the network answers.
+F=/var/lib/time-saved
+SERVER=pool.ntp.org
+
+save() { mkdir -p /var/lib && date +%s > $F.tmp && mv $F.tmp $F; }
+
+case "$1" in
+start)
+	printf "Setting the time: "
+	s=$(cat $F 2>/dev/null)
+	[ -n "$s" ] && [ "$s" -gt "$(date +%s)" ] 2>/dev/null && date -s "@$s" >/dev/null
+	ntpd -n -q -p $SERVER >/dev/null 2>&1 &
+	p=$! i=0
+	while kill -0 $p 2>/dev/null && [ $i -lt 15 ]; do sleep 1; i=$((i+1)); done
+	if kill -0 $p 2>/dev/null; then kill $p; echo "no NTP answer, $(date '+%F %T')"
+	else echo "$(date '+%F %T')"; fi
+	save
+	;;
+stop)
+	save
+	;;
+restart)
+	"$0" start
+	;;
+*)
+	echo "Usage: $0 {start|stop|restart}"; exit 1
+	;;
+esac

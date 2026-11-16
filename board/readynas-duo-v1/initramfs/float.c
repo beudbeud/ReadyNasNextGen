@@ -1,21 +1,21 @@
 /*
- * flottant : test gradué de l'émulation FPU du noyau (le Padre n'a pas de
- * FPU : chaque instruction flottante piège en fp_disabled et est émulée).
- * Chaque étape s'annonce AVANT de s'exécuter, puis affiche son résultat :
- * la dernière ligne « tN ... » sans « OK » désigne l'instruction fatale.
- * Instructions forcées en assembleur pour savoir exactement ce qui est émulé.
- * Construit statique par le paquet readynas-initramfs (chaîne Buildroot).
+ * float: step-by-step test of the kernel FPU emulation (the Padre has no
+ * FPU: every floating-point instruction traps as fp_disabled and is emulated).
+ * Each step announces itself BEFORE running, then prints its result: the
+ * last "tN ..." line without "OK" points at the fatal instruction.
+ * Instructions are forced in assembly to know exactly what gets emulated.
+ * Built static by the readynas-initramfs package (Buildroot toolchain).
  */
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-static void dire(const char *s)
+static void say(const char *s)
 {
 	write(1, s, strlen(s));
 }
 
-static void hex(const char *nom, unsigned int v)
+static void hex(const char *name, unsigned int v)
 {
 	static const char h[] = "0123456789abcdef";
 	char t[12];
@@ -24,13 +24,13 @@ static void hex(const char *nom, unsigned int v)
 	for (i = 0; i < 8; i++)
 		t[i] = h[(v >> (28 - 4 * i)) & 15];
 	t[8] = 0;
-	dire(nom);
-	dire(t);
+	say(name);
+	say(t);
 }
 
-static void ok(int bon)
+static void ok(int good)
 {
-	dire(bon ? " OK\n" : " FAUX\n");
+	say(good ? " OK\n" : " WRONG\n");
 }
 
 int main(void)
@@ -40,42 +40,42 @@ int main(void)
 	static unsigned int fsr;
 	int lt;
 
-	dire("flottant t1 ldd/std %f0 ...");
+	say("float t1 ldd/std %f0 ...");
 	__asm__ __volatile__("ldd [%0], %%f0\n\tstd %%f0, [%1]"
 			     : : "r" (&a), "r" (&b) : "memory");
 	ok(memcmp(&a, &b, 8) == 0);
 
-	dire("flottant t1b ld/st %f1 + st %fsr ...");
+	say("float t1b ld/st %f1 + st %fsr ...");
 	__asm__ __volatile__("ld [%0], %%f1\n\tst %%f1, [%1]\n\tst %%fsr, [%2]"
 			     : : "r" (&i), "r" (&j), "r" (&fsr) : "memory");
 	hex(" fsr ", fsr);
 	ok(j == 3);
 
-	dire("flottant t2 fitod/fdtoi ...");
+	say("float t2 fitod/fdtoi ...");
 	__asm__ __volatile__("ld [%0], %%f2\n\tfitod %%f2, %%f4\n\t"
 			     "fdtoi %%f4, %%f6\n\tst %%f6, [%1]"
 			     : : "r" (&i), "r" (&j) : "memory");
 	ok(j == 3);
 
-	dire("flottant t3 faddd ...");
+	say("float t3 faddd ...");
 	__asm__ __volatile__("ldd [%0], %%f0\n\tldd [%1], %%f2\n\t"
 			     "faddd %%f0, %%f2, %%f4\n\tstd %%f4, [%2]"
 			     : : "r" (&a), "r" (&c), "r" (&r) : "memory");
 	ok(r == 3.5);
 
-	dire("flottant t4 fmuld ...");
+	say("float t4 fmuld ...");
 	__asm__ __volatile__("ldd [%0], %%f0\n\tldd [%1], %%f2\n\t"
 			     "fmuld %%f0, %%f2, %%f4\n\tstd %%f4, [%2]"
 			     : : "r" (&a), "r" (&c), "r" (&r) : "memory");
 	ok(r == 3.0);
 
-	dire("flottant t5 fdivd ...");
+	say("float t5 fdivd ...");
 	__asm__ __volatile__("ldd [%0], %%f0\n\tldd [%1], %%f2\n\t"
 			     "fdivd %%f0, %%f2, %%f4\n\tstd %%f4, [%2]"
 			     : : "r" (&a), "r" (&c), "r" (&r) : "memory");
 	ok(r == 0.75);
 
-	dire("flottant t6 fcmpd + fbl ...");
+	say("float t6 fcmpd + fbl ...");
 	__asm__ __volatile__("ldd [%1], %%f0\n\tldd [%2], %%f2\n\t"
 			     "fcmpd %%f0, %%f2\n\tnop\n\t"
 			     "mov 1, %0\n\tfbl 1f\n\tnop\n\tmov 0, %0\n"
@@ -83,8 +83,8 @@ int main(void)
 			     : "=&r" (lt) : "r" (&a), "r" (&c) : "memory", "cc");
 	ok(lt == 1);
 
-	/* t6b/t6c : ce que fait le sleep de busybox (sleep_for_duration) */
-	dire("flottant t6b fcmped + fbge ...");
+	/* t6b/t6c: what busybox sleep does (sleep_for_duration) */
+	say("float t6b fcmped + fbge ...");
 	__asm__ __volatile__("ldd [%1], %%f8\n\tldd [%2], %%f10\n\t"
 			     "fcmped %%f8, %%f10\n\tnop\n\t"
 			     "mov 1, %0\n\tfbge 1f\n\tnop\n\tmov 0, %0\n"
@@ -92,7 +92,7 @@ int main(void)
 			     : "=&r" (lt) : "r" (&c), "r" (&a) : "memory", "cc");
 	ok(lt == 1);
 
-	dire("flottant t6c fsubd sur pile (ldd [%fp-16]) ...");
+	say("float t6c fsubd on stack (ldd [%fp-16]) ...");
 	{
 		volatile double v = 1.25;
 
@@ -103,22 +103,22 @@ int main(void)
 		ok(r == 0.25);
 	}
 
-	dire("flottant t7 strtod(\"1.5\")*1e9 ...");
+	say("float t7 strtod(\"1.5\")*1e9 ...");
 	{
 		volatile double d = strtod("1.5", NULL) * 1e9;
 		long ns = (long)d;
 
 		ok(ns == 1500000000L);
 	}
-	/* t8/t9 : flush (piège bad_instruction -> padre_user_flush) puis
-	 * calcul flottant, 200 fois : régression de l'essai r (après les flush
-	 * de ld.so, flottant faux dans les programmes dynamiques). t9 met
-	 * l'adresse dans %l0 (registre de fenêtre : chemin « fenêtres vidées »
-	 * du mode padre_mm.flush=2).
+	/* t8/t9: flush (bad_instruction trap -> padre_user_flush) then a
+	 * floating-point computation, 200 times: regression of test r (after
+	 * ld.so's flushes, wrong floating point in dynamic programs). t9 puts
+	 * the address in %l0 (window register: "windows flushed" path of the
+	 * padre_mm.flush=2 mode).
 	 */
-	dire("flottant t8 flush (%o) puis faddd x200 ...");
+	say("float t8 flush (%o) then faddd x200 ...");
 	{
-		int n, bon = 1;
+		int n, good = 1;
 
 		for (n = 0; n < 200; n++) {
 			r = 0;
@@ -126,13 +126,13 @@ int main(void)
 					     "faddd %%f0, %%f2, %%f4\n\tstd %%f4, [%2]"
 					     : : "r" (&a), "r" (&c), "r" (&r), "r" (&main)
 					     : "memory");
-			bon &= r == 3.5;
+			good &= r == 3.5;
 		}
-		ok(bon);
+		ok(good);
 	}
-	dire("flottant t9 flush (%l0) puis faddd x200 ...");
+	say("float t9 flush (%l0) then faddd x200 ...");
 	{
-		int n, bon = 1;
+		int n, good = 1;
 
 		for (n = 0; n < 200; n++) {
 			r = 0;
@@ -141,11 +141,11 @@ int main(void)
 					     "faddd %%f0, %%f2, %%f4\n\tstd %%f4, [%2]"
 					     : : "r" (&a), "r" (&c), "r" (&r), "r" (&main)
 					     : "memory", "l0");
-			bon &= r == 3.5;
+			good &= r == 3.5;
 		}
-		ok(bon);
+		ok(good);
 	}
-	dire("flottant t10 strtod/printf apres flush ...");
+	say("float t10 strtod/printf after flush ...");
 	{
 		volatile double d;
 
@@ -153,10 +153,10 @@ int main(void)
 		d = strtod("2", NULL) * strtod("1.5", NULL);
 		ok((long)d == 3);
 	}
-	/* t11 : fmovs/fnegs/fabss (résultat écrasé par IR avant correction :
-	 * printf("%f") faux, « 1.5 » -> « 00000000000.00 »)
+	/* t11: fmovs/fnegs/fabss (result overwritten by IR before the fix:
+	 * wrong printf("%f"), "1.5" -> "00000000000.00")
 	 */
-	dire("flottant t11 fmovs/fnegs/fabss ...");
+	say("float t11 fmovs/fnegs/fabss ...");
 	{
 		static double m = -2.5, x1, x2, x3;
 
@@ -167,6 +167,6 @@ int main(void)
 				     : : "r" (&m), "r" (&x1), "r" (&x2), "r" (&x3) : "memory");
 		ok(x1 == -2.5 && x2 == 2.5 && x3 == 2.5);
 	}
-	dire("flottant FIN\n");
+	say("float END\n");
 	return 0;
 }

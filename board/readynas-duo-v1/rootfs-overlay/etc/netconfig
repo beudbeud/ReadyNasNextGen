@@ -1,6 +1,6 @@
-# ReadyNasNextGen : noyau sans IPv6, donc sans udp6/tcp6 (sinon rpc.mountd
-# et rpcbind affichent « svc_tli_create: could not open connection for udp6 »).
-# Remettre les deux lignes inet6 si IPv6 est activé dans le noyau.
+# ReadyNasNextGen: kernel without IPv6, hence no udp6/tcp6 (otherwise rpc.mountd
+# and rpcbind print "svc_tli_create: could not open connection for udp6").
+# Put the two inet6 lines back if IPv6 is enabled in the kernel.
 #
 # The network configuration file. This file is currently only used in
 # conjunction with the TI-RPC code in the libtirpc library.

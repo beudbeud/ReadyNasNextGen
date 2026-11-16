@@ -1,9 +1,9 @@
 #!/bin/sh
-# Envoie une notification Telegram : diet-notify "texte"
-# Réglages dans /etc/diet-notify.conf (TG_TOKEN, TG_CHAT), écrit par l'interface
-# web sur le NAS (jamais dans l'image). Retour : 0 envoyé, 1 échec, 2 non configuré.
-# ponytail: le wget TLS de busybox ne vérifie pas le certificat ; un vrai contrôle demanderait curl + certificats CA.
-R=${DIET_RACINE:-}
+# Sends a Telegram notification: diet-notify "text"
+# Settings in /etc/diet-notify.conf (TG_TOKEN, TG_CHAT), written by the web
+# interface on the NAS (never in the image). Exit: 0 sent, 1 failed, 2 not set up.
+# ponytail: busybox TLS wget does not check the certificate; real checking would need curl + CA certificates.
+R=${DIET_ROOT:-}
 CONF=$R/etc/diet-notify.conf
 [ -r $R/etc/diet-lang.sh ] && . $R/etc/diet-lang.sh || tx() { printf "%s" "$3"; }
 [ -r "$CONF" ] && . "$CONF"

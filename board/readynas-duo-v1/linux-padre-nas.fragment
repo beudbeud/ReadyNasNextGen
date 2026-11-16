@@ -1,4 +1,4 @@
-# Ajouts au noyau Padre pour le NAS : réseau, disques, ksmbd, nfsd
+# Padre kernel additions for the NAS: network, disks, ksmbd, nfsd
 CONFIG_NET=y
 CONFIG_PACKET=y
 CONFIG_UNIX=y
@@ -37,7 +37,7 @@ CONFIG_TIMERFD=y
 CONFIG_EVENTFD=y
 CONFIG_FUTEX=y
 CONFIG_KEYS=y
-# Racine sur la clé USB (EHCI VIA sur le PCI du Padre)
+# Root on the USB key (VIA EHCI on the Padre PCI bus)
 CONFIG_PCI=y
 CONFIG_USB_SUPPORT=y
 CONFIG_USB=y
@@ -50,17 +50,17 @@ CONFIG_EXT4_USE_FOR_EXT2=y
 CONFIG_RD_XZ=y
 CONFIG_INITRAMFS_COMPRESSION_XZ=y
 CONFIG_INITRAMFS_SOURCE="usr/padre-initramfs.list"
-# Taille (iboot charge un noyau brut, non compressé)
+# Size (iboot loads a raw, uncompressed kernel)
 # CONFIG_IO_URING is not set
 # CONFIG_WIRELESS is not set
 # CONFIG_BLK_DEV_BSG is not set
 # CONFIG_FW_LOADER is not set
 CONFIG_CRYPTO_MANAGER_DISABLE_TESTS=y
-# Température des disques SATA (SCT/SMART) dans /sys/class/hwmon : régulation
-# du ventilateur (rootfs-ksmbd/usr/sbin/padre-ventilateur)
+# SATA disk temperature (SCT/SMART) in /sys/class/hwmon: fan control
+# (rootfs-overlay/usr/sbin/padre-fan)
 CONFIG_HWMON=y
 CONFIG_SENSORS_DRIVETEMP=y
-# ext3 X-RAID à blocs de 16 Ko (RAIDiator/DIET) : illisibles par ext4 avec des
-# pages de 4 Ko ; accès par fuse2fs (espace utilisateur) ; LVM de /c par dm
+# X-RAID ext3 with 16 KiB blocks (RAIDiator/DIET): unreadable by ext4 with
+# 4 KiB pages; accessed through fuse2fs (userspace); LVM of /c through dm
 CONFIG_FUSE_FS=y
 CONFIG_BLK_DEV_DM=y

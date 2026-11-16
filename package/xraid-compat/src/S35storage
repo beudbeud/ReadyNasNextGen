@@ -1,0 +1,20 @@
+#!/bin/sh
+# Data volume /c: existing X-RAID (compatibility, rw or ro depending on the
+# safeguards) or md RAID. Before S60nfs and S70ksmbd. See docs/XRAID.md.
+case "$1" in
+start)
+	printf "Mounting storage /c: "
+	/usr/sbin/nas-raid mount 2>&1 | logger -t nas-raid
+	read -r m r 2>/dev/null < /var/run/nas-raid.mode
+	echo "${m:-?}${r:+ ($r)}"
+	;;
+stop)
+	/usr/sbin/nas-raid unmount >/dev/null 2>&1
+	;;
+restart)
+	"$0" stop; "$0" start
+	;;
+*)
+	echo "Usage: $0 {start|stop|restart}"; exit 1
+	;;
+esac

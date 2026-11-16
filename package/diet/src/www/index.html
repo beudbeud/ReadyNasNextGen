@@ -17,7 +17,7 @@
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 .wrap{max-width:1080px;margin:0 auto;padding:16px}
-/* Frontplatte */
+/* Front panel */
 .front{background:linear-gradient(180deg,var(--chassis2),var(--chassis));border-radius:14px;padding:14px;display:grid;grid-template-columns:1fr;gap:14px;align-items:stretch;box-shadow:0 2px 10px #0003}
 .bays{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
 .bay{background:#00000040;border:1px solid #ffffff14;border-radius:8px;padding:8px 10px;color:#cfd6d2;font-size:12.5px;display:flex;flex-direction:column;gap:2px;min-width:0}
@@ -28,7 +28,7 @@ body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-ap
 .led.sleep{background:#2d6b3f}
 .led.bad{background:#ff4b4b;box-shadow:0 0 8px #ff4b4b;animation:bl .5s infinite alternate}
 @keyframes bl{to{opacity:.2}}
-/* Kopf */
+/* Header */
 .top{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:4px 0 12px}
 .top h1{font-size:20px;margin:0;letter-spacing:.3px}
 .top .sub{color:var(--mute);font-size:13px}
@@ -37,7 +37,7 @@ nav button{background:none;border:0;padding:8px 14px;border-radius:8px;color:var
 nav button.act{background:var(--panel);color:var(--ink);box-shadow:0 1px 3px #0002}
 .alarm{background:var(--bad);color:#fff;border-radius:10px;padding:10px 14px;margin-top:12px;display:none;font-weight:600;align-items:center;justify-content:space-between;gap:12px}
 .alarm button{font:inherit;font-weight:400;background:#0003;color:#fff;border:1px solid #fff6;border-radius:8px;padding:4px 10px;cursor:pointer;white-space:nowrap}
-/* Karten */
+/* Cards */
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
 .card h2{font-size:13px;text-transform:uppercase;letter-spacing:.8px;color:var(--mute);margin:0 0 10px;font-weight:600}
@@ -63,7 +63,7 @@ button.b:hover{border-color:var(--accent)}
 button.b.danger{color:var(--bad)} button.b.danger:hover{border-color:var(--bad)}
 button.b.pri{background:var(--accent);border-color:var(--accent);color:#fff}
 button.b:disabled{opacity:.5;cursor:wait}
-/* Formular */
+/* Form */
 form.cfg{display:grid;grid-template-columns:1fr auto;gap:8px 14px;align-items:center}
 form.cfg label{color:var(--ink)} form.cfg label small{display:block;color:var(--mute)}
 form.cfg.sys input,form.cfg.sys select{width:230px;text-align:left}
@@ -192,10 +192,10 @@ dialog h3{margin:0 0 8px;font-size:16px}
       <form class="cfg" id="cfg">
         <div class="sec">Disques</div>
         <label>Mise en veille après (minutes)<small>0 = jamais</small></label><input name="SPINDOWN_MIN" type="number" min="0" max="330">
-        <div class="sec">Ventilateur (0–255) <small style="font-weight:400;color:var(--mute)">(régulation padre-ventilateur)</small></div>
+        <div class="sec">Ventilateur (0–255) <small style="font-weight:400;color:var(--mute)">(régulation padre-fan)</small></div>
         <label>Niveau minimal<small>jusqu’à la température de repos</small></label><input name="FAN_PWM_MIN" type="number" min="20" max="255">
         <label>Niveau maximal</label><input name="FAN_PWM_MAX" type="number" min="20" max="255">
-        <label>Période de mesure (secondes)</label><input name="PERIODE" type="number" min="10" max="240">
+        <label>Période de mesure (secondes)</label><input name="PERIOD" type="number" min="10" max="240">
         <div class="sec">Température du disque le plus chaud (°C)</div>
         <label>Niveau minimal jusqu’à</label><input name="TEMP_LOW" type="number" min="20" max="70">
         <label>Pleine vitesse à partir de</label><input name="TEMP_HIGH" type="number" min="20" max="70">
@@ -236,7 +236,7 @@ dialog h3{margin:0 0 8px;font-size:16px}
           <option value="diet">Journal DIET</option>
           <option value="messages">Journal système</option>
           <option value="dmesg">Noyau (dmesg)</option>
-          <option value="stockage">Journal du stockage</option>
+          <option value="storage">Journal du stockage</option>
         </select>
         <button class="b" id="logr">Recharger</button>
         <span class="small" style="margin-left:auto">Rapport SMART (réveille le disque) :</span>
@@ -264,8 +264,8 @@ dialog h3{margin:0 0 8px;font-size:16px}
 <script>
 const $ = s => document.querySelector(s);
 const API = '/cgi-bin/api';
-// Langue : choix mémorisé dans ce navigateur, sinon langue du navigateur (fr, de), sinon anglais.
-// Les textes sont écrits en français dans la page ; I18N donne pour chacun [allemand, anglais].
+// Language: choice remembered in this browser, otherwise the browser language (fr, de), otherwise English.
+// Texts are written in French in the page; I18N gives [German, English] for each of them.
 const LANGS = ['fr', 'de', 'en'];
 let LANG = (()=>{
   try{ const s = localStorage.getItem('dietLang'); if(LANGS.includes(s)) return s; }catch(e){}
@@ -426,7 +426,7 @@ const I18N = {
   "Le dossier doit exister (un partage SMB le crée). Les modifications sont appliquées tout de suite (exportfs -ra).": ["Der Ordner muss existieren (eine SMB-Freigabe legt ihn an). Änderungen gelten sofort (exportfs -ra).", "The folder must exist (an SMB share creates it). Changes apply at once (exportfs -ra)."],
   "Aucun export.": ["Keine Freigaben.", "No exports."],
   "Retirer l’export de {0} vers {1} ?": ["Freigabe von {0} für {1} entfernen?", "Remove the export of {0} to {1}?"],
-  "(régulation padre-ventilateur)": ["(Regelung padre-ventilateur)", "(padre-ventilateur control)"],
+  "(régulation padre-fan)": ["(Regelung padre-fan)", "(padre-fan control)"],
   "Période de mesure (secondes)": ["Messintervall (Sekunden)", "Measuring period (seconds)"],
   "Température du disque le plus chaud (°C)": ["Temperatur der wärmsten Platte (°C)", "Temperature of the warmest disk (°C)"],
   "Sécurité des disques (°C)": ["Plattenschutz (°C)", "Disk protection (°C)"],
@@ -473,7 +473,35 @@ const I18N = {
   "mot de passe à redéfinir pour activer WebDAV/rsync": ["Passwort neu setzen, um WebDAV/rsync zu aktivieren", "set the password again to enable WebDAV/rsync"], "actif": ["aktiv", "active"],
   "Le même mot de passe ouvre WebDAV et rsync (dossier personnel /c/home/nom et partages). Un compte créé avant doit redéfinir son mot de passe.": ["Dasselbe Passwort öffnet WebDAV und rsync (persönlicher Ordner /c/home/name und Freigaben). Ein früher angelegtes Konto muss sein Passwort neu setzen.", "The same password opens WebDAV and rsync (personal folder /c/home/name and shares). An account created earlier must set its password again."],
   "Le dernier disque X-RAID ({0}) est EFFACÉ et rejoint le md (resynchronisation).": ["Die letzte X-RAID-Platte ({0}) wird GELÖSCHT und kommt ins md (Resynchronisation).", "The last X-RAID disk ({0}) is ERASED and joins the md (resync)."],
-  "TOUT le contenu des disques cochés est EFFACÉ (y compris un X-RAID) ; un RAID 1 md neuf est créé.": ["Der GESAMTE Inhalt der gewählten Platten wird GELÖSCHT (auch ein X-RAID); ein neues md-RAID 1 wird angelegt.", "ALL content of the ticked disks is ERASED (an X-RAID included); a new md RAID 1 is created."]
+  "TOUT le contenu des disques cochés est EFFACÉ (y compris un X-RAID) ; un RAID 1 md neuf est créé.": ["Der GESAMTE Inhalt der gewählten Platten wird GELÖSCHT (auch ein X-RAID); ein neues md-RAID 1 wird angelegt.", "ALL content of the ticked disks is ERASED (an X-RAID included); a new md RAID 1 is created."],
+  "version de superbloc inconnue (attendu 0.1.0)": ["unbekannte Superblock-Version (erwartet 0.1.0)", "unknown superblock version (0.1.0 expected)"],
+  "champ level différent de 1": ["Feld level ungleich 1", "level field other than 1"],
+  "superbloc courant absent : lecture du secours": ["aktueller Superblock fehlt: Ersatzkopie wird gelesen", "current superblock missing: reading the backup"],
+  "les superblocs des disques diffèrent": ["die Superblöcke der Platten unterscheiden sich", "the disks’ superblocks differ"],
+  "superbloc marqué « arrêt non propre » (clean shutdown à 0)": ["Superblock als „nicht sauber heruntergefahren“ markiert (clean shutdown 0)", "superblock marked “unclean shutdown” (clean shutdown at 0)"],
+  "configuration à un disque (miroir fictif) ou à plus de 2 disques": ["Konfiguration mit einer Platte (fiktiver Spiegel) oder mehr als 2 Platten", "single-disk (fake mirror) or more-than-2-disk configuration"],
+  "taille visible V incohérente": ["sichtbare Größe V unstimmig", "inconsistent visible size V"],
+  "sections incohérentes (nombre, vides, hors zone visible ou chevauchantes)": ["unstimmige Bereiche (Anzahl, leer, außerhalb des sichtbaren Bereichs oder überlappend)", "inconsistent sections (count, empty, outside the visible area or overlapping)"],
+  "section qui n’est pas un miroir (RAID 4)": ["Bereich, der kein Spiegel ist (RAID 4)", "section that is not a mirror (RAID 4)"],
+  "synchronisation X-RAID inachevée (section non initialisée)": ["X-RAID-Synchronisation unvollständig (Bereich nicht initialisiert)", "X-RAID sync unfinished (section not initialized)"],
+  "section portée par un seul disque (dmap)": ["Bereich liegt nur auf einer Platte (dmap)", "section carried by a single disk (dmap)"],
+  "this_disk illisible": ["this_disk unlesbar", "this_disk unreadable"],
+  "deux disques se disent « base »": ["zwei Platten geben sich als „Basis“ aus", "two disks claim to be “base”"],
+  "deux disques se disent « miroir »": ["zwei Platten geben sich als „Spiegel“ aus", "two disks claim to be “mirror”"],
+  "deux disques déclarent le même canal": ["zwei Platten melden denselben Kanal", "two disks report the same channel"],
+  "un des deux disques X-RAID est absent : lecture seule": ["eine der beiden X-RAID-Platten fehlt: nur Lesen", "one of the two X-RAID disks is missing: read-only"],
+  "un disque n’est pas « online » (en reconstruction, de secours ou en panne)": ["eine Platte ist nicht „online“ (im Wiederaufbau, Ersatz oder defekt)", "a disk is not “online” (rebuilding, spare or failed)"],
+  "aucun disque « online » à lire": ["keine „online“-Platte zum Lesen", "no “online” disk to read"],
+  "MBR du disque base absent : table reprise du superbloc": ["MBR der Basisplatte fehlt: Tabelle aus dem Superblock übernommen", "base disk MBR missing: table taken from the superblock"],
+  "aucune partition trouvée sur le disque base": ["keine Partition auf der Basisplatte gefunden", "no partition found on the base disk"],
+  "une partition déborde des sections (ou de la zone visible)": ["eine Partition ragt über die Bereiche (oder den sichtbaren Bereich) hinaus", "a partition goes beyond the sections (or the visible area)"],
+  "erreur de lecture pendant l’échantillonnage": ["Lesefehler bei der Stichprobe", "read error while sampling"],
+  "des blocs diffèrent entre les deux disques aux mêmes LBA": ["Blöcke an denselben LBA unterscheiden sich zwischen den Platten", "blocks differ between the two disks at the same LBAs"],
+  "aucun superbloc X-RAID (WGao)": ["kein X-RAID-Superblock (WGao)", "no X-RAID superblock (WGao)"],
+  "écriture désactivée : XRAID_RW=yes dans /etc/nas-raid.conf": ["Schreiben deaktiviert: XRAID_RW=yes in /etc/nas-raid.conf", "writing disabled: XRAID_RW=yes in /etc/nas-raid.conf"],
+  "arrêt brutal sous Linux : vérifier le miroir": ["harter Abbruch unter Linux: Spiegel prüfen", "unclean shutdown under Linux: check the mirror"],
+  "arrêt brutal de RAIDiator, miroir vérifié depuis": ["harter Abbruch unter RAIDiator, Spiegel seither geprüft", "unclean RAIDiator shutdown, mirror checked since"],
+  "migration vers md en cours": ["Umstellung auf md läuft", "migration to md in progress"]
 };
 function t(s, ...a){
   const r = LANG === 'fr' ? s : ((I18N[s] || [])[LANG === 'de' ? 0 : 1] ?? s);
@@ -491,8 +519,8 @@ function translatePage(){
   });
 }
 let prev = null, last = null, timer = null, polls = 0, critText = '', warnText = '';
-// Bandeau : les alertes graves (RAID, disque en panne) restent toujours visibles ; l'avertissement SMART peut être masqué
-// dans ce navigateur, et revient dès que son texte change (par exemple si le nombre de secteurs augmente).
+// Banner: serious alerts (RAID, failed disk) always stay visible; the SMART warning can be hidden
+// in this browser, and comes back as soon as its text changes (for example if the sector count grows).
 function banner(){
   let hidden = ''; try{ hidden = localStorage.getItem('dietWarnHidden') || ''; }catch(e){}
   const showWarn = !!warnText && hidden !== warnText;
@@ -503,7 +531,7 @@ function banner(){
 }
 
 function toast(t){ const e=$('#toast'); e.textContent=t; e.classList.add('show'); clearTimeout(e._t); e._t=setTimeout(()=>e.classList.remove('show'),3200); }
-// nombres avec la virgule ou le point décimal de la langue
+// numbers with the decimal comma or point of the language
 function num(x, d){ return (+x).toLocaleString(LANG, {minimumFractionDigits:d, maximumFractionDigits:d}); }
 function kb(k){ k=+k; if(k>=1073741824) return num(k/1073741824,2)+' '+t('To'); if(k>=1048576) return num(k/1048576,1)+' '+t('Go'); if(k>=1024) return num(k/1024,0)+' '+t('Mo'); return k+' '+t('ko'); }
 function rate(b){ if(b<0||!isFinite(b)) return '–'; if(b>=1048576) return num(b/1048576,1)+' '+t('Mo/s'); if(b>=1024) return num(b/1024,0)+' '+t('ko/s'); return num(b,0)+' '+t('o/s'); }
@@ -567,10 +595,10 @@ function render(s){
   warnText = smartAl.length ? t('Disque à surveiller : {0}', smartAl.join(', ')) : '';
   banner();
 
-  // Débits : compteurs du NAS datés par son uptime (s.t, centièmes) ; l'état vient
-  // du cache du collecteur, deux réponses identiques ne donnent pas de nouveau débit.
+  // Rates: NAS counters timestamped by its uptime (s.t, hundredths); the status comes
+  // from the collector cache, two identical answers give no new rate.
   const now = s.t!=null ? s.t/100 : performance.now()/1000;
-  if(prev && now < prev.t) prev = null;   // NAS redémarré
+  if(prev && now < prev.t) prev = null;   // NAS rebooted
   if(!prev || now > prev.t){
     if(prev){
       const dt = now - prev.t, c = s.cnt, p = prev.cnt;
@@ -585,7 +613,7 @@ function render(s){
   $('#tmp').textContent = (s.temp??'–')+' °C';
   $('#fan').textContent = s.fan!=null ? s.fan : '–';
   $('#fan').title = t('tr/min, niveau {0}/255', s.pwm);
-  // Le noyau de ce NAS annonce libre + cache > total : on compte donc simplement total - libre (cache compris), jamais négatif.
+  // This NAS kernel reports free + cache > total: simply count total - free (cache included), never negative.
   const used = Math.max(0, s.mem.total - (s.mem.avail || s.mem.free));
   $('#memt').textContent = kb(used)+' / '+kb(s.mem.total);
   $('#memb').style.width = (100*used/s.mem.total).toFixed(1)+'%';
@@ -621,44 +649,59 @@ function render(s){
     $('#mdb').innerHTML = s.md.map(m=>`<button class="b" data-md="${esc(m.name)}">${esc(m.name)}</button>`).join('');
 }
 
-// Stockage : X-RAID (compatibilité) ou md, cohérence du miroir, assistants (nas-raid)
+// Storage: X-RAID (compatibility) or md, mirror consistency, wizards (nas-raid)
 let stk = null;
-const XRM = {'xraid-rw':'X-RAID, lecture et écriture', 'xraid-ro':'X-RAID, lecture seule', 'md':'RAID md', 'aucun':'aucun volume'};
+// reason codes of xraid-info (French base texts, translated by I18N)
+const XR = {version:'version de superbloc inconnue (attendu 0.1.0)', level:'champ level différent de 1',
+  backup_superblock:'superbloc courant absent : lecture du secours', superblocks_differ:'les superblocs des disques diffèrent',
+  unclean_shutdown:'superbloc marqué « arrêt non propre » (clean shutdown à 0)',
+  not_2_disks:'configuration à un disque (miroir fictif) ou à plus de 2 disques', size:'taille visible V incohérente',
+  sections:'sections incohérentes (nombre, vides, hors zone visible ou chevauchantes)', not_raid1:'section qui n’est pas un miroir (RAID 4)',
+  sync_in_progress:'synchronisation X-RAID inachevée (section non initialisée)', degraded_section:'section portée par un seul disque (dmap)',
+  unknown_role:'this_disk illisible', two_bases:'deux disques se disent « base »', two_mirrors:'deux disques se disent « miroir »',
+  same_channel:'deux disques déclarent le même canal', missing_disk:'un des deux disques X-RAID est absent : lecture seule',
+  disk_not_online:'un disque n’est pas « online » (en reconstruction, de secours ou en panne)',
+  no_readable_disk:'aucun disque « online » à lire', mbr_rebuilt:'MBR du disque base absent : table reprise du superbloc',
+  no_partition:'aucune partition trouvée sur le disque base', partition_outside_section:'une partition déborde des sections (ou de la zone visible)',
+  read_error:'erreur de lecture pendant l’échantillonnage', mirror_differs:'des blocs diffèrent entre les deux disques aux mêmes LBA',
+  no_xraid:'aucun superbloc X-RAID (WGao)'};
+// reasons added by nas-raid
+const NR = {rw_disabled:'écriture désactivée : XRAID_RW=yes dans /etc/nas-raid.conf', unclean_shutdown_linux:'arrêt brutal sous Linux : vérifier le miroir',
+  unclean_shutdown_verified:'arrêt brutal de RAIDiator, miroir vérifié depuis', migration_in_progress:'migration vers md en cours'};
+const XRM = {'xraid-rw':'X-RAID, lecture et écriture', 'xraid-ro':'X-RAID, lecture seule', 'md':'RAID md', 'none':'aucun volume'};
 async function loadStk(d){
-  try{ stk = d !== undefined ? d : await get('stockage'); }catch(e){ return; }
+  try{ stk = d !== undefined ? d : await get('storage'); }catch(e){ return; }
   if(!stk || stk.mode==='absent'){ $('#xr').innerHTML=''; $('#xrb').innerHTML=''; return; }
-  const x = stk.xraid || {}, v = stk.verif || {}, m = stk.migration || {};
+  const x = stk.xraid || {}, v = stk.verify || {}, m = stk.migration || {};
   const ok = stk.mode==='md' || stk.mode==='xraid-rw';
   let h = `<div class="row"><span>${t('Mode')}</span><b style="color:var(--${ok?'ok':'warn'})">${esc(t(XRM[stk.mode]||stk.mode))}</b></div>`;
-  if(stk.mode!=='md' && x.raisons) h += x.raisons.map(r=>`<div>· ${esc(r.texte)}</div>`).join('');
-  // raisons ajoutées par nas-raid (les autres viennent de xraid-info, déjà en texte)
-  const NR = {rw_desactive:'écriture désactivée : XRAID_RW=oui dans /etc/nas-raid.conf', arret_brutal_linux:'arrêt brutal sous Linux : vérifier le miroir',
-    arret_brutal_verifie:'arrêt brutal de RAIDiator, miroir vérifié depuis', migration_en_cours:'migration vers md en cours'};
-  if(stk.mode!=='md') (stk.raisons||'').split(' ').filter(r=>NR[r]).forEach(r=>{ h += `<div>· ${esc(NR[r])}</div>`; });
-  if(stk.mode!=='md') (x.sections||[]).forEach((s,i)=>{ h += `<div class="row"><span>${t('Section {0}', i)}</span><span>${kb(s.secteurs/2)} · ${s.init===0 ? t('synchronisation inachevée') : t('synchronisée')}</span></div>`; });
-  if(x.miroir || v.etat!=='jamais'){
+  // reasons: xraid-info codes (English text, shown here in the page language), then the ones added by nas-raid
+  if(stk.mode!=='md') (x.reasons||[]).forEach(r=>{ h += `<div>· ${esc(XR[r.code] ? t(XR[r.code]) : r.text)}</div>`; });
+  if(stk.mode!=='md') (stk.reasons||'').split(' ').filter(r=>NR[r]).forEach(r=>{ h += `<div>· ${esc(t(NR[r]))}</div>`; });
+  if(stk.mode!=='md') (x.sections||[]).forEach((s,i)=>{ h += `<div class="row"><span>${t('Section {0}', i)}</span><span>${kb(s.sectors/2)} · ${s.init===0 ? t('synchronisation inachevée') : t('synchronisée')}</span></div>`; });
+  if(x.mirror || v.state!=='never'){
     const d = v.date ? new Date(v.date*1000).toLocaleDateString(LANG) : '';
-    const vs = v.etat==='en_cours' ? t('en cours {0} %', v.progression ?? 0) : v.etat==='ok' ? t('identique le {0}', d) : v.etat==='differences' ? t('{0} zones différentes', v.zones) : v.etat==='erreurs' ? t('erreurs de lecture') : t('jamais faite');
-    h += `<div class="row"><span>${t('Vérification du miroir')}</span><span style="color:var(--${v.etat==='ok'?'ok':v.etat==='jamais'||v.etat==='en_cours'?'mute':'bad'})">${esc(vs)}</span></div>`;
+    const vs = v.state==='running' ? t('en cours {0} %', v.progress ?? 0) : v.state==='ok' ? t('identique le {0}', d) : v.state==='differences' ? t('{0} zones différentes', v.zones) : v.state==='errors' ? t('erreurs de lecture') : t('jamais faite');
+    h += `<div class="row"><span>${t('Vérification du miroir')}</span><span style="color:var(--${v.state==='ok'?'ok':v.state==='never'||v.state==='running'?'mute':'bad'})">${esc(vs)}</span></div>`;
   }
-  if(m.etape) h += `<div>${esc(t('Migration vers md : {0}', m.etape + (m.copie!=null ? ' ('+m.copie+' %)' : '')))}</div>`;
+  if(m.step) h += `<div>${esc(t('Migration vers md : {0}', m.step + (m.copy!=null ? ' ('+m.copy+' %)' : '')))}</div>`;
   $('#xr').innerHTML = h;
   const b = [];
-  if(x.base && x.miroir && v.etat!=='en_cours') b.push(`<button class="b" data-x="verif">${t('Vérifier le miroir')}</button>`);
-  if(stk.mode==='xraid-rw' && !m.etape) b.push(`<button class="b danger" data-x="migrer">${t('Migrer vers md')}</button>`);
-  if(m.etape==='copie_verifiee') b.push(`<button class="b danger" data-x="finaliser">${t('Terminer la migration')}</button>`);
-  if(!stk.md && !m.etape) b.push(`<button class="b danger" data-x="creer">${t('Créer un RAID md')}</button>`);
-  b.push(`<button class="b" data-x="journal">${t('Journal du stockage')}</button>`);
+  if(x.base && x.mirror && v.state!=='running') b.push(`<button class="b" data-x="verify">${t('Vérifier le miroir')}</button>`);
+  if(stk.mode==='xraid-rw' && !m.step) b.push(`<button class="b danger" data-x="migrate">${t('Migrer vers md')}</button>`);
+  if(m.step==='copy_verified') b.push(`<button class="b danger" data-x="finalize">${t('Terminer la migration')}</button>`);
+  if(!stk.md && !m.step) b.push(`<button class="b danger" data-x="create">${t('Créer un RAID md')}</button>`);
+  b.push(`<button class="b" data-x="log">${t('Journal du stockage')}</button>`);
   $('#xrb').innerHTML = b.join('');
 }
-// Assistant : essai à blanc, case à cocher ET phrase tapée (double confirmation)
+// Wizard: dry run, tick box AND typed phrase (double confirmation)
 let wizOp = '', wizPhrase = () => '';
 function wizCheck(){ $('#wizgo').disabled = !($('#wizc').checked && $('#wizi').value.trim() === wizPhrase()); $('#wizl').textContent = t('Tapez « {0} » pour confirmer :', wizPhrase()); }
 function wizDisks(){ return [...document.querySelectorAll('#wizd input:checked')].map(i=>i.value); }
 function wizard(op, title, warn, phrase){
   wizOp = op; wizPhrase = phrase;
   $('#wizt').textContent = title; $('#wizw').textContent = warn;
-  $('#wizd').innerHTML = op==='creer' ? (last ? last.disks : []).map(d=>`<label class="chip"><input type="checkbox" value="${esc(d.dev)}"> ${esc(t('Baie {0}', d.bay))} · ${esc(d.dev)} · ${d.gb} ${t('Go')}</label>`).join('') : '';
+  $('#wizd').innerHTML = op==='create' ? (last ? last.disks : []).map(d=>`<label class="chip"><input type="checkbox" value="${esc(d.dev)}"> ${esc(t('Baie {0}', d.bay))} · ${esc(d.dev)} · ${d.gb} ${t('Go')}</label>`).join('') : '';
   $('#wizo').style.display = 'none'; $('#wizc').checked = false; $('#wizi').value = '';
   wizCheck(); $('#wiz').showModal();
 }
@@ -671,26 +714,26 @@ $('#wizp').onclick = async ()=>{
 };
 $('#wizgo').onclick = async ()=>{
   $('#wizgo').disabled = true;
-  try{ const r = await post('raid_lancer', wizBody('&confirm='+encodeURIComponent($('#wizi').value.trim())+'&oui=1')); toast(r.msg); $('#wiz').close(); }
+  try{ const r = await post('raid_run', wizBody('&confirm='+encodeURIComponent($('#wizi').value.trim())+'&yes=1')); toast(r.msg); $('#wiz').close(); }
   catch(e){ toast(t('Erreur : {0}', e.message)); wizCheck(); }
   setTimeout(loadStk, 2000);
 };
 $('#xrb').onclick = async ev=>{
   const a = ev.target.dataset.x; if(!a) return;
-  if(a==='verif'){ if(!confirm(t('Lire tout le contenu des deux disques et les comparer (lecture seule, plusieurs heures) ?'))) return;
-    try{ toast((await post('raid_verifier')).msg); }catch(e){ toast(t('Erreur : {0}', e.message)); } setTimeout(loadStk, 2000); }
-  else if(a==='migrer') wizard('migrer', t('Migrer vers md'), t('Le disque miroir est retiré du X-RAID et reformaté en md ; les données sont recopiées depuis le disque base, puis vérifiées. Le disque base n’est effacé qu’à l’étape « Terminer la migration ».'), ()=>'MIGRER');
-  else if(a==='finaliser') wizard('finaliser', t('Terminer la migration'), t('Le dernier disque X-RAID ({0}) est EFFACÉ et rejoint le md (resynchronisation).', stk.migration.a), ()=>'EFFACER '+stk.migration.a);
-  else if(a==='creer') wizard('creer', t('Créer un RAID md'), t('TOUT le contenu des disques cochés est EFFACÉ (y compris un X-RAID) ; un RAID 1 md neuf est créé.'), ()=>['EFFACER', ...wizDisks()].join(' '));
-  else if(a==='journal'){ $('#logf').value = 'stockage'; document.querySelector('nav button[data-p=log]').click(); }
+  if(a==='verify'){ if(!confirm(t('Lire tout le contenu des deux disques et les comparer (lecture seule, plusieurs heures) ?'))) return;
+    try{ toast((await post('raid_verify')).msg); }catch(e){ toast(t('Erreur : {0}', e.message)); } setTimeout(loadStk, 2000); }
+  else if(a==='migrate') wizard('migrate', t('Migrer vers md'), t('Le disque miroir est retiré du X-RAID et reformaté en md ; les données sont recopiées depuis le disque base, puis vérifiées. Le disque base n’est effacé qu’à l’étape « Terminer la migration ».'), ()=>'MIGRATE');
+  else if(a==='finalize') wizard('finalize', t('Terminer la migration'), t('Le dernier disque X-RAID ({0}) est EFFACÉ et rejoint le md (resynchronisation).', stk.migration.a), ()=>'ERASE '+stk.migration.a);
+  else if(a==='create') wizard('create', t('Créer un RAID md'), t('TOUT le contenu des disques cochés est EFFACÉ (y compris un X-RAID) ; un RAID 1 md neuf est créé.'), ()=>['ERASE', ...wizDisks()].join(' '));
+  else if(a==='log'){ $('#logf').value = 'storage'; document.querySelector('nav button[data-p=log]').click(); }
 };
 
 async function poll(){
   clearTimeout(timer);
   try {
-    // premier passage : une seule requête (état, stockage, historique) ; ensuite l'état,
-    // et l'historique et le stockage toutes les 12 fois
-    if(!polls){ const a = await get('all'); last = a.status; render(last); loadHist(a.hist); loadStk(a.stockage); }
+    // first pass: a single request (status, storage, history); then the status,
+    // and the history and storage every 12th time
+    if(!polls){ const a = await get('all'); last = a.status; render(last); loadHist(a.hist); loadStk(a.storage); }
     else { last = await get('status'); render(last); if(polls % 12 === 0){ loadHist(); loadStk(); } }
     polls++;
   }
@@ -701,7 +744,7 @@ document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState=
 
 $('#alarmx').onclick = ()=>{ try{ localStorage.setItem('dietWarnHidden', warnText); }catch(e){} banner(); };
 
-// Seitenwechsel
+// Page switching
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('act',x===b));
   document.querySelectorAll('.page').forEach(p=>p.classList.toggle('act',p.id==='p-'+b.dataset.p));
@@ -710,7 +753,7 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
   if(b.dataset.p==='log') loadLog();
 });
 
-// Aktionen
+// Actions
 async function waitBack(text, expectOff){
   $('#ovt').innerHTML = text; $('#ov').style.display='flex';
   if(expectOff){ return; }
@@ -734,7 +777,7 @@ document.querySelectorAll('[data-a]').forEach(b=>b.onclick=async()=>{
   b.disabled = false;
 });
 
-// Einstellungen
+// Settings
 async function loadCfg(){
   try{ const c = await get('config'); for(const [k,v] of Object.entries(c)){ const i=$(`#cfg [name=${k}]`); if(i) i.value=v; } }
   catch(e){ toast(t('Erreur : {0}', e.message)); }
@@ -747,7 +790,7 @@ $('#cfg').onsubmit = async ev=>{
   btn.disabled = false;
 };
 
-// Réglages système
+// System settings
 const TZS = [['Paris, Bruxelles, Berlin, Madrid','CET-1CEST,M3.5.0,M10.5.0/3'],['Londres, Lisbonne','GMT0BST,M3.5.0/1,M10.5.0'],
   ['Helsinki, Athènes, Kiev','EET-2EEST,M3.5.0/3,M10.5.0/4'],['UTC','UTC0'],['Montréal, New York','EST5EDT,M3.2.0,M11.1.0'],
   ['Chicago','CST6CDT,M3.2.0,M11.1.0'],['Denver','MST7MDT,M3.2.0,M11.1.0'],['Los Angeles, Vancouver','PST8PDT,M3.2.0,M11.1.0'],
@@ -778,7 +821,7 @@ $('#tgtest').onclick = async ev=>{
   ev.target.disabled = false;
 };
 
-// Partages
+// Shares
 async function loadShares(){
   try{
     const l = await get('shares');
@@ -805,8 +848,8 @@ $('#shl').onclick = ev=>{
 };
 $('#shadd').onsubmit = ev=>{ ev.preventDefault(); const i = ev.target.querySelector('input'); shareDo('share_add', 'name='+encodeURIComponent(i.value.trim())); i.value=''; };
 
-// Utilisateurs
-// WebDAV et rsync : mêmes comptes ; un compte créé avant n'a pas encore d'entrée
+// Users
+// WebDAV and rsync: same accounts; an account created earlier has no entry yet
 function davInfo(u){
   if(!u.dav) return `<span class="small" style="color:var(--warn)">${t('mot de passe à redéfinir pour activer WebDAV/rsync')}</span>`;
   const h = esc(((last && last.host) || 'nas').toLowerCase())+'.local', n = esc(u.name);
@@ -839,7 +882,7 @@ $('#usadd').onsubmit = ev=>{
   userDo('user_set', 'name='+encodeURIComponent(f.querySelector('[name=name]').value.trim())+'&pw='+encodeURIComponent(f.querySelector('[name=pw]').value)); f.reset();
 };
 
-// Exports NFS
+// NFS exports
 async function loadNfs(){
   try{
     const l = await get('nfs');
@@ -862,7 +905,7 @@ $('#nfadd').onsubmit = ev=>{
   nfsDo('nfs_add', 'path='+encodeURIComponent(f.path.value.trim())+'&client='+encodeURIComponent(f.client.value.trim())+'&ro='+(f.ro.checked?1:0));
 };
 
-// Services : MiniDLNA, Avahi, rsync, WebDAV (marche/arrêt gardé au redémarrage)
+// Services: MiniDLNA, Avahi, rsync, WebDAV (on/off kept across reboots)
 async function loadSvc(){
   let s; try{ s = await get('services'); }catch(e){ toast(t('Erreur : {0}', e.message)); return; }
   const h = esc(s.host)+'.local', d = s.minidlna, r = s.rsync;
@@ -907,7 +950,7 @@ $('#svl').onclick = ev=>{
   else if(a==='rsync_pw'){ const p = $('#rspw'); svcDo(a, 'pw='+encodeURIComponent(p.value)); p.value=''; }
 };
 
-// Protokolle
+// Logs
 async function loadLog(){
   $('#logo').textContent = t('chargement…');
   try{ const t2 = await get('log&f='+$('#logf').value, true); $('#logo').textContent = t2 || t('(vide)'); $('#logo').scrollTop = 1e9; }

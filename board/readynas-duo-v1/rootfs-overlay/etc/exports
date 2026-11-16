@@ -1,2 +1,2 @@
-# NFS du noyau (v3 et v4) ; exemple, à adapter au réseau local
+# In-kernel NFS (v3 and v4); example, adapt to the local network
 /c 10.0.0.0/8(rw,no_subtree_check,fsid=0)
