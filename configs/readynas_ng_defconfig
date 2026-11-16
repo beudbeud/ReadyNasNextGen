@@ -1,11 +1,12 @@
 # NETGEAR ReadyNAS Duo v1 (Infrant IT3107 « Padre », SPARC v8 sans FPU,
 # sdiv faux) : noyau Linux 6.18 porté, ksmbd et NFS du noyau.
-# Variante « rapide » : même système, chaîne précompilée téléchargée.
-#   make rapide     (Makefile racine, sortie dans output-rapide/)
+# Chaîne interne uClibc-ng en SPARC v7 (patch patches/buildroot/0001),
+# threads NPTL, WCHAR, bibliothèques partagées.
+#   make            (Makefile racine : Buildroot, patch, defconfig, build)
 
 BR2_sparc=y
 BR2_sparc_v7=y
-BR2_DL_DIR="$(BR2_EXTERNAL_READYNAS_NG_PATH)/../dl"
+BR2_DL_DIR="$(BR2_EXTERNAL_READYNAS_NG_PATH)/dl"
 # Correctifs par paquet : linux/ (plateforme Padre), e2fsprogs/ (fuse2fs)
 BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_READYNAS_NG_PATH)/board/readynas-duo-v1/patches"
 # Cache de compilation hors de output/ (survit à « make clean ») et
@@ -14,25 +15,12 @@ BR2_CCACHE=y
 BR2_CCACHE_DIR="$(HOME)/.buildroot-ccache"
 BR2_PER_PACKAGE_DIRECTORIES=y
 
-# Chaîne PRÉCOMPILÉE (release GitHub toolchain-v7-2026.08.1, PAS ENCORE PUBLIÉE :
-# en attendant, make rapide TOOLCHAIN_ARCHIVE=release/…tar.xz), construite par
-# « make toolchain-sdk » avec readynas_ng_toolchain_defconfig : uClibc-ng,
-# gcc 15, en-têtes 6.18, WCHAR, NPTL, sans C++.
-BR2_TOOLCHAIN_EXTERNAL=y
-BR2_TOOLCHAIN_EXTERNAL_CUSTOM=y
-BR2_TOOLCHAIN_EXTERNAL_DOWNLOAD=y
-BR2_TOOLCHAIN_EXTERNAL_URL="https://github.com/beudbeud/ReadyNasNextGen/releases/download/toolchain-v7-2026.08.1/sparc-v7-readynas-linux-uclibc_sdk-buildroot-2026.08.1.tar.xz"
-BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX="$(ARCH)-buildroot-linux-uclibc"
-BR2_TOOLCHAIN_EXTERNAL_GCC_15=y
-BR2_TOOLCHAIN_EXTERNAL_HEADERS_6_18=y
-BR2_TOOLCHAIN_EXTERNAL_CUSTOM_UCLIBC=y
-BR2_TOOLCHAIN_EXTERNAL_WCHAR=y
-BR2_TOOLCHAIN_EXTERNAL_HAS_THREADS=y
-# BR2_TOOLCHAIN_EXTERNAL_HAS_THREADS_DEBUG is not set
-BR2_TOOLCHAIN_EXTERNAL_HAS_THREADS_NPTL=y
-# BR2_TOOLCHAIN_EXTERNAL_HAS_SSP is not set
-# BR2_TOOLCHAIN_EXTERNAL_INET_RPC is not set
-# BR2_TOOLCHAIN_EXTERNAL_CXX is not set
+BR2_TOOLCHAIN_BUILDROOT=y
+BR2_TOOLCHAIN_BUILDROOT_UCLIBC=y
+BR2_PTHREADS_NATIVE=y
+BR2_TOOLCHAIN_BUILDROOT_WCHAR=y
+BR2_KERNEL_HEADERS_AS_KERNEL=y
+BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_18=y
 BR2_SHARED_LIBS=y
 BR2_OPTIMIZE_S=y
 

@@ -121,19 +121,19 @@ de récupération.
 Makefile                         préparation de Buildroot + passage des cibles
 buildroot/                       sous-module : Buildroot 2026.08.1 (dépôt officiel)
 patches/buildroot/               variante SPARC v7 pour Buildroot (BR2_sparc_v7)
-br2-external/
-  configs/readynas_ng_defconfig            système complet, chaîne construite
-  configs/readynas_ng_rapide_defconfig     même système, chaîne précompilée (make rapide)
-  configs/readynas_ng_toolchain_defconfig  chaîne seule (make toolchain-sdk)
-  package/readynas-initramfs/    busybox statique sans flottant + tests, pour l'initramfs
-  board/readynas-duo-v1/
-    linux-padre.config, linux-padre-nas.fragment
-    patches/linux/               plateforme Padre pour Linux 6.18.63 (arch/sparc, pilotes)
-    patches/e2fsprogs/           fuse2fs avec uClibc-ng
-    initramfs/                   /init, liste gen_init_cpio, sources des tests
-    rootfs-overlay/              ksmbd, NFS, régulation du ventilateur
-    readynas_crypto/             outil de chiffrement iboot (GPL), compilé par post-image.sh
-    post-image.sh
+external.desc, Config.in, external.mk   arbre externe Buildroot (BR2_EXTERNAL = racine du dépôt)
+configs/readynas_ng_defconfig            système complet, chaîne construite
+configs/readynas_ng_rapide_defconfig     même système, chaîne précompilée (make rapide)
+configs/readynas_ng_toolchain_defconfig  chaîne seule (make toolchain-sdk)
+package/readynas-initramfs/      busybox statique sans flottant + tests, pour l'initramfs
+board/readynas-duo-v1/
+  linux-padre.config, linux-padre-nas.fragment
+  patches/linux/                 plateforme Padre pour Linux 6.18.63 (arch/sparc, pilotes)
+  patches/e2fsprogs/             fuse2fs avec uClibc-ng
+  initramfs/                     /init, liste gen_init_cpio, sources des tests
+  rootfs-overlay/                ksmbd, NFS, régulation du ventilateur
+  readynas_crypto/               outil de chiffrement iboot (GPL), compilé par post-image.sh
+  post-image.sh
 tools/                           iboot-cmd.py (console série), tftp-serveur.sh
 ```
 

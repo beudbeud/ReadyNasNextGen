@@ -23,7 +23,7 @@ BR_VERSION := 2026.08.1
 TOP        := $(CURDIR)
 BR_DIR     := $(TOP)/buildroot
 O          := $(TOP)/output
-EXTERNAL   := $(TOP)/br2-external
+EXTERNAL   := $(TOP)
 DEFCONFIG  := readynas_ng_defconfig
 BR_PATCHES := $(sort $(wildcard $(TOP)/patches/buildroot/*.patch))
 

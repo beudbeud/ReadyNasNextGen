@@ -1,5 +1,5 @@
 # gen_init_cpio : initramfs minimal intégré au noyau (CONFIG_INITRAMFS_SOURCE)
-# @SRC@ = br2-external/board/readynas-duo-v1/initramfs
+# @SRC@ = board/readynas-duo-v1/initramfs
 # @BIN@ = $(BINARIES_DIR)/readynas-initramfs (paquet readynas-initramfs)
 dir /dev 0755 0 0
 nod /dev/console 0600 0 0 c 5 1
