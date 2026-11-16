@@ -60,14 +60,21 @@ Résultat dans `output/images/` :
 noyau, le système et l'initramfs, et qu'aucune instruction flottante n'est exécutée par le chemin
 d'émulation FPU du noyau.
 
-### Chaîne précompilée (construction rapide) — pas encore publiée
+### Chaîne précompilée (construction rapide)
 
-**La chaîne précompilée n'est pas encore publiée** : `make` reconstruit tout, chaîne comprise
-(~1 h la première fois, bien moins ensuite grâce à ccache). Elle est prévue dans une release
-GitHub `toolchain-v7-2026.08.1`, avec ses sources (legal-info) pour la conformité GPL/LGPL.
+La chaîne précompilée est publiée dans la release GitHub
+[`toolchain-v7-2026.08.1`](https://github.com/beudbeud/ReadyNasNextGen/releases/tag/toolchain-v7-2026.08.1),
+avec ses sources (legal-info) pour la conformité GPL/LGPL et les sommes SHA256 :
+
+```sh
+make rapide               # télécharge la chaîne depuis la release, puis construit le système
+```
+
+Sans elle, `make` reconstruit tout, chaîne comprise (~1 h la première fois, bien moins ensuite
+grâce à ccache).
 
 La chaîne (SPARC v7, uClibc-ng 1.0.59 avec NPTL et WCHAR, gcc 15.3, binutils 2.45.1, en-têtes
-Linux 6.18.63, sans C++) se construit sous forme de SDK Buildroot relocalisable :
+Linux 6.18.63, sans C++) se reconstruit sous forme de SDK Buildroot relocalisable :
 
 ```sh
 make toolchain-sdk        # release/ : SDK .tar.xz, archive legal-info (sources + licences), SHA256SUMS
@@ -75,8 +82,8 @@ make rapide TOOLCHAIN_ARCHIVE=release/sparc-v7-readynas-linux-uclibc_sdk-buildro
 ```
 
 `make rapide` construit le même système avec cette chaîne (`readynas_ng_rapide_defconfig`,
-sortie dans `output-rapide/`) ; sans `TOOLCHAIN_ARCHIVE`, il la télécharge depuis la release et
-s'arrête avec un message clair si elle n'existe pas. Le SDK sert aussi seul : l'extraire, lancer
+sortie dans `output-rapide/`) ; avec `TOOLCHAIN_ARCHIVE`, il utilise une archive locale au lieu de
+la release. Le SDK sert aussi seul : l'extraire, lancer
 `./relocate-sdk.sh`, puis utiliser `bin/sparc-buildroot-linux-uclibc-gcc` (le C produit appelle
 `.div`/`.udiv` au lieu de `sdiv`). L'archive legal-info contient les sources de gcc, binutils,
 uClibc-ng, des en-têtes Linux et des outils hôtes avec leurs correctifs, plus
