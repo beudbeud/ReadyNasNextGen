@@ -81,7 +81,7 @@ struct disque {
 	int ref;			/* copie retenue (0 courant, 2 secours), -1 aucune */
 };
 
-struct section { unsigned debut, nb, fin, raid, init_mark, alive; };
+struct section { unsigned debut, nb, fin, raid, init, dmap, init_mark, alive; };
 struct part { int num; unsigned debut, nb, type; int sec; unsigned dec; };
 
 static int lire(int fd, u64 octet, void *buf, size_t len)
@@ -349,6 +349,11 @@ static int analyser(int argc, char **argv, int k)
 			continue;
 		S[ns].alive = 1;
 		S[ns].raid = e[5];
+		/* +4 disques porteurs (bits 0 et 1 : dmap du pilote), +7 « initialized »
+		 * (1 = miroir synchronisé). +8 n'est PAS un point de reprise : il reste
+		 * non nul sur un volume sain (initialized=1, redundant sous RAIDiator). */
+		S[ns].dmap = e[4];
+		S[ns].init = e[7];
 		S[ns].init_mark = be32(e + 8);
 		S[ns].debut = be32(e + 0x10);
 		S[ns].nb = be32(e + 0x18);
@@ -357,8 +362,10 @@ static int analyser(int argc, char **argv, int k)
 			S[ns].fin = v;
 		if (S[ns].raid != 1)
 			raison(1, "pas_raid1", "section qui n'est pas un miroir (RAID 4)");
-		if (S[ns].init_mark)
-			raison(1, "synchro_en_cours", "synchronisation X-RAID inachevée (init_mark non nul)");
+		if (S[ns].init != 1)
+			raison(1, "synchro_en_cours", "synchronisation X-RAID inachevée (section non initialisée)");
+		if ((S[ns].dmap & 3) != 3)
+			raison(1, "section_degradee", "section portée par un seul disque (dmap)");
 		if (S[ns].debut >= S[ns].fin)
 			raison(2, "sections", "section vide ou hors zone visible");
 		ns++;
@@ -492,15 +499,15 @@ static int analyser(int argc, char **argv, int k)
 			printf("XR_D%d='%s %llu %s %d %s %s %d %d %d'\n", i, D[i].chemin, D[i].n, *role ? role : "-",
 			       D[i].canal - 1, *et ? et : "-", *copies ? copies : "-", D[i].wgam, D[i].mbr_ok, D[i].md);
 	}
-	/* sections : début, secteurs utilisables (bornés à V), niveau, init_mark */
+	/* sections : début, secteurs utilisables (bornés à V), niveau, initialisée */
 	if (json) printf("],\"sections\":[");
 	else printf("XR_NB_SECTIONS=%d\n", ns);
 	for (i = 0; i < ns; i++) {
 		if (json)
-			printf("%s{\"debut\":%u,\"secteurs\":%u,\"secteurs_declares\":%u,\"raid\":%u,\"init_mark\":%u}",
-			       i ? "," : "", S[i].debut, S[i].fin - S[i].debut, S[i].nb, S[i].raid, S[i].init_mark);
+			printf("%s{\"debut\":%u,\"secteurs\":%u,\"secteurs_declares\":%u,\"raid\":%u,\"init\":%u,\"dmap\":%u,\"init_mark\":%u}",
+			       i ? "," : "", S[i].debut, S[i].fin - S[i].debut, S[i].nb, S[i].raid, S[i].init, S[i].dmap, S[i].init_mark);
 		else
-			printf("XR_S%d='%u %u %u %u'\n", i, S[i].debut, S[i].fin - S[i].debut, S[i].raid, S[i].init_mark);
+			printf("XR_S%d='%u %u %u %u'\n", i, S[i].debut, S[i].fin - S[i].debut, S[i].raid, S[i].init);
 	}
 	/* partitions : numéro, début, taille, type, section, décalage dans la section */
 	if (json) printf("],\"partitions\":[");

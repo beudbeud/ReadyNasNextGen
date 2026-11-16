@@ -38,7 +38,9 @@ ne s'active qu'après validation, en écrivant `XRAID_RW=oui` dans
   SATA 0, entrée 2 = SATA 1 : rôle base/miroir, **état** en +0x10 :
   0 en panne, 1 online, 2 secours, 8 en reconstruction, copie de la table de
   partitions en +0x18) ; table des sections (32 octets en 0x800 : niveau en +5,
-  utilisée en +6, **point de reprise de synchronisation** en +8, début en
+  disques porteurs (`dmap`, 3 = les deux) en +4, utilisée en +6, **initialisée**
+  (miroir synchronisé, `initialized` du pilote) en +7 ; +8 reste non nul sur
+  un volume sain et n'est pas lu comme état de synchronisation ; début en
   +0x10, taille en +0x18) ; entrée du disque porteur (`this_disk`) en 0x1460.
 - Sous Linux 6.18 les disques s'appellent `sda`/`sdb` dans l'ordre des ports
   SATA ; le disque base peut être l'un ou l'autre (sur un Duo installé avec

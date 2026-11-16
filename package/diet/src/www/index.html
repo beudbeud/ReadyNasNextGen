@@ -635,7 +635,7 @@ async function loadStk(d){
   const NR = {rw_desactive:'écriture désactivée : XRAID_RW=oui dans /etc/nas-raid.conf', arret_brutal_linux:'arrêt brutal sous Linux : vérifier le miroir',
     arret_brutal_verifie:'arrêt brutal de RAIDiator, miroir vérifié depuis', migration_en_cours:'migration vers md en cours'};
   if(stk.mode!=='md') (stk.raisons||'').split(' ').filter(r=>NR[r]).forEach(r=>{ h += `<div>· ${esc(NR[r])}</div>`; });
-  if(stk.mode!=='md') (x.sections||[]).forEach((s,i)=>{ h += `<div class="row"><span>${t('Section {0}', i)}</span><span>${kb(s.secteurs/2)} · ${s.init_mark ? t('synchronisation inachevée') : t('synchronisée')}</span></div>`; });
+  if(stk.mode!=='md') (x.sections||[]).forEach((s,i)=>{ h += `<div class="row"><span>${t('Section {0}', i)}</span><span>${kb(s.secteurs/2)} · ${s.init===0 ? t('synchronisation inachevée') : t('synchronisée')}</span></div>`; });
   if(x.miroir || v.etat!=='jamais'){
     const d = v.date ? new Date(v.date*1000).toLocaleDateString(LANG) : '';
     const vs = v.etat==='en_cours' ? t('en cours {0} %', v.progression ?? 0) : v.etat==='ok' ? t('identique le {0}', d) : v.etat==='differences' ? t('{0} zones différentes', v.zones) : v.etat==='erreurs' ? t('erreurs de lecture') : t('jamais faite');

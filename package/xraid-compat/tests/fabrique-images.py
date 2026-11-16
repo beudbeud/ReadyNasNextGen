@@ -62,8 +62,11 @@ def superbloc(n, v, sections, disques, propre=True, init_mark=0, this=1, table_m
         struct.pack_into(">I", sb, o + 0x58, v)
     for k, (deb, nb) in enumerate(sections):
         o = 0x800 + 32 * k
-        sb[o + 1], sb[o + 2], sb[o + 3], sb[o + 4], sb[o + 5], sb[o + 6] = k, 1, 0, 6, 1, 1
-        struct.pack_into(">I", sb, o + 8, init_mark if k == 1 else 0)
+        # +4 dmap (3 = les deux disques), +5 niveau, +6 utilisée, +7 initialisée ;
+        # +8 garde une valeur non nulle sur un vrai volume sain : on l'imite.
+        sb[o + 1], sb[o + 2], sb[o + 3], sb[o + 4], sb[o + 5], sb[o + 6] = k, 1, 0, 3, 1, 1
+        sb[o + 7] = 0 if (init_mark and k == 1) else 1
+        struct.pack_into(">I", sb, o + 8, 0x258020 + k)
         struct.pack_into(">I", sb, o + 0x10, deb)
         struct.pack_into(">I", sb, o + 0x18, nb)
     sb[0x1460:0x14E0] = sb[0x200 + 128 * this:0x280 + 128 * this]
