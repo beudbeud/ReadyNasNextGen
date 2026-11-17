@@ -7,9 +7,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # python3, gcc and dash (sh) are on the runner; busybox adds the busybox-sh variants.
+      # python3, gcc and dash (sh) are on the runner; busybox adds the busybox-sh variants,
+      # e2fsprogs the ext3 images of the quick check (mke2fs, debugfs, dumpe2fs).
       # mdadm, lvm, dmsetup and mount are simulated by the tests themselves.
-      - run: sudo apt-get update && sudo apt-get install -y busybox
+      - run: sudo apt-get update && sudo apt-get install -y busybox e2fsprogs
       - name: DIET API
         run: sh package/diet/tests/test-api.sh
       - name: xraid-compat

@@ -19,7 +19,10 @@ check() {	# check "description" shell-condition
 mkdir -p "$R/bin" "$R/proc" "$R/var/run" "$R/var/lib" "$R/etc/init.d"
 cc -O2 -Wall -Werror -o "$R/bin/xraid-info" "$SRC/xraid-info.c" || exit 1
 cc -O2 -Wall -Werror -o "$R/bin/xraid-sb.real" "$SRC/xraid-sb.c" || exit 1
-for s in clean big dirty degraded sync different md reinstall counters torn sbw fs fsdirty; do
+# ext3 images (fs, fsdirty) need e2fsprogs (mke2fs, debugfs, dumpe2fs): skipped without them
+PATH=$PATH:/usr/sbin:/sbin
+if python3 "$HERE/make-images.py" "$T" tools; then E2FS="fs fsdirty"; else E2FS=; echo "skip ext3 (quick check) tests: e2fsprogs missing"; fi
+for s in clean big dirty degraded sync different md reinstall counters torn sbw $E2FS; do
 	python3 "$HERE/make-images.py" "$T/$s" "$s" > /dev/null || exit 1
 done
 
@@ -58,6 +61,7 @@ check "verify: one difference -> code 1, one zone" "[ $rc = 1 ] && grep -q 'DIFF
 # ---------- quick check: ext3 (16 KiB blocks) in LVM in X-RAID (make-images.py fs) ----------
 q() { "$R/bin/xraid-info" quick --json --seed 7 "$@" 2>/dev/null; }
 jtotal() { LC_ALL=C debugfs -R 'stat <8>' "$T/fs/$1.fs" 2>/dev/null | sed -n 's/^TOTAL: //p'; }
+if [ -n "$E2FS" ]; then
 J=$(q --samples 64 "$T"/fs/sdb.img "$T"/fs/sda.img); rc=$?
 check "quick: identical images -> code 0, complete, valid JSON" "[ $rc = 0 ] && js 'j[\"result\"]==\"identical\" and j[\"complete\"]==1'"
 cat_b() { python3 -c "import json,sys; j=json.loads(sys.argv[1]); print([c['bytes'] for c in j['categories'] if c['name']==sys.argv[2]][0])" "$J" "$1"; }
@@ -76,6 +80,7 @@ python3 "$HERE/make-images.py" "$T/q-data" fs > /dev/null; python3 "$HERE/make-i
 J=$(q --samples 0 "$T"/q-data/sdb.img "$T"/q-data/sda.img); rc=$?
 "$R/bin/xraid-info" verify "$T"/q-data/sdb.img "$T"/q-data/sda.img > /dev/null 2>&1; rc2=$?
 check "quick: a difference in unsampled file data is NOT found (limit); the full verify finds it" "[ $rc = 0 ] && [ $rc2 = 1 ]"
+fi
 J=$(q --samples 8 "$T"/clean/sdb.img "$T"/clean/sda.img); rc=$?
 check "quick: no ext3/LVM found -> code 3 (incomplete), notes say why" "[ $rc = 3 ] && js 'j[\"result\"]==\"incomplete\" and j[\"complete\"]==0 and len(j[\"notes\"])>=2'"
 check "xraid-info opens nothing for writing (O_RDONLY only)" "! grep -q 'O_RDWR\|O_WRONLY' '$SRC/xraid-info.c'"
@@ -183,6 +188,7 @@ check "verified RAIDiator dirty superblock: put back clean, rw" "[ \"\$(mode_of)
 nr unmount 2>/dev/null >/dev/null
 # quick check: clean superblock, only the Linux mark left -> the mark is lifted
 S=$R/var/lib/nas-raid
+if [ -n "$E2FS" ]; then
 DISKS="$T/fs/sda.img $T/fs/sdb.img"; date +%s > "$S/xraid-dirty"; : > "$T/cmd.log"
 nr mount 2>/dev/null >/dev/null
 check "quick-verify setup: clean superblock + xraid-dirty mark -> read-only" "grep -q 'xraid-ro unclean_shutdown_linux' '$R/var/run/nas-raid.mode'"
@@ -217,6 +223,7 @@ nr mount 2>/dev/null >/dev/null; nr quick-verify 2>/dev/null >/dev/null; rc=$?
 nr quick-accept --confirm ACCEPT --yes 2>/dev/null >/dev/null; rc2=$?
 check "quick-verify, difference in the journal: code 1, state differences, mark kept, accept refused" "[ $rc = 1 ] && grep -q '^differences ' '$S/quick.state' && [ -e '$S/xraid-dirty' ] && [ $rc2 != 0 ]"
 nr unmount 2>/dev/null >/dev/null; rm -f "$S/xraid-dirty"
+fi
 DISKS="$T/degraded/sdb.img"; : > "$T/cmd.log"
 nr mount 2>/dev/null >/dev/null
 check "missing disk at boot: read-only on the present disk, nothing written" "grep -q 'xraid-ro missing_disk' '$R/var/run/nas-raid.mode' && ! grep -q 'mdadm\|xraid-sb' '$T/cmd.log'"

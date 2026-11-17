@@ -586,7 +586,8 @@ api POST a=xraid_rw 'on=2'
 check "xraid_rw: invalid value refused" '[ "$ST" = 400 ]'
 echo 'xraid-rw' > "$R"/var/run/nas-raid.mode; rm -f "$R"/etc/nas-raid.conf "$R"/etc/nas-raid.conf.bak "$R"/var/lib/nas-raid/xraid-dirty
 # quick check: unclean superblock (real crash), no difference -> acceptance with ACCEPT + box only
-python3 "$XC"/tests/make-images.py "$R/img/fsdirty" fsdirty > /dev/null
+python3 "$XC"/tests/make-images.py "$R/img/fsdirty" fsdirty > /dev/null; rc=$?
+if [ $rc = 77 ]; then echo "skip quick check tests: e2fsprogs missing"; else
 export NAS_RAID_DISKS="$(ls "$R/img/fsdirty"/*.img | tr '\n' ' ')"; rm -f "$R"/var/run/xraid.json
 echo 'xraid-ro unclean_shutdown unclean_shutdown_linux' > "$R"/var/run/nas-raid.mode; date +%s > "$R"/var/lib/nas-raid/xraid-dirty
 api POST a=raid_quick ''
@@ -606,6 +607,7 @@ api POST a=raid_quick_accept 'confirm=ACCEPT&yes=1'
 check "raid_quick_accept again: refused by nas-raid (409, nothing to accept)" '[ "$ST" = 409 ]'
 api GET a=storage
 check "storage after acceptance: valid JSON, accept no longer offered" "json 'j[\"quick\"][\"state\"]==\"accepted\" and j[\"quick\"][\"accept\"]==0'"
+fi
 tr_ok=1; for k in 'Quick check' 'Accept the quick check…' 'Accept the quick check' 'Accept' 'I accept this residual risk.' 'no difference, unclean superblock: confirmation needed' '{0} differences ({1}): repair needed' 'incomplete: file system not located' 'accepted on {0}' '{0} compared'; do
 	grep -qF "  \"$k\": [\"" "$SRC"/www/index.html || { tr_ok=; echo "  untranslated: $k"; }; done
 check "index.html: quick check strings translated (fr, de)" '[ -n "$tr_ok" ]'

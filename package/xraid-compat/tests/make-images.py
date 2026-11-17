@@ -10,9 +10,12 @@ Nothing comes from a real disk: identifiers and dates are made up.
   make-images.py FOLDER SCENARIO [N]
 SCENARIO: clean | dirty | degraded | sync | different | md | big | reinstall
           | counters | torn | fs | fsdirty
+          | tools (exits 77 if mke2fs, debugfs or dumpe2fs is missing)
           (any other name: same as clean)
 "fs" (clean superblock) and "fsdirty" (unclean shutdown) add real ext3 file
-systems with 16 KiB blocks (host mke2fs): p1, and LV "c" of an LVM PV on p5
+systems with 16 KiB blocks (host mke2fs, every option explicit, no
+mke2fs.conf, fixed UUIDs and dates: the same bytes on every host), built once
+and copied identically on both disks: p1, and LV "c" of an LVM PV on p5
 (text metadata, two segments swapped on the PV); system.fs and data.fs stay
 in FOLDER.
   make-images.py FOLDER poke journal|sysjournal|bitmap|itable|lvm|data
@@ -24,6 +27,7 @@ only sdb.img; "md" adds an md 1.2 superblock on sda.img (already migrated disk).
 """
 import os
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -155,23 +159,48 @@ def lv_lba(byte):
     raise ValueError(byte)
 
 
-def mkfs(path, mb, groups, files):
+E2FS = ("mke2fs", "debugfs", "dumpe2fs")
+E2FS_PATH = os.environ.get("PATH", "") + ":/usr/sbin:/sbin"
+FAKE_TIME = 1200000000
+
+
+def e2fs(args, **kw):
+    """runs an e2fsprogs tool, independent of the host settings and language"""
+    env = dict(os.environ, PATH=E2FS_PATH, LC_ALL="C", MKE2FS_CONFIG=os.devnull,
+               E2FSPROGS_FAKE_TIME=str(FAKE_TIME), SOURCE_DATE_EPOCH=str(FAKE_TIME))
+    return subprocess.run(args, env=env, **kw)
+
+
+def mkfs(path, mb, groups, files, uuid):
+    """the same ext3 on every host: every mke2fs option explicit, no mke2fs.conf"""
     tree = path + ".d"
     os.makedirs(tree, exist_ok=True)
     for i in range(files):
         with open(os.path.join(tree, "f%03d" % i), "w") as f:
             f.write("file %d\n" % i)
+        os.utime(os.path.join(tree, "f%03d" % i), (FAKE_TIME, FAKE_TIME))
+    os.utime(tree, (FAKE_TIME, FAKE_TIME))
     with open(path, "wb") as f:
         f.truncate(mb << 20)
-    subprocess.run(["mke2fs", "-q", "-F", "-t", "ext3", "-b", "16384", "-g", str(groups),
-                    "-N", "4096", "-d", tree, path], check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    r = e2fs(["mke2fs", "-q", "-F", "-o", "Linux", "-b", "16384", "-I", "256", "-g", str(groups),
+          "-N", "4096", "-m", "5", "-O", "none,has_journal,ext_attr,resize_inode,dir_index,"
+          "filetype,sparse_super,large_file", "-J", "size=64", "-U", uuid,
+          "-E", "hash_seed=%s,nodiscard,lazy_itable_init=0,lazy_journal_init=0" % uuid,
+          "-d", tree, path], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    if r.returncode:
+        sys.exit("make-images: mke2fs failed on %s:\n%s" % (path, r.stderr))
+    out = e2fs(["dumpe2fs", "-h", path], capture_output=True, text=True).stdout
+    if not re.search(r"^Journal inode:\s+8$", out, re.M):
+        sys.exit("make-images: mke2fs made no ext3 journal in " + path)
 
 
-def copy_sparse(src, f, lba_of):
-    """copies the data parts of src into f; lba_of(byte) = destination LBA"""
-    with open(src, "rb") as s:
-        fd, size, pos = s.fileno(), os.fstat(s.fileno()).st_size, 0
+def copy_sparse(src, files, lba_of):
+    """copies the data parts of src into every file (same bytes, read once);
+    lba_of(byte) = destination LBA"""
+    fd = os.open(src, os.O_RDONLY)
+    try:
+        os.fsync(fd)        # holes reported by SEEK_DATA match what was written
+        size, pos = os.fstat(fd).st_size, 0
         while pos < size:
             try:
                 pos = os.lseek(fd, pos, os.SEEK_DATA)
@@ -180,39 +209,42 @@ def copy_sparse(src, f, lba_of):
             end = os.lseek(fd, pos, os.SEEK_HOLE)
             while pos < end:
                 n = min(end - pos, 1 << 20, 4 * 1024 * 1024 - pos % (4 * 1024 * 1024))   # stays in an extent
-                s.seek(pos)
-                write(f, lba_of(pos), s.read(n))
+                data = os.pread(fd, n, pos)
+                for f in files:
+                    write(f, lba_of(pos), data)
                 pos += n
+    finally:
+        os.close(fd)
 
 
 def fs_build(folder, data):
+    """one build of each file system, copied identically on both disks"""
     label, mda, text = lvm_pv(data - 8)
-    mkfs(os.path.join(folder, "system.fs"), 4096000 // 2048, 2048, 8)
-    mkfs(os.path.join(folder, "data.fs"), LV_EXTENTS * EXT // 2048, 2048, 300)
-    for name in ("sda", "sdb"):
-        with open(os.path.join(folder, name + ".img"), "r+b") as f:
+    mkfs(os.path.join(folder, "system.fs"), 4096000 // 2048, 2048, 8, "5a5a5a5a-0000-4000-8000-000000000001")
+    mkfs(os.path.join(folder, "data.fs"), LV_EXTENTS * EXT // 2048, 2048, 300, "5a5a5a5a-0000-4000-8000-000000000002")
+    with open(os.path.join(folder, "sda.img"), "r+b") as a, open(os.path.join(folder, "sdb.img"), "r+b") as b:
+        for f in (a, b):
             write(f, P5 + 1, label)
             write(f, P5 + 8, mda)
             write(f, P5 + 9, text)
-            copy_sparse(os.path.join(folder, "system.fs"), f, lambda b: 32 + b // 512)
-            copy_sparse(os.path.join(folder, "data.fs"), f, lv_lba)
+        copy_sparse(os.path.join(folder, "system.fs"), (a, b), lambda x: 32 + x // 512)
+        copy_sparse(os.path.join(folder, "data.fs"), (a, b), lv_lba)
 
 
 def poke(folder, what):
     """changes one byte on the mirror (sda.img) in the given area; prints its LBA"""
-    os.environ["LC_ALL"] = "C"     # dumpe2fs output parsed below
     def dump(fs, pat):
-        out = subprocess.run(["dumpe2fs", os.path.join(folder, fs)], capture_output=True, text=True).stdout
+        out = e2fs(["dumpe2fs", os.path.join(folder, fs)], capture_output=True, text=True).stdout
         return [int(x) for x in re.findall(pat, out)]
     def jblock(n):
-        out = subprocess.run(["debugfs", "-R", "bmap <8> %d" % n, os.path.join(folder, "data.fs")],
+        out = e2fs(["debugfs", "-R", "bmap <8> %d" % n, os.path.join(folder, "data.fs")],
                              capture_output=True, text=True).stdout
         return int(out.split()[0])
     bs = 16384
     if what == "journal":           # journal block 3000: second run of the journal
         lba = lv_lba(jblock(3000) * bs + 100)
     elif what == "sysjournal":
-        out = subprocess.run(["debugfs", "-R", "bmap <8> 10", os.path.join(folder, "system.fs")],
+        out = e2fs(["debugfs", "-R", "bmap <8> 10", os.path.join(folder, "system.fs")],
                              capture_output=True, text=True).stdout
         lba = 32 + int(out.split()[0]) * bs // 512
     elif what == "bitmap":          # block bitmap of group 12
@@ -237,6 +269,13 @@ def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__)
     folder, scen = sys.argv[1], sys.argv[2]
+    if scen in ("fs", "fsdirty", "poke", "tools"):
+        missing = [t for t in E2FS if not shutil.which(t, path=E2FS_PATH)]
+        if missing:
+            print("make-images: %s missing (e2fsprogs)" % " ".join(missing), file=sys.stderr)
+            sys.exit(77)
+        if scen == "tools":
+            return
     if scen == "poke":
         return poke(folder, sys.argv[3])
     n = int(sys.argv[3]) if len(sys.argv) > 3 else (1465149168 if scen == "big" else 8388608)
