@@ -82,7 +82,7 @@ segfault in `memcpy`, address `0x1724`).
 ### Prebuilt toolchain (fast build)
 
 The prebuilt toolchain is published in the GitHub release
-[`toolchain-v7-2026.08.1-r2`](https://github.com/beudbeud/ReadyNasNextGen/releases/tag/toolchain-v7-2026.08.1-r2),
+[`toolchain-v7-2026.08.1-r3`](https://github.com/beudbeud/ReadyNasNextGen/releases/tag/toolchain-v7-2026.08.1-r3),
 with its sources (legal-info) for GPL/LGPL compliance and the SHA256 sums:
 
 ```sh

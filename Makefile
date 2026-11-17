@@ -60,7 +60,7 @@ $(O)/.config: $(EXTERNAL)/configs/$(DEFCONFIG) | buildroot-patch
 
 # "rapide" (fast) build: same system with the prebuilt toolchain
 # (readynas_ng_rapide_defconfig), in output-rapide/. The toolchain is downloaded
-# from the toolchain-v7-2026.08.1-r2 release, or taken from TOOLCHAIN_ARCHIVE=...
+# from the toolchain-v7-2026.08.1-r3 release, or taken from TOOLCHAIN_ARCHIVE=...
 # (local archive from "make toolchain-sdk").
 .PHONY: rapide toolchain-sdk
 TC_URL := $(shell sed -n 's/^BR2_TOOLCHAIN_EXTERNAL_URL="\(.*\)"/\1/p' \

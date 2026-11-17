@@ -1,4 +1,4 @@
-# Prebuilt toolchain of the toolchain-v7-2026.08.1-r2 release (fixed ld.so).
-# Same file name as revision 1: the hash forces a new download of an old
-# archive left in dl/.
-sha256  87c0051fd52a2a0696d16cbaacde20faff4894240772602a9b35e4972566dbb6  sparc-v7-readynas-linux-uclibc_sdk-buildroot-2026.08.1.tar.xz
+# Prebuilt toolchain of the toolchain-v7-2026.08.1-r3 release (16 KiB page size,
+# fixed ld.so and longjmp). Same file name as the earlier revisions: the hash
+# forces a new download of an old archive left in dl/.
+sha256  d35a032ab1bebdc0922aec31b3618e3e4b1b9ab1c5f721d0cc848bb7859597e4  sparc-v7-readynas-linux-uclibc_sdk-buildroot-2026.08.1.tar.xz

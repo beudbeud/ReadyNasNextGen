@@ -15,14 +15,14 @@ BR2_CCACHE=y
 BR2_CCACHE_DIR="$(HOME)/.buildroot-ccache"
 BR2_PER_PACKAGE_DIRECTORIES=y
 
-# PREBUILT toolchain (GitHub release toolchain-v7-2026.08.1-r2, fixed ld.so;
+# PREBUILT toolchain (GitHub release toolchain-v7-2026.08.1-r3, fixed ld.so;
 # hash: board/readynas-duo-v1/patches/toolchain-external-custom/), built by
 # "make toolchain-sdk" with readynas_ng_toolchain_defconfig: uClibc-ng,
 # gcc 15, 6.18 headers, WCHAR, NPTL, no C++.
 BR2_TOOLCHAIN_EXTERNAL=y
 BR2_TOOLCHAIN_EXTERNAL_CUSTOM=y
 BR2_TOOLCHAIN_EXTERNAL_DOWNLOAD=y
-BR2_TOOLCHAIN_EXTERNAL_URL="https://github.com/beudbeud/ReadyNasNextGen/releases/download/toolchain-v7-2026.08.1-r2/sparc-v7-readynas-linux-uclibc_sdk-buildroot-2026.08.1.tar.xz"
+BR2_TOOLCHAIN_EXTERNAL_URL="https://github.com/beudbeud/ReadyNasNextGen/releases/download/toolchain-v7-2026.08.1-r3/sparc-v7-readynas-linux-uclibc_sdk-buildroot-2026.08.1.tar.xz"
 BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX="$(ARCH)-buildroot-linux-uclibc"
 BR2_TOOLCHAIN_EXTERNAL_GCC_15=y
 BR2_TOOLCHAIN_EXTERNAL_HEADERS_6_18=y
