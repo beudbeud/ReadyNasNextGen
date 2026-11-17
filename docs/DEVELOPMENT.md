@@ -15,12 +15,12 @@ two SATA disks.
 | Item | Status |
 |---|---|
 | Boot through iboot + TFTP, serial console ttyS1 (9600 baud) | works |
-| Boot through the original 2.6.17 kernel ([relay](#relay-booting-from-the-original-kernel)) | hand-over validated on one NAS (started from DIET's switch); `relay-init` and the add-ons tested in simulation |
+| Boot through the original 2.6.17 kernel ([relay](#relay-booting-from-the-original-kernel)) | works on one NAS: relay add-on 1.1 installed from Frontview, boots of 6.18, system updates by slots; not tested yet: the fallback after a power cut during a 6.18 boot (simulated by `test-addon.sh`, `test-slots.sh`) |
 | MMU, caches, interrupts, timer, task sleep/wakeup | works |
-| 16 KiB pages (`patches/linux/0003`, like the stock 2.6.17 kernel) | works: boot, services, kernel ext4 mount of the X-RAID `/c` and of the system volume `xr-p1` (ext3, 16 KiB blocks), read-only; see [below](#16-kib-pages) |
+| 16 KiB pages (`patches/linux/0003`, like the stock 2.6.17 kernel) | works: boot, services, kernel ext4 mount of the X-RAID `/c` (read-write through the Storage switch, validated) and of the system volume `xr-p1` (read-only), ext3 with 16 KiB blocks; see [below](#16-kib-pages) |
 | FPU emulation (the Padre has none): hardware floating-point programs, `printf("%f")`, awk | works (fmovs/fnegs/fabss fixed in `math-emu/math_32.c`: the Padre emulates everything, including these copies) |
 | Built-in initramfs, `/init`, busybox, fork/exec, page faults | works |
-| SATA disks (libata, PIO; optional DMA through the LP coprocessor) | detected |
+| SATA disks (libata, DMA through the LP coprocessor, on by default) | works: raw read 14.9 MB/s in PIO, 35.5 MB/s in DMA |
 | Ethernet, LEDs, button, fan/temperature (`drivers/platform/padre`) | ported, to be validated |
 | USB EHCI (VIA VT6212) | works: AHB arbitration from 2.6.17 restored; the VT6212 never re-reads the horizontal link of the head QH once the CPU has rewritten it, so a permanent dummy QH follows the head and the real QHs are chained after it |
 | Boot from the USB stick (`/rootfs-6.18`), `quiet` console | works: root reached about 3 s after the kernel starts |
@@ -29,7 +29,7 @@ two SATA disks.
 | Hardware clock (Dallas DS1337, I2C 0x68) | works: `padre_rtc` (`/dev/rtc0`), time read at boot (`RTC_HCTOSYS`), written back after NTP (`S41time`, `hwclock -w`, and `RTC_SYSTOHC`); the 16 registers are shown in `dmesg` at boot |
 | LVM (lvm2 2.03.31) | works: `board/readynas-duo-v1/patches/lvm2/` aligns the `dm_task_get_device_list()` list on 8 bytes (64-bit `dev_t`: SIGBUS from `lvm pvs` on SPARC) |
 | ksmbd, NFS v3/v4, mdadm | built, not tested |
-| [DIET](DIET.md) web dashboard (lighttpd HTTPS) | ported, tested in simulation |
+| [DIET](DIET.md) web dashboard (lighttpd HTTPS) | works on the NAS (system updates, X-RAID write switch); every action tested in simulation (`test-api.sh`) |
 
 ## Build
 
@@ -69,6 +69,13 @@ Output in `output/images/`:
 `post-image.sh` also checks the load address, the absence of `sdiv`/`sdivcc`/`casa` in the
 kernel, the system and the initramfs, that no floating-point instruction is executed by the
 kernel FPU emulation path, and that the built-in command line is shorter than 256 characters.
+It fails if the kernel, the initramfs (`usr/initramfs_data.cpio`) or `rootfs.tar` contain the
+absolute path of the repository or of the output directory, or the builder's `user@host`.
+`external.mk` keeps them out: kernel banner `readynasng@build` (`KBUILD_BUILD_USER/HOST`),
+`-ffile-prefix-map` for sqlite (`__FILE__` in the shell's asserts), relative paths in the
+ffmpeg configure line (`av*_configuration()`); the initramfs test programs are stripped.
+`BR2_REPRODUCIBLE` is not used: it rebuilds everything (toolchain wrapper flags), drops the
+build-ids, dates every file with the last commit, and leaves the ffmpeg line as it is.
 
 The toolchain applies `board/readynas-duo-v1/patches/uclibc/`: `flush` after each instruction
 rewrite by ld-uClibc (PLT). Without it, the Padre instruction cache ran the old PLT (segfaults
@@ -121,7 +128,7 @@ the kernel stack is one page, `AT_PAGESZ` is 16384. So `nas-raid` mounts `/c` wi
 ext4 driver; fuse2fs is gone.
 
 Measured (200 MiB of a file of `/c`, cold cache, disks in PIO): kernel ext4 11.8 MiB/s, fuse2fs
-3.3 MiB/s; same md5 of a 344 MB file both ways. User space needs every `PT_LOAD` congruent
+(before) 3.3 MiB/s; writing ~3 MB/s against 0.11 MB/s; same md5 of a 344 MB file both ways. User space needs every `PT_LOAD` congruent
 modulo 16 KiB: the binutils default for SPARC (max-page-size 64 KiB) already gives it, and from
 the r3 toolchain on the default is 16 KiB (`patches/binutils/0001`, less padding).
 `post-image.sh` refuses any ELF of the rootfs that does not comply.
@@ -193,12 +200,22 @@ simulated stick).
 `.sha256` from `output-rapide/images`, installed from the Settings page into the second
 system slot of the stick and tried once (docs/DIET.md, “System update”).
 
+**Stick image.** `make stick-image` (`board/readynas-duo-v1/mkstick.sh`, `IMAGES=`,
+`VERSION=`, `SIZE_MB=` optional, default 1024) makes `readynasng-stick-<version>.img`, its
+`.img.xz` and their `.sha256` without root: an MBR with one type 83 partition from 1 MiB, ext3
+`usbroot` made by `mke2fs -d` under fakeroot (owners of `rootfs.tar` kept) with
+`/rootfs-6.18` (plus `etc/system-version`), `/boot/vmlinux.bin(.md5)` and `/README.txt`.
+Features limited to what the 2.6.17 ext3 driver mounts (incompat `filetype`, ro_compat
+`sparse_super,large_file`, compat `has_journal,ext_attr,resize_inode,dir_index`; 128-byte
+inodes). The script then reads the partition back from the image and checks it: `e2fsck -fn`,
+feature list, owners and modes, kernel md5, entry count against `rootfs.tar`.
+
 ## Kernel parameters (built-in command line, `board/readynas-duo-v1/linux-padre.config`)
 
 | Parameter | Purpose |
 |---|---|
 | `padre.disable=a,b` | do not start some Padre drivers: `i2c`, `rtc`, `led`, `hwmon`, `gmac`, `sata`, `dma`, `pci` (debugging) |
-| `padre_sata.dma=0/1` | disk DMA through the LP coprocessor (0 = PIO, default). Booted with 1: switchable at run time in `/sys/module/padre_sata/parameters/dma` (0 = DMA commands run in PIO); `dma_cmds` counts LP commands |
+| `padre_sata.dma=0/1` | disk DMA through the LP coprocessor (1 in the built-in command line; 0 = PIO). Booted with 1: switchable at run time in `/sys/module/padre_sata/parameters/dma` (0 = DMA commands run in PIO); `dma_cmds` counts LP commands |
 | `padre.trace_fault=N` | shows the first N user page faults |
 | `padre.trace_tick=1` | tick state in `/proc/padre_tick` and `[pulse]`/`[watchdog]` lines on the console (default 0) |
 | `padre_mm.flush=1/2/0` | handling of the `flush` instruction: 1 (default) whole D-cache + I; 2 targeted D line only; 0 skipped (diagnostics). Also at runtime: `/sys/module/padre_mm/parameters/flush` |

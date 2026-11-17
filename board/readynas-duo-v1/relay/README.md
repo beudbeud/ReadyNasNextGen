@@ -17,9 +17,11 @@ and `relay-switch` decide at each boot, with an automatic fallback to the system
 there before (stock RAIDiator 4.1.x, or DIET if installed). **Nothing writes the
 flash**: no code here touches `/dev/mtd*` or the NAND controller.
 
-The hand-over (module + `relay-switch`) was validated on a ReadyNAS Duo v1, started from
-DIET's boot switch (2.6.17 uses 16 KiB pages, handled); `relay-init` and the add-ons are
-checked in simulation only (`test-addon.sh`).
+The hand-over (module + `relay-switch`) was validated on a ReadyNAS Duo v1, first started
+from DIET's boot switch (2.6.17 uses 16 KiB pages, handled), then with the add-on 1.1
+installed from Frontview, including system slots (updates and their trial boot). Not tested
+on the NAS yet: the fallback after a power cut during a 6.18 boot (checked in simulation:
+`test-addon.sh`, `test-slots.sh`).
 
 | File | Role |
 |---|---|
@@ -258,7 +260,8 @@ the GPL 2.6.17 `arch/padre/kernel/head.S`, `setup.c`, `pcic.c`, `mm/` and the 6.
 ## Known risks
 
 - **LP restart**: if 6.18 prints `l` instead of `L`, it runs with the 2.6.17 LP instance. Disk
-  DMA is off by default (`padre_sata.dma=0`), so PIO disks still work.
+  DMA is on by default (`padre_sata.dma=1`): boot once with `padre_sata.dma=0` (PIO) to
+  check.
 - **Unknown DMA master still running** (proprietary drivers): random early 6.18 crash.
   `shutdown=1` covers what drivers do at reboot; GMAC and PCI are stopped by hand.
 - **MMU/PGT assumption**: if 6.18 needed iboot's PGT, it would fault before `paging_init`

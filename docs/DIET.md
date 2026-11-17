@@ -24,11 +24,43 @@ in `package/diet/src/`, laid out as on the target system.
    (ECDSA P-256, 10 years, host name and eth0 address). No key is in the
    image. After a name or address change:
    `/etc/init.d/S50lighttpd newcert` then `restart`.
-2. Over SSH, run `diet-webpass` (user `admin` by default) to
-   choose the interface password (`/etc/lighttpd/htpasswd`). Without
-   this file, all access is refused.
-3. Open `https://<NAS address>/` (port 80 redirects to HTTPS).
+2. Open `https://<NAS address>/` (port 80 redirects to HTTPS).
    Access is limited to private networks.
+3. **First setup**: while `/etc/lighttpd/htpasswd` (the administrator account,
+   user `admin`) does not exist, `/` redirects to `/cgi-bin/setup`, a page served
+   without authentication that asks for the administrator password, the NAS name
+   and, optionally, a root password and an SSH public key (see below). Later:
+   **Settings → SSH access**, or `diet-webpass` over SSH for the web password.
+
+### First setup: how it is protected
+
+- **lighttpd** (`lighttpd.conf`): `auth.require` covers everything except
+  `/webdav` (accounts checked by the WebDAV instance) and exactly the URL
+  `/cgi-bin/setup`, permanently. `/cgi-bin/setup` is a symbolic link to the
+  API, which, under that name, serves only the setup page and its action, and
+  only while `htpasswd` does not exist: the gate is a file test made at every
+  request, not a condition fixed when lighttpd starts, so it closes the moment
+  the account is written, without waiting for anything. Afterwards the URL
+  answers 403 and nothing else of the API is reachable through it.
+- **Redirection** of `/` to the setup page: added to `lighttpd.conf` at start
+  (`include_shell "/etc/init.d/S50lighttpd firstconf"`, only without `htpasswd`,
+  302); the setup restarts lighttpd, which drops it. `mod_redirect` is loaded
+  before `mod_auth` (same request phase, run in order): this also makes port
+  80 redirect before any password is asked.
+- **Race** (two browsers): every field is checked first; the account line is
+  written to a temporary file, then hard-linked to `htpasswd` (`ln` fails if
+  the file exists, atomically): the first request wins, the others get 409 and
+  write nothing; only the winner applies the name, the root password and the key.
+- **CSRF**: the action needs the `X-Diet: 1` header, like the other actions.
+- **Secrets**: passwords travel in the POST body (HTTPS), are hashed with
+  SHA-512 crypt (`mkpasswd`, password on standard input), never logged; the
+  root hash replaces the `root` field of `/etc/shadow` (600, temporary file then
+  `mv`). An SSH key is one line `ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp* <base64>
+  [comment]` (no options such as `command=`), appended once to
+  `/root/.ssh/authorized_keys` (directory 700, file 600). dropbear keeps refusing
+  empty passwords (no `-B`).
+- `POST ?a=ssh_set` (`rootpw`, `key`) does the same from **Settings → SSH
+  access**, authenticated; `GET ?a=sys` gives `rootpw` (0/1) and `keys` (count).
 
 ## What changes compared with the old DIET
 
@@ -57,6 +89,19 @@ Removed: everything specific to X-RAID, Samba 3.6, RAIDiator
 (`zu-raidiator`, `init-weiche`, `install-weiche`), the flash, the LCD screen
 (not on the Duo), `rsyncd`, LVM and `diet-import`.
 
+## SMB3 encryption (Settings page)
+
+"SMB file sharing" card: the **SMB3 encryption** switch writes `smb3 encryption` in
+the `[global]` section of `/etc/ksmbd/ksmbd.conf` (`POST ?a=smb_enc`, `on=0|1`,
+`X-Diet` header): `disabled` (shipped: the 280 MHz CPU encrypts without
+hardware help, which caps transfers far below the disks) or `auto` (a client
+that asks for encryption gets it). Only that line changes (temporary file then
+`mv`, `.bak` copy; comments and share sections kept); a ksmbd.conf without the
+key (older installs: ksmbd default `auto`, shown as on) gets it at the end of
+`[global]`. ksmbd is then restarted (global settings are read at start).
+`server signing = auto` is not touched: Windows 11 24H2 requires signing.
+`GET ?a=sys` gives the value (`smbenc`).
+
 ## Services
 
 "Services" card of the Shares tab (API: `GET ?a=services`,
@@ -72,7 +117,7 @@ Removed: everything specific to X-RAID, Samba 3.6, RAIDiator
 
 State: running or stopped; for MiniDLNA, the number of indexed files
 (audio, video, images) read from its status page `http://127.0.0.1:8200/status` (no
-`sqlite3` on the NAS) and the size of `files.db`.
+`sqlite3` process started) and the size of `files.db`.
 
 Persistence: `SVC_MINIDLNA`, `SVC_AVAHI`, `SVC_RSYNC`, `SVC_WEBDAV`, `SVC_NFS` in
 `/etc/diet.conf` (`0` = stopped, `1` or missing = running). The shipped `diet.conf` sets
@@ -276,6 +321,9 @@ creates a fake root (`DIET_ROOT`) with simulated `/proc`, `/sys` and `/etc`
 (healthy then degraded RAID1, drivetemp, ksmbd.conf, exports), replaces
 the NAS commands with scripts that record their arguments, calls
 the API as lighttpd would and checks the JSON and the written files.
+The first setup is called through its `setup` name: page and action allowed
+without an account, refused once it exists, no password in clear in any file
+of the fake root, three concurrent requests (one winner) repeated six times.
 System updates run against a folder standing for the USB stick (`DIET_STICK`); the
 boot side of the slots (relay-switch, initramfs) is checked by
 `board/readynas-duo-v1/relay/test-slots.sh`.
@@ -286,6 +334,11 @@ boot side of the slots (relay-switch, initramfs) is checked by
 
 - The API runs as root (like the old DIET): protected by the
   password, the private network filter and the `X-Diet` header against CSRF.
+- First setup: until the administrator password is chosen, anyone on the
+  local (private) network who opens the interface first can choose it. Set it
+  up right after the first boot.
+- Removing an SSH key: by hand (`/root/.ssh/authorized_keys`), the interface
+  only adds keys.
 - busybox wget does not check the Telegram certificate.
 - WebDAV: files are created by `nas` (not by the account that
   connects); COPY/MOVE only inside the same space (home
