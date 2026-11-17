@@ -16,6 +16,8 @@
 #                        by test-addon.sh and test-slots.sh [VERSION=x.y KO=/path/padre_relay.ko]
 #   make update-package  system update package for the web interface, from
 #                        output-rapide/images [IMAGES=dir VERSION=x.y]
+#   make stick-image     ready-to-write USB stick image (.img, .img.xz), no root
+#                        needed, from output-rapide/images [IMAGES=dir VERSION=x.y SIZE_MB=1024]
 #   make clean          removes output*/
 #   make buildroot-reset resets buildroot/ to the tag (drops our patches)
 #   make distclean       clean + buildroot-reset + removal of dl/
@@ -101,7 +103,7 @@ toolchain-sdk: | buildroot-patch
 	cd $(TOP)/release && sha256sum $(SDK_NAME).tar.xz $(SDK_NAME)_legal-info.tar > SHA256SUMS
 
 # Relay: boot 6.18 from the stock 2.6.17 kernel (board/readynas-duo-v1/relay/)
-.PHONY: relay relay-addon update-package
+.PHONY: relay relay-addon update-package stick-image
 RELAY := $(TOP)/board/readynas-duo-v1/relay
 relay:
 	$(RELAY)/build-module.sh
@@ -114,6 +116,10 @@ relay-addon:
 IMAGES ?= $(TOP)/output-rapide/images
 update-package:
 	$(TOP)/board/readynas-duo-v1/mkupdate.sh $(IMAGES)
+
+# USB stick image (MBR + ext3 "usbroot"): readynasng-stick-<version>.img(.xz)
+stick-image:
+	$(TOP)/board/readynas-duo-v1/mkstick.sh $(IMAGES)
 
 clean:
 	rm -rf $(O) $(TOP)/output-rapide $(TOP)/output-toolchain $(TOP)/output-relay
