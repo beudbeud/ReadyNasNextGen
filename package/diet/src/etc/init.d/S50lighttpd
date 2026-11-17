@@ -3,6 +3,7 @@
 # Buildroot S50lighttpd to create the certificate at first boot: no private
 # key in the image. Self-signed ECDSA P-256, 10 years, subjectAltName = eth0
 # address + host name (mbedTLS gen_key/cert_write tools).
+# "firstconf" is read by lighttpd.conf (first setup, see there).
 NAME=lighttpd
 DAEMON=/usr/sbin/$NAME
 PID_FILE=/var/run/$NAME.pid
@@ -39,7 +40,7 @@ start() {
 		printf "Creating HTTPS certificate: "
 		make_cert && echo OK || { echo FAIL; return 1; }
 	fi
-	[ -s /etc/lighttpd/htpasswd ] || echo "Web interface: no password set, run diet-webpass"
+	[ -e /etc/lighttpd/htpasswd ] || echo "Web interface: no administrator yet, open https://<NAS address>/ to set it up"
 	printf "Starting lighttpd: "
 	start-stop-daemon -S -q -p $PID_FILE -x $DAEMON -- -f $CONF_FILE && echo OK || echo FAIL
 }
@@ -54,5 +55,10 @@ case "$1" in
 	stop) stop ;;
 	restart|reload) stop; sleep 1; start ;;
 	newcert) rm -f "$KEY" "$CRT"; make_cert ;;	# new name or address, then restart
-	*) echo "Usage: $0 {start|stop|restart|newcert}"; exit 1 ;;
+	# lighttpd.conf (include_shell): while no web administrator exists, the home
+	# page redirects to the first-setup page (served without authentication)
+	firstconf)
+		[ -e /etc/lighttpd/htpasswd ] ||
+			printf '$HTTP["url"] =~ "^/(index\\.html)?$" {\n\turl.redirect-code = 302\n\turl.redirect = ( "" => "/cgi-bin/setup" )\n}\n' ;;
+	*) echo "Usage: $0 {start|stop|restart|newcert|firstconf}"; exit 1 ;;
 esac

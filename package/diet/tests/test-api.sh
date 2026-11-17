@@ -101,7 +101,7 @@ if [ -n "$del" ]; then grep -v "^$1:" "$db" > "$db.t"; mv "$db.t" "$db"
 else IFS= read -r p1; IFS= read -r p2; [ "$p1" = "$p2" ] || exit 1; printf '%s' "$p1" > "$DIET_ROOT/password.log"; echo "$1:SIMULATED" >> "$db"; fi
 EOF
 chmod 755 "$R"/bin/ksmbd.adduser
-for s in S03fan S60nfs S70ksmbd S95diet S50avahi-daemon S51webdav S60minidlnad S61rsyncd; do
+for s in S03fan S60nfs S70ksmbd S95diet S50avahi-daemon S51webdav S60minidlnad S61rsyncd S50lighttpd; do
 	printf '#!/bin/sh\necho "%s $*" >> "$DIET_ROOT/cmd.log"\n' "$s" > "$R/etc/init.d/$s"; chmod 755 "$R/etc/init.d/$s"
 done
 for s in diet-notify diet-alerts; do ln -s "$SRC/usr/sbin/$s" "$R/bin/$s"; done
@@ -134,6 +134,95 @@ json() {	# json 'python expression on j': true if the expression is true
 	printf '%s' "$OUT" | python3 -c "import json,sys; j=json.load(sys.stdin); sys.exit(0 if ($1) else 1)" 2>/dev/null
 }
 enc() { python3 -c 'import sys,urllib.parse; print(urllib.parse.quote_plus(sys.argv[1]))' "$1"; }
+
+# ---------- first setup (/cgi-bin/setup, no web administrator yet) ----------
+# setup METHOD [body] [X-Diet] [Accept-Language]: the API through its "setup" name
+setup() {
+	body=${2:-}
+	raw=$(printf '%s' "$body" | SCRIPT_NAME=/cgi-bin/setup REQUEST_METHOD=$1 QUERY_STRING="${SQ:-}" CONTENT_LENGTH=${#body} \
+		HTTP_X_DIET=${3-1} HTTP_ACCEPT_LANGUAGE=${4:-} REMOTE_ADDR=10.0.0.9 $SH "$SRC/www/cgi-bin/setup")
+	ST=$(printf '%s\n' "$raw" | sed -n 's/^Status: \([0-9]*\).*/\1/p' | head -n 1); ST=${ST:-200}
+	OUT=$(printf '%s\n' "$raw" | tr -d '\r' | sed '1,/^$/d')
+}
+E=$R/etc; HTP=$E/lighttpd/htpasswd
+printf 'root::::::::\nnobody:*:::::::\n' > "$E"/shadow
+APW='Adm1n pw+&%é'; RPW='r00t pw=&x'; KEY1='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl user@pc'
+check "setup: the API has a \"setup\" name (link)" '[ -L "$SRC"/www/cgi-bin/setup ] && [ "$(readlink "$SRC"/www/cgi-bin/setup)" = api ]'
+setup GET
+check "setup, no account: page served without authentication" '[ "$ST" = 200 ] && case "$OUT" in *"<h1>First setup</h1>"*"name=\"pw\""*"name=\"rootpw\""*"name=\"key\""*) true;; *) false;; esac'
+setup GET '' 1 'fr-FR,fr;q=0.9'
+check "setup: page in the browser language (Accept-Language fr)" 'case "$OUT" in *"Première configuration"*) true;; *) false;; esac'
+SQ='a=status' setup GET
+check "setup: no other action reachable through this name (a=status gives the page)" 'case "$OUT" in *"First setup"*) true;; *) false;; esac && case "$OUT" in *uptime*) false;; *) true;; esac'
+SQ='a=reboot' setup POST "pw=$(enc "$APW")" ''
+check "setup POST without X-Diet refused (403), nothing written" '[ "$ST" = 403 ] && [ ! -e "$HTP" ]'
+setup POST 'pw=abc'
+check "setup: password too short refused, nothing written" '[ "$ST" = 400 ] && [ ! -e "$HTP" ]'
+setup POST "pw=$(enc "$APW")&key=$(enc "command=\"sh\" $KEY1")"
+check "setup: key with options refused before anything is written" '[ "$ST" = 400 ] && [ ! -e "$HTP" ] && grep -q "^root::" "$E"/shadow'
+setup POST "pw=$(enc "$APW")&host=Bad_Name"
+check "setup: invalid name refused, nothing written" '[ "$ST" = 400 ] && [ ! -e "$HTP" ]'
+: > "$R"/cmd.log
+setup POST "pw=$(enc "$APW")&host=nas-setup&rootpw=$(enc "$RPW")&key=$(enc "$KEY1
+")"
+check "setup: saved (200)" '[ "$ST" = 200 ]'
+check "setup: admin account in htpasswd (SHA-512, 600, no temporary file left)" 'grep -q "^admin:[\$]6[\$]" "$HTP" && [ "$(wc -l < "$HTP")" = 1 ] && [ "$(stat -c %a "$HTP")" = 600 ] && ! ls "$HTP".* >/dev/null 2>&1'
+H=$(cut -d: -f2- "$HTP"); S=$(echo "$H" | cut -d'$' -f3)
+check "setup: htpasswd hash is the administrator password" '[ "$(printf "%s" "$APW" | openssl passwd -6 -salt "$S" -stdin)" = "$H" ]'
+check "setup: root password in shadow (SHA-512, 600), other lines kept" 'grep -q "^root:[\$]6[\$]" "$E"/shadow && grep -q "^nobody:" "$E"/shadow && [ "$(stat -c %a "$E"/shadow)" = 600 ]'
+check "setup: SSH key in /root/.ssh/authorized_keys (700/600)" '[ "$(cat "$R"/root/.ssh/authorized_keys)" = "$KEY1" ] && [ "$(stat -c %a "$R"/root/.ssh)" = 700 ] && [ "$(stat -c %a "$R"/root/.ssh/authorized_keys)" = 600 ]'
+check "setup: NAS name applied" '[ "$(cat "$E"/hostname)" = nas-setup ] && grep -q "netbios name = NAS-SETUP" "$E"/ksmbd/ksmbd.conf'
+i=0; while [ $i -lt 30 ] && ! grep -q "S50lighttpd restart" "$R"/cmd.log; do sleep 0.2; i=$((i + 1)); done
+check "setup: lighttpd restarted (end of the redirection to the setup page)" 'grep -q "S50lighttpd restart" "$R"/cmd.log'
+check "setup: passwords never logged nor stored in clear" '! grep -rqF "$APW" "$R" && ! grep -rqF "$RPW" "$R" && ! grep -rqF "r00t" "$R" && ! grep -rqF "Adm1n" "$R"'
+cp "$HTP" "$R"/htp.before
+setup GET
+check "setup, account exists: page refused (403), no form" '[ "$ST" = 403 ] && case "$OUT" in *"<form"*) false;; *) true;; esac'
+setup POST "pw=$(enc other-password)&rootpw=$(enc other-password)"
+check "setup, account exists: action refused (403), nothing changed" '[ "$ST" = 403 ] && cmp -s "$HTP" "$R"/htp.before && ! grep -q "other-password" "$E"/shadow'
+# race: several browsers at once, the first one wins, the others get 409 (or 403)
+for n in 1 2 3 4 5 6; do
+	rm -f "$HTP" "$R"/race.*
+	for b in 1 2 3; do
+		( setup POST "pw=browser-$b"; echo "$ST" > "$R/race.$b" ) &
+	done
+	wait
+	W=$(grep -l '^200$' "$R"/race.* | sed 's/.*\.//'); NW=$(echo "$W" | grep -c .)
+	S=$(cut -d'$' -f3 "$HTP")
+	check "setup race $n: one winner, the others refused, htpasswd = winner's password" '[ "$NW" = 1 ] && [ "$(grep -c "^40[39]$" "$R"/race.*  | awk -F: "{ s += \$2 } END { print s }")" = 2 ] && [ "$(wc -l < "$HTP")" = 1 ] && [ "admin:$(printf "%s" "browser-$W" | openssl passwd -6 -salt "$S" -stdin)" = "$(cat "$HTP")" ] && ! ls "$HTP".* >/dev/null 2>&1'
+done
+cp "$R"/htp.before "$HTP"
+# lighttpd: exception limited to /cgi-bin/setup, redirection only without an account
+LC=$SRC/etc/lighttpd/lighttpd.conf
+check "lighttpd.conf: authentication everywhere but /webdav and exactly /cgi-bin/setup" 'grep -qxF "\$HTTP[\"url\"] !~ \"^/(webdav(/|\$)|cgi-bin/setup\$)\" {" "$LC" && [ "$(grep -c "auth.require" "$LC")" = 1 ]'
+check "lighttpd.conf: mod_redirect before mod_auth (port 80 and setup redirections without a password)" '[ "$(grep -n "\"mod_redirect\"" "$LC" | cut -d: -f1)" -lt "$(grep -n "\"mod_auth\"" "$LC" | cut -d: -f1)" ]'
+FC=$(sed "s#/etc/lighttpd/htpasswd#$R/nohtp#g" "$SRC"/etc/init.d/S50lighttpd | sh -s firstconf)
+check "S50lighttpd firstconf, no account: / redirected to /cgi-bin/setup (302)" 'case "$FC" in *"\"^/(index\\.html)?\$\""*"redirect-code = 302"*"\"/cgi-bin/setup\""*) true;; *) false;; esac'
+check "S50lighttpd firstconf, account: nothing" '[ -z "$(sed "s#/etc/lighttpd/htpasswd#$HTP#g" "$SRC"/etc/init.d/S50lighttpd | sh -s firstconf)" ]'
+
+# ---------- SSH access (Settings) ----------
+KEY2='ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTY= other'
+NPW='n3w-root+pw'
+api POST a=ssh_set "rootpw=$(enc "$NPW")&key=$(enc "$KEY2")"
+check "ssh_set: root password changed, key appended" '[ "$ST" = 200 ] && [ "$(grep -c . "$R"/root/.ssh/authorized_keys)" = 2 ] && tail -n 1 "$R"/root/.ssh/authorized_keys | grep -qxF "$KEY2"'
+S=$(grep '^root:' "$E"/shadow | cut -d'$' -f3)
+check "ssh_set: shadow hash is the new password, never logged" '[ "$(grep "^root:" "$E"/shadow | cut -d: -f2)" = "$(printf "%s" "$NPW" | openssl passwd -6 -salt "$S" -stdin)" ] && ! grep -rqF "$NPW" "$R"'
+api POST a=ssh_set "key=$(enc "$KEY2")"
+check "ssh_set: same key not added twice" '[ "$(grep -c . "$R"/root/.ssh/authorized_keys)" = 2 ]'
+for k in "from=\"*\" $KEY2" 'ssh-dss AAAA' 'ssh-ed25519 AAA;reboot' "$KEY1
+$KEY2"; do
+	api POST a=ssh_set "key=$(enc "$k")"
+	check "ssh_set: invalid key refused ($(echo "$k" | head -n 1 | cut -c1-20))" '[ "$ST" = 400 ] && [ "$(grep -c . "$R"/root/.ssh/authorized_keys)" = 2 ]'
+done
+api POST a=ssh_set 'rootpw=abc'
+check "ssh_set: short password refused" '[ "$ST" = 400 ]'
+api POST a=ssh_set ''
+check "ssh_set: nothing to save refused" '[ "$ST" = 400 ]'
+api POST a=ssh_set "rootpw=$(enc "$NPW")" ''
+check "ssh_set without X-Diet refused (403)" '[ "$ST" = 403 ]'
+api GET a=sys
+check "sys: root password set, 2 SSH keys" "json 'j[\"rootpw\"]==1 and j[\"keys\"]==2'"
+echo readynas > "$E"/hostname
 
 # ---------- status ----------
 api GET a=status
@@ -289,6 +378,33 @@ check "API error in French (l=fr)" '[ "$ST" = 400 ] && [ "$OUT" = "Nom du NAS in
 api POST 'a=sys_set&l=de' 'host=Bad_Name'
 check "API error in German (l=de)" '[ "$ST" = 400 ] && [ "$OUT" = "Ungültiger NAS-Name: Kleinbuchstaben, Ziffern und Bindestriche" ]'
 
+# ---------- SMB3 encryption (smb3 encryption of [global], ksmbd.conf) ----------
+K=$R/etc/ksmbd/ksmbd.conf
+printf '\n[photos]\n\tpath = /c/photos\n\tsmb3 encryption = disabled\n' >> "$K"	# a share line that must stay
+shares() { awk '/^[ \t]*\[/ { g = (tolower($0) ~ /^[ \t]*\[global\]/) } !g' "$K"; }
+SH0=$(shares)
+api GET a=sys
+check "smb_enc: shipped ksmbd.conf read (disabled)" "json 'j[\"smbenc\"]==\"disabled\"'"
+: > "$R"/cmd.log
+api POST a=smb_enc 'on=1'
+i=0; while [ $i -lt 20 ] && ! grep -q "S70ksmbd restart" "$R"/cmd.log; do sleep 0.1; i=$((i + 1)); done
+check "smb_enc on: auto in [global], once, comment and signing kept, ksmbd restarted" '[ "$ST" = 200 ] && [ "$(grep -c "smb3 encryption = auto" "$K")" = 1 ] && grep -q "server signing = auto" "$K" && grep -q "; SMB3 encryption is done" "$K" && grep -q "S70ksmbd restart" "$R"/cmd.log && [ ! -e "$K".tmp ]'
+check "smb_enc on: share sections untouched" '[ "$(shares)" = "$SH0" ]'
+api GET a=sys
+check "smb_enc: read back (auto)" "json 'j[\"smbenc\"]==\"auto\"'"
+sed -i '/^[ \t]*smb3 encryption = auto/d' "$K"
+api GET a=sys
+check "smb_enc: key missing (older install) = ksmbd default auto" "json 'j[\"smbenc\"]==\"auto\"'"
+api POST a=smb_enc 'on=0'
+check "smb_enc off: missing key added inside [global], shares untouched" '[ "$ST" = 200 ] && awk "/^\[global\]/ { g = 1; next } /^[ \t]*\[/ { g = 0 } g && /smb3 encryption = disabled/ { f = 1 } END { exit !f }" "$K" && [ "$(shares)" = "$SH0" ]'
+api GET a=sys
+check "smb_enc: read back (disabled)" "json 'j[\"smbenc\"]==\"disabled\"'"
+api POST a=smb_enc 'on=mandatory'
+check "smb_enc: invalid value refused" '[ "$ST" = 400 ]'
+api POST a=smb_enc 'on=1' ''
+check "smb_enc without X-Diet refused (403)" '[ "$ST" = 403 ] && grep -q "smb3 encryption = disabled" "$K"'
+awk '/^\[photos\]/ { exit } { print }' "$K" | sed '$ { /^$/d }' > "$K".t && mv "$K".t "$K"
+
 # ---------- services : MiniDLNA, Avahi, rsync, WebDAV ----------
 api GET a=services
 check "diet.conf: NFS, MiniDLNA, Avahi, rsync, WebDAV off by default" '[ "$(echo "$SVC_DEFAULTS" | grep -c "=0$")" = 5 ] && [ "$(echo "$SVC_DEFAULTS" | grep -c .)" = 5 ]'
@@ -349,7 +465,7 @@ api POST a=svc_set 's=rsync&on=0' ''
 check "svc_set without X-Diet refused (403)" '[ "$ST" = 403 ]'
 api POST a=svc_set 's=webdav&on=1'
 check "svc_set webdav 1: instance started, announcement back" 'grep -q "S51webdav start" "$R"/cmd.log && [ -e "$R"/etc/avahi/services/webdav.service ]'
-check "lighttpd.conf: /webdav proxied to 127.0.0.1:8081, outside the interface account" 'grep -qF "\"host\" => \"127.0.0.1\", \"port\" => 8081" "$SRC"/etc/lighttpd/lighttpd.conf && grep -qF "\$HTTP[\"url\"] !~ \"^/webdav(/|\$)\" {" "$SRC"/etc/lighttpd/lighttpd.conf'
+check "lighttpd.conf: /webdav proxied to 127.0.0.1:8081, outside the interface account" 'grep -qF "\"host\" => \"127.0.0.1\", \"port\" => 8081" "$SRC"/etc/lighttpd/lighttpd.conf && grep -qF "\$HTTP[\"url\"] !~ \"^/(webdav(/|\$)|" "$SRC"/etc/lighttpd/lighttpd.conf'
 # init scripts: a service set to 0 in diet.conf does not start
 for s in S50avahi-daemon:AVAHI S51webdav:WEBDAV S60minidlnad:MINIDLNA S61rsyncd:RSYNC S60nfs:NFS; do
 	f=$BOARD/etc/init.d/${s%%:*}; [ -e "$f" ] || f=$SRC/etc/init.d/${s%%:*}; : > "$R"/cmd.log

@@ -226,6 +226,22 @@ dialog h3{margin:0 0 8px;font-size:16px}
       <p class="small" style="margin-bottom:0">An alert is sent when the RAID degrades, a disk leaves the RAID or reports bad sectors, on overheating or a stopped fan, and again on recovery.</p>
     </div>
     <div class="card" style="max-width:620px;margin-top:12px">
+      <h2>SMB file sharing</h2>
+      <label><input type="checkbox" id="smbenc"> SMB3 encryption</label>
+      <p class="small" style="margin-bottom:0">Off by default: this NAS encrypts without hardware help, which slows transfers a lot. Only useful on a network you do not trust; when on, a client that asks for encryption gets it. Signing stays automatic (Windows 11 24H2 requires it). SMB restarts when this is changed.</p>
+    </div>
+    <div class="card" style="max-width:620px;margin-top:12px">
+      <h2>SSH access</h2>
+      <div id="sshi" class="small"></div>
+      <form class="cfg sys" id="ssh">
+        <label>Root password<small>empty = unchanged</small></label><input name="rootpw" type="password" minlength="6" maxlength="128" autocomplete="new-password">
+        <label>Again</label><input name="rootpw2" type="password" autocomplete="new-password">
+        <label>Add an SSH public key<small>for example ~/.ssh/id_ed25519.pub</small></label><textarea class="inp" name="key" rows="3" spellcheck="false" placeholder="ssh-ed25519 AAAA… user@pc" style="width:230px;font:12px ui-monospace,monospace"></textarea>
+        <div style="grid-column:1/-1;margin-top:8px"><button class="b pri" type="submit">Save</button></div>
+      </form>
+      <p class="small" style="margin-bottom:0">User root. SSH refuses an empty password: set a password or add a key. Keys are added to /root/.ssh/authorized_keys; to remove one, edit that file over SSH.</p>
+    </div>
+    <div class="card" style="max-width:620px;margin-top:12px">
       <h2>System update</h2>
       <div id="updi" class="small"></div>
       <div class="btns" id="updb" style="margin-top:8px"></div>
@@ -571,6 +587,20 @@ const I18N = {
   "Remounting the /c volume…": ["Remontage du volume /c…", "Volume /c wird neu eingehängt …"],
   "unclean shutdown under Linux: check the mirror": ["arrêt brutal sous Linux : vérifier le miroir", "harter Abbruch unter Linux: Spiegel prüfen"],
   "unclean RAIDiator shutdown, mirror checked since": ["arrêt brutal de RAIDiator, miroir vérifié depuis", "harter Abbruch unter RAIDiator, Spiegel seither geprüft"],
+  "SMB file sharing": ["Partage de fichiers SMB", "SMB-Dateifreigabe"],
+  "SMB3 encryption": ["Chiffrement SMB3", "SMB3-Verschlüsselung"],
+  "Off by default: this NAS encrypts without hardware help, which slows transfers a lot. Only useful on a network you do not trust; when on, a client that asks for encryption gets it. Signing stays automatic (Windows 11 24H2 requires it). SMB restarts when this is changed.": ["Désactivé par défaut : ce NAS chiffre sans aide matérielle, ce qui ralentit beaucoup les transferts. Utile seulement sur un réseau non fiable ; activé, un client qui demande le chiffrement l’obtient. La signature reste automatique (Windows 11 24H2 l’exige). SMB redémarre à chaque changement.", "Standardmäßig aus: dieses NAS verschlüsselt ohne Hardwarehilfe, was Übertragungen stark bremst. Nur in einem nicht vertrauenswürdigen Netz sinnvoll; eingeschaltet bekommt ein Client, der Verschlüsselung verlangt, sie auch. Die Signierung bleibt automatisch (Windows 11 24H2 verlangt sie). SMB startet bei jeder Änderung neu."],
+  "SSH access": ["Accès SSH", "SSH-Zugang"],
+  "Root password": ["Mot de passe root", "Root-Passwort"],
+  "empty = unchanged": ["vide = inchangé", "leer = unverändert"],
+  "Again": ["Encore une fois", "Nochmal"],
+  "Add an SSH public key": ["Ajouter une clé publique SSH", "Öffentlichen SSH-Schlüssel hinzufügen"],
+  "for example ~/.ssh/id_ed25519.pub": ["par exemple ~/.ssh/id_ed25519.pub", "zum Beispiel ~/.ssh/id_ed25519.pub"],
+  "User root. SSH refuses an empty password: set a password or add a key. Keys are added to /root/.ssh/authorized_keys; to remove one, edit that file over SSH.": ["Utilisateur root. SSH refuse un mot de passe vide : définir un mot de passe ou ajouter une clé. Les clés sont ajoutées à /root/.ssh/authorized_keys ; pour en retirer une, modifier ce fichier par SSH.", "Benutzer root. SSH lehnt ein leeres Passwort ab: ein Passwort setzen oder einen Schlüssel hinzufügen. Schlüssel kommen in /root/.ssh/authorized_keys; zum Entfernen diese Datei per SSH bearbeiten."],
+  "Root password set": ["Mot de passe root défini", "Root-Passwort gesetzt"],
+  "No root password": ["Pas de mot de passe root", "Kein Root-Passwort"],
+  "{0} authorized SSH keys": ["{0} clés SSH autorisées", "{0} autorisierte SSH-Schlüssel"],
+  "The two entries differ": ["Les deux saisies diffèrent", "Die Eingaben sind ungleich"],
   "migration to md in progress": ["migration vers md en cours", "Umstellung auf md läuft"]
 };
 function t(s, ...a){
@@ -885,6 +915,8 @@ async function loadSys(){
     sysField('tz').innerHTML = z.map(o=>`<option value="${esc(o[1])}">${esc(t(o[0]))}</option>`).join('');
     for(const k of ['host','lang','tz','net','ip','mask','gw','dns','tgchat']) sysField(k).value = c[k] ?? '';
     sysField('tgtoken').value = '';
+    sshInfo(c);
+    $('#smbenc').checked = c.smbenc !== 'disabled';
     $('#tgs').textContent = c.tgset ? t('a token is saved; leave empty to keep it') : t('from @BotFather');
     sysMode();
   }catch(e){ toast(t('Error: {0}', e.message)); }
@@ -895,6 +927,25 @@ $('#sys').onsubmit = async ev=>{
   if(sysField('net').value==='static' && !confirm(t('Switch to a static address? A wrong address would make the NAS unreachable after the reboot.'))) return;
   const body = ['host','lang','tz','net','ip','mask','gw','dns','tgtoken','tgchat'].map(k=>k+'='+encodeURIComponent(sysField(k).value.trim())).join('&');
   try{ const r = await post('sys_set', body); toast(r.msg); loadSys(); }catch(e){ toast(t('Not saved: {0}', e.message)); }
+};
+// SMB3 encryption (smb3 encryption of [global] in ksmbd.conf: disabled / auto)
+$('#smbenc').onchange = async ev=>{
+  const on = ev.target.checked;
+  try{ const r = await post('smb_enc', 'on='+(on ? 1 : 0)); toast(r.msg); }
+  catch(e){ ev.target.checked = !on; toast(t('Not saved: {0}', e.message)); }
+};
+// SSH access (root password, authorized keys)
+function sshInfo(c){
+  $('#sshi').textContent = (c.rootpw ? t('Root password set') : t('No root password')) + ' · ' + t('{0} authorized SSH keys', c.keys);
+}
+$('#ssh').onsubmit = async ev=>{
+  ev.preventDefault();
+  const f = ev.target;
+  if(f.rootpw.value !== f.rootpw2.value){ toast(t('The two entries differ')); return; }
+  try{
+    const r = await post('ssh_set', 'rootpw='+encodeURIComponent(f.rootpw.value)+'&key='+encodeURIComponent(f.key.value.trim()));
+    toast(r.msg); f.reset(); loadSys();
+  }catch(e){ toast(t('Not saved: {0}', e.message)); }
 };
 $('#tgtest').onclick = async ev=>{
   ev.target.disabled = true;

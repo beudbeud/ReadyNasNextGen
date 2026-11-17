@@ -7,7 +7,10 @@
 #        |svc_set|dlna_set|dlna_scan|rsync_pw|rsync_c
 #        |raid_verify|xraid_rw
 #        |update_upload (body: the package) |update_url|update_switch|update_cancel
+#        |ssh_set|smb_enc
 #        (X-Diet: 1 header required)
+# /cgi-bin/setup (symbolic link to this script): first setup, without
+# authentication, only while no web administrator account exists (see first_setup).
 # Message language: &l=fr|de|en.
 # Testing on a PC: DIET_ROOT=/path/to/fake-root prefixes every file read or
 # written (/proc, /sys, /etc, /var) and puts $DIET_ROOT/bin first in PATH
@@ -20,7 +23,8 @@ export PATH=${R:+$R/bin:}/bin:/sbin:/usr/bin:/usr/sbin
 # Fast path here, before ash has to read the rest of the script: shell builtins
 # only (and cat, a busybox "nofork" applet), no process.
 C=$R/var/run/diet
-if [ "$REQUEST_METHOD" = GET ] && [ -z "${DIET_COLLECT:-}" ]; then
+case ${SCRIPT_NAME:-} in */setup) SETUP=1 ;; *) SETUP= ;; esac
+if [ "$REQUEST_METHOD" = GET ] && [ -z "${DIET_COLLECT:-}" ] && [ -z "$SETUP" ]; then
   q="&$QUERY_STRING&"; A=${q#*&a=}; [ "$A" = "$q" ] && A= || A=${A%%&*}; A=${A:-status}
   case $A in status|all|services|shares|nfs|sys|users|config|storage)
     if read -r P 2>/dev/null < "$C/pid" && kill -0 "$P" 2>/dev/null; then
@@ -308,6 +312,39 @@ EOF
 
 ksmbd_reload() { ksmbd.control -r >/dev/null 2>&1; }
 
+# SMB3 encryption: "smb3 encryption" of [global] in ksmbd.conf, disabled (the
+# shipped value: AES by the 280 MHz CPU caps the throughput) or auto (encrypted
+# when the client asks). Missing (older installs) = the ksmbd default, auto.
+# Signing ("server signing = auto", required by Windows 11 24H2) is not touched.
+smbenc_get() {
+  SMBENC=auto; g=
+  [ -r "$KCONF" ] && while IFS= read -r l; do
+    l=${l#"${l%%[![:space:]]*}"}
+    case $l in
+      "["*) case $l in "[global]"*|"[GLOBAL]"*|"[Global]"*) g=1;; *) g=;; esac ;;
+      "smb3 encryption"*=*) [ -n "$g" ] && { v=${l#*=}; v=${v#"${v%%[![:space:]]*}"}; SMBENC=${v%%[[:space:];]*}; } ;;
+    esac
+  done < "$KCONF"
+}
+smb_enc() {
+  on=""; for kv in $(echo "$BODY" | tr '&' ' '); do [ "${kv%%=*}" = on ] && on=${kv#*=}; done
+  case "$on" in 0) v=disabled;; 1) v=auto;; *) fail "400 Bad Request" "$(tx "Invalid setting" "Réglage invalide" "Ungültige Einstellung")";; esac
+  [ -f "$KCONF" ] || printf '[global]\n\tnetbios name = READYNAS\n' > "$KCONF"
+  grep -qi '^[[:space:]]*\[global\]' "$KCONF" || { printf '[global]\n' | cat - "$KCONF" > "$KCONF.tmp" && mv "$KCONF.tmp" "$KCONF"; }
+  # the key of [global] replaced, or added at the end of [global]; the rest kept as is
+  awk -v v="$v" '
+    function put() { if (g && !done) { print "\tsmb3 encryption = " v; done = 1 } }
+    /^[ \t]*\[/ { put(); l = tolower($0); gsub(/^[ \t]+|[ \t]+$/, "", l); g = (l == "[global]") }
+    g && tolower($0) ~ /^[ \t]*smb3[ \t]+encryption[ \t]*=/ { put(); next }
+    { print }
+    END { put() }' "$KCONF" > "$KCONF.tmp" || { rm -f "$KCONF.tmp"; fail "500 Internal Server Error" "$(tx "Cannot write" "Écriture impossible" "Schreiben nicht möglich")"; }
+  cp "$KCONF" "$KCONF.bak"; mv "$KCONF.tmp" "$KCONF"
+  bg "$INITD/S70ksmbd restart"   # global settings are read when ksmbd starts
+  note "SMB: smb3 encryption = $v"
+  [ "$v" = auto ] && ok "$(tx "SMB3 encryption allowed (when the client asks); SMB restarts" "Chiffrement SMB3 autorisé (si le client le demande) ; SMB redémarre" "SMB3-Verschlüsselung erlaubt (wenn der Client sie verlangt); SMB startet neu")" \
+    || ok "$(tx "SMB3 encryption off; SMB restarts" "Chiffrement SMB3 désactivé ; SMB redémarre" "SMB3-Verschlüsselung aus; SMB startet neu")"
+}
+
 shares_change() {
   name=""; ro=""; guest=""
   for kv in $(echo "$BODY" | tr '&' ' '); do
@@ -517,8 +554,7 @@ users_change() {
         fail "500 Internal Server Error" "$(tx "ksmbd.adduser refused the password of $name" "ksmbd.adduser a refusé le mot de passe de $name" "ksmbd.adduser hat das Passwort von $name abgelehnt")"
       fi
       # same password for WebDAV (SHA-512 crypt, read by lighttpd as nas) and rsync
-      H=$(printf '%s\n' "$pw" | mkpasswd -m sha512 -S "$(head -c 12 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 16)" -P 0) && [ -n "$H" ] \
-        || fail "500 Internal Server Error" "$(tx "mkpasswd failed" "mkpasswd a échoué" "mkpasswd fehlgeschlagen")"
+      pwhash "$pw"
       setline "$HTUSERS" "$name" "$H" 640; chown root:nas "$HTUSERS" 2>/dev/null
       setline "$SECRETS" "$name" "$pw" 600
       [ -n "$NEW" ] && MSG="$(tx "User $name created" "Utilisateur $name créé" "Benutzer $name angelegt")" || MSG="$(tx "Password of $name changed" "Mot de passe de $name modifié" "Passwort von $name geändert")" ;;
@@ -640,9 +676,27 @@ EOF
   jstr "$TG_CHAT"; TGC=$J
   [ -n "$TG_TOKEN" ] && tg=1 || tg=0
   for v in NET IPADDR NETMASK GATEWAY DNS CIP CMASK CGW CDNS; do eval "jstr \"\$$v\"; $v=\$J"; done
-  printf '{"host":"%s","lang":"%s","tz":"%s","net":"%s","ip":"%s","mask":"%s","gw":"%s","dns":"%s","tgset":%d,"tgchat":"%s"}\n' \
+  smbenc_get; jstr "$SMBENC"; SMBENC=$J
+  # SSH: root password set (a hash in shadow), number of authorized keys
+  RPW=0; [ -r "$ETC/shadow" ] && while IFS=: read -r u h _; do [ "$u" = root ] && { case $h in \$*) RPW=1;; esac; break; }; done < "$ETC/shadow"
+  NK=0; [ -r "$SSHDIR/authorized_keys" ] && while read -r l; do case $l in ssh-*|ecdsa-*) NK=$((NK + 1));; esac; done < "$SSHDIR/authorized_keys"
+  printf '{"host":"%s","lang":"%s","tz":"%s","net":"%s","ip":"%s","mask":"%s","gw":"%s","dns":"%s","tgset":%d,"tgchat":"%s","rootpw":%d,"keys":%d,"smbenc":"%s"}\n' \
     "$HN" "$SL" "$TZV" "$NET" "${IPADDR:-$CIP}" "${NETMASK:-$CMASK}" \
-    "${GATEWAY:-$CGW}" "${DNS:-$CDNS}" "$tg" "$TGC"
+    "${GATEWAY:-$CGW}" "${DNS:-$CDNS}" "$tg" "$TGC" "$RPW" "$NK" "$SMBENC"
+}
+
+host_ok() {
+  case "$1" in ''|-*|*[!a-z0-9-]*) fail "400 Bad Request" "$(tx "Invalid NAS name: lowercase letters, digits and dashes" "Nom du NAS invalide : minuscules, chiffres et tirets" "Ungültiger NAS-Name: Kleinbuchstaben, Ziffern und Bindestriche")";; esac
+  [ ${#1} -le 15 ] || fail "400 Bad Request" "$(tx "NAS name too long (15 characters max.)" "Nom du NAS trop long (15 caractères au plus)" "NAS-Name zu lang (höchstens 15 Zeichen)")"
+}
+host_set() {
+  OLD=$(cat "$ETC/hostname" 2>/dev/null)
+  [ "$1" != "$OLD" ] || return 0
+  echo "$1" > "$ETC/hostname"
+  sed -i "s/^\([ \t]*netbios name[ \t]*=\).*/\1 $(echo "$1" | tr 'a-z' 'A-Z')/" "$KCONF" 2>/dev/null
+  hostname "$1"
+  bg "$INITD/S70ksmbd restart"   # ksmbd only rereads the NetBIOS name at startup
+  svc_on AVAHI && bg "$INITD/S50avahi-daemon restart"   # avahi too (<name>.local)
 }
 
 sys_set() {
@@ -652,8 +706,7 @@ sys_set() {
     k=${kv%%=*}
     case "$k" in host|lang|tz|net|ip|mask|gw|dns|tgtoken|tgchat) v=$(urldec "${kv#*=}"); eval "$k=\$v";; esac
   done
-  case "$host" in ''|-*|*[!a-z0-9-]*) fail "400 Bad Request" "$(tx "Invalid NAS name: lowercase letters, digits and dashes" "Nom du NAS invalide : minuscules, chiffres et tirets" "Ungültiger NAS-Name: Kleinbuchstaben, Ziffern und Bindestriche")";; esac
-  [ ${#host} -le 15 ] || fail "400 Bad Request" "$(tx "NAS name too long (15 characters max.)" "Nom du NAS trop long (15 caractères au plus)" "NAS-Name zu lang (höchstens 15 Zeichen)")"
+  host_ok "$host"
   case "$lang" in ''|fr|de|en) ;; *) fail "400 Bad Request" "$(tx "Invalid system language" "Langue du système invalide" "Ungültige Systemsprache")";; esac
   case "$tz" in ''|*[!A-Za-z0-9,./+:\<\>-]*) fail "400 Bad Request" "$(tx "Invalid time zone" "Fuseau horaire invalide" "Ungültige Zeitzone")";; esac
   [ ${#tz} -le 60 ] || fail "400 Bad Request" "$(tx "Invalid time zone" "Fuseau horaire invalide" "Ungültige Zeitzone")"
@@ -698,16 +751,168 @@ sys_set() {
     echo "$lang" > "$ETC/diet-lang"
     "$INITD/S95diet" restart-hwmon >/dev/null 2>&1   # the monitor rereads the language
   fi
-  OLD=$(cat "$ETC/hostname" 2>/dev/null)
-  if [ "$host" != "$OLD" ]; then
-    echo "$host" > "$ETC/hostname"
-    sed -i "s/^\([ \t]*netbios name[ \t]*=\).*/\1 $(echo "$host" | tr 'a-z' 'A-Z')/" "$KCONF" 2>/dev/null
-    hostname "$host"
-    bg "$INITD/S70ksmbd restart"   # ksmbd only rereads the NetBIOS name at startup
-    svc_on AVAHI && bg "$INITD/S50avahi-daemon restart"   # avahi too (<name>.local)
-  fi
+  host_set "$host"
   note "System settings changed"
   ok "$(tx "Saved. The name and time zone apply now; the network at the next reboot." "Enregistré. Le nom et le fuseau horaire sont appliqués tout de suite ; le réseau au prochain redémarrage." "Gespeichert. Name und Zeitzone gelten sofort, das Netzwerk ab dem nächsten Neustart.")"
+}
+
+# --- Passwords and SSH access -----------------------------------------------------
+# Passwords: 6 to 128 characters, one line; hashed with SHA-512 crypt (password on
+# standard input, never on a command line), never logged.
+pw_ok() {
+  [ ${#1} -ge 6 ] || fail "400 Bad Request" "$(tx "Password too short (6 characters min.)" "Mot de passe trop court (6 caractères au moins)" "Passwort zu kurz (mindestens 6 Zeichen)")"
+  [ ${#1} -le 128 ] && [ "$(printf '%s' "$1" | wc -l)" -eq 0 ] || fail "400 Bad Request" "$(tx "Invalid password" "Mot de passe invalide" "Ungültiges Passwort")"
+}
+# pwhash password: SHA-512 crypt in $H
+pwhash() {
+  H=$(printf '%s\n' "$1" | mkpasswd -m sha512 -S "$(head -c 12 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 16)" -P 0) && [ -n "$H" ] \
+    || fail "500 Internal Server Error" "$(tx "mkpasswd failed" "mkpasswd a échoué" "mkpasswd fehlgeschlagen")"
+}
+# SSH (dropbear, no -B: an empty password is refused): root password in /etc/shadow,
+# public keys in /root/.ssh/authorized_keys (700/600).
+SSHDIR=$R/root/.ssh
+# key_ok text: one public key "type base64 [comment]" (no options such as command=),
+# normalised in $KEY
+key_ok() {
+  KEY=
+  case $1 in *"$NL"*|*[[:cntrl:]]*) return 1;; esac
+  [ ${#1} -le 3000 ] || return 1
+  set -f; set -- $1; set +f
+  case $1 in ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521) ;; *) return 1;; esac
+  case ${2:-} in ''|*[!A-Za-z0-9+/=]*) return 1;; esac
+  KEY="$1 $2"; shift 2; [ $# -gt 0 ] && KEY="$KEY $*"
+  return 0
+}
+# ssh_check rootpw key: validation only (nothing written)
+ssh_check() {
+  [ -z "$1" ] || pw_ok "$1"
+  [ -z "$2" ] || key_ok "$2" || fail "400 Bad Request" "$(tx "Invalid SSH public key: one line starting with ssh-ed25519, ssh-rsa or ecdsa-sha2-…" "Clé publique SSH invalide : une ligne commençant par ssh-ed25519, ssh-rsa ou ecdsa-sha2-…" "Ungültiger öffentlicher SSH-Schlüssel: eine Zeile, die mit ssh-ed25519, ssh-rsa oder ecdsa-sha2-… beginnt")"
+}
+# ssh_apply rootpw key (already checked): message in $SMSG
+ssh_apply() {
+  SMSG=
+  if [ -n "$1" ]; then
+    pwhash "$1"
+    ( umask 077; awk -F: -v OFS=: -v h="$H" '$1 == "root" { $2 = h; f = 1 } { print } END { exit !f }' "$ETC/shadow" > "$ETC/shadow.tmp" ) \
+      && mv "$ETC/shadow.tmp" "$ETC/shadow" \
+      || { rm -f "$ETC/shadow.tmp"; fail "500 Internal Server Error" "$(tx "Cannot write the root password" "Écriture du mot de passe root impossible" "Root-Passwort kann nicht geschrieben werden")"; }
+    note "SSH: root password changed"; SMSG="$(tx "root password set" "mot de passe root enregistré" "Root-Passwort gesetzt")"
+  fi
+  if [ -n "$2" ]; then
+    key_ok "$2"; AK=$SSHDIR/authorized_keys
+    mkdir -p "$SSHDIR" && chmod 700 "$SSHDIR" || fail "500 Internal Server Error" "$(tx "Cannot write" "Écriture impossible" "Schreiben nicht möglich")"
+    grep -qxF "$KEY" "$AK" 2>/dev/null || ( umask 077; echo "$KEY" >> "$AK" ) || fail "500 Internal Server Error" "$(tx "Cannot write" "Écriture impossible" "Schreiben nicht möglich")"
+    chmod 600 "$AK"
+    note "SSH: public key added (${KEY%% *})"; SMSG="$SMSG${SMSG:+, }$(tx "SSH key added" "clé SSH ajoutée" "SSH-Schlüssel hinzugefügt")"
+  fi
+}
+# form fields of $BODY: field name -> decoded value in $FV
+field() { FV=; for kv in $BODY; do [ "${kv%%=*}" = "$1" ] && FV=$(urldec "${kv#*=}"); done; }
+ssh_set() {
+  set -f; BODY=$(echo "$BODY" | tr '&' ' ')
+  field rootpw; rp=$FV; field key; k=$(printf '%s' "$FV" | tr -d '\r'); set +f
+  [ -n "$rp$k" ] || fail "400 Bad Request" "$(tx "Nothing to save: enter a password or a key" "Rien à enregistrer : saisir un mot de passe ou une clé" "Nichts zu speichern: Passwort oder Schlüssel eingeben")"
+  ssh_check "$rp" "$k"; ssh_apply "$rp" "$k"
+  ok "$(tx "Saved" "Enregistré" "Gespeichert"): $SMSG"
+}
+
+# --- First setup (/cgi-bin/setup) ---------------------------------------------------
+# A new install has no web administrator (/etc/lighttpd/htpasswd) and an empty root
+# password. lighttpd.conf exempts the URL /cgi-bin/setup (only it) from
+# authentication; the gate is here: the page and the action exist only while
+# htpasswd does not. The account file is written aside, then hard-linked into place
+# (link() fails if the file exists: of two browsers, the first one wins, atomically),
+# and only the winner applies the name, the root password and the SSH key.
+# Then lighttpd is restarted, which drops the redirection of / to this page.
+HTP=$ETC/lighttpd/htpasswd
+setup_page() {
+  HN=; read -r HN 2>/dev/null < "$ETC/hostname"; case $HN in *[!a-z0-9-]*) HN=;; esac
+  hdr 'text/html; charset=utf-8'
+  cat <<EOF
+<!doctype html>
+<html lang="$L"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>$(tx "First setup" "Première configuration" "Ersteinrichtung")</title>
+<style>
+:root{--bg:#eef0ec;--panel:#fff;--ink:#1d2321;--mute:#68716d;--line:#d9ddd8;--accent:#2f6fd0;--bad:#d23c3c;--ok:#2f9e5b}
+@media (prefers-color-scheme:dark){:root{--bg:#131615;--panel:#1c201f;--ink:#e4e8e5;--mute:#8e9893;--line:#2c3230;--accent:#6aa1ff}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,sans-serif}
+main{max-width:560px;margin:24px auto;padding:0 16px}.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+h1{font-size:20px;margin:0 0 4px}h2{font-size:13px;text-transform:uppercase;letter-spacing:.8px;color:var(--mute);margin:18px 0 8px}
+label{display:block;margin:10px 0 4px}small{color:var(--mute);display:block;font-size:12.5px}
+input,textarea{width:100%;font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink)}
+textarea{font:12.5px ui-monospace,monospace;min-height:70px}
+button{margin-top:16px;font:inherit;background:var(--accent);color:#fff;border:0;border-radius:8px;padding:9px 18px;cursor:pointer}
+#msg{margin-top:12px}.bad{color:var(--bad)}.ok{color:var(--ok)}
+</style></head><body><main><div class="card">
+<h1>$(tx "First setup" "Première configuration" "Ersteinrichtung")</h1>
+<small>$(tx "This page is shown once, until the administrator password is saved. Then the interface asks for it (user admin)." "Cette page n’apparaît qu’une fois, jusqu’à l’enregistrement du mot de passe administrateur. Ensuite l’interface le demande (utilisateur admin)." "Diese Seite erscheint nur einmal, bis das Administratorpasswort gespeichert ist. Danach fragt die Oberfläche danach (Benutzer admin).")</small>
+<form id="f">
+<h2>$(tx "Web interface" "Interface web" "Web-Oberfläche")</h2>
+<label>$(tx "NAS name" "Nom du NAS" "NAS-Name")<small>$(tx "lowercase letters, digits and dashes, 15 max." "minuscules, chiffres et tirets, 15 au plus" "Kleinbuchstaben, Ziffern und Bindestriche, höchstens 15")</small></label>
+<input name="host" value="$HN" maxlength="15" pattern="[a-z0-9][a-z0-9\-]*" required>
+<label>$(tx "Administrator password (user admin)" "Mot de passe administrateur (utilisateur admin)" "Administratorpasswort (Benutzer admin)")<small>$(tx "6 characters min." "6 caractères au moins" "mindestens 6 Zeichen")</small></label>
+<input name="pw" type="password" minlength="6" maxlength="128" autocomplete="new-password" required>
+<label>$(tx "Again" "Encore une fois" "Nochmal")</label><input name="pw2" type="password" autocomplete="new-password" required>
+<h2>$(tx "SSH access (root)" "Accès SSH (root)" "SSH-Zugang (root)")</h2>
+<small>$(tx "Optional, can be set later in Settings. Without a password or a key, SSH refuses root." "Facultatif, réglable plus tard dans Réglages. Sans mot de passe ni clé, SSH refuse root." "Optional, später unter Einstellungen möglich. Ohne Passwort oder Schlüssel lehnt SSH root ab.")</small>
+<label>$(tx "Root password" "Mot de passe root" "Root-Passwort")</label><input name="rootpw" type="password" minlength="6" maxlength="128" autocomplete="new-password">
+<label>$(tx "Again" "Encore une fois" "Nochmal")</label><input name="rootpw2" type="password" autocomplete="new-password">
+<label>$(tx "SSH public key" "Clé publique SSH" "Öffentlicher SSH-Schlüssel")<small>$(tx "contents of ~/.ssh/id_ed25519.pub, for example" "contenu de ~/.ssh/id_ed25519.pub, par exemple" "z. B. Inhalt von ~/.ssh/id_ed25519.pub")</small></label>
+<textarea name="key" spellcheck="false" placeholder="ssh-ed25519 AAAA… user@pc"></textarea>
+<button type="submit">$(tx "Save" "Enregistrer" "Speichern")</button>
+<div id="msg"></div>
+</form></div></main>
+<script>
+const f = document.getElementById('f'), m = document.getElementById('msg');
+const say = (c, s) => { m.className = c; m.textContent = s; };
+f.onsubmit = async ev => {
+  ev.preventDefault();
+  if(f.pw.value !== f.pw2.value || f.rootpw.value !== f.rootpw2.value) return say('bad', '$(tx "The two entries differ" "Les deux saisies diffèrent" "Die Eingaben sind ungleich")');
+  const body = ['host', 'pw', 'rootpw', 'key'].map(k => k + '=' + encodeURIComponent(f[k].value.trim())).join('&');
+  f.querySelector('button').disabled = true;
+  try{
+    const r = await fetch('/cgi-bin/setup?l=$L', {method:'POST', headers:{'X-Diet':'1', 'Content-Type':'application/x-www-form-urlencoded'}, body});
+    const t = await r.text();
+    if(!r.ok) throw new Error(t.trim());
+    say('ok', JSON.parse(t).msg);
+    setTimeout(() => location.replace('/'), 4000);
+  }catch(e){ say('bad', e.message); f.querySelector('button').disabled = false; }
+};
+</script></body></html>
+EOF
+}
+first_setup() {
+  qp l; [ -n "$QP" ] || case ${HTTP_ACCEPT_LANGUAGE:-} in fr*) L=fr;; de*) L=de;; esac
+  if [ -e "$HTP" ]; then
+    printf 'Status: 403 Forbidden\r\n'; hdr 'text/html; charset=utf-8'
+    echo "<!doctype html><meta charset=utf-8><p>$(tx "This NAS is already set up." "Ce NAS est déjà configuré." "Dieses NAS ist schon eingerichtet.") <a href=\"/\">$(tx "Open the interface" "Ouvrir l’interface" "Oberfläche öffnen")</a></p>"
+    exit 0
+  fi
+  case $REQUEST_METHOD in
+    GET|HEAD) setup_page; exit 0 ;;
+    POST) ;;
+    *) fail "405 Method Not Allowed" "GET, POST" ;;
+  esac
+  [ "$HTTP_X_DIET" = "1" ] || fail "403 Forbidden" "$(tx "Action only through the web interface" "Action réservée à l’interface" "Aktion nur über die Oberfläche")"
+  read_body
+  set -f; BODY=$(echo "$BODY" | tr '&' ' ')
+  field pw; pw=$FV; field host; host=$FV; field rootpw; rp=$FV; field key; k=$(printf '%s' "$FV" | tr -d '\r'); set +f
+  # everything is checked before anything is written
+  pw_ok "$pw"; [ -z "$host" ] || host_ok "$host"; ssh_check "$rp" "$k"
+  pwhash "$pw"
+  mkdir -p "$ETC/lighttpd"
+  ( umask 077; echo "admin:$H" > "$HTP.$$" ) || fail "500 Internal Server Error" "$(tx "Cannot write" "Écriture impossible" "Schreiben nicht möglich")"
+  if ! ln "$HTP.$$" "$HTP" 2>/dev/null; then
+    rm -f "$HTP.$$"
+    fail "409 Conflict" "$(tx "This NAS has just been set up from another browser" "Ce NAS vient d’être configuré depuis un autre navigateur" "Dieses NAS wurde gerade von einem anderen Browser eingerichtet")"
+  fi
+  rm -f "$HTP.$$"
+  note "First setup: web administrator account created"
+  [ -z "$host" ] || host_set "$host"
+  ssh_apply "$rp" "$k"
+  invalidate
+  bg "sleep 2; $INITD/S50lighttpd restart"   # drops the redirection of / to this page
+  ok "$(tx "Saved. The interface now asks for the administrator password (user admin)." "Enregistré. L’interface demande maintenant le mot de passe administrateur (utilisateur admin)." "Gespeichert. Die Oberfläche fragt jetzt nach dem Administratorpasswort (Benutzer admin).")${SMSG:+ ($SMSG)}"
 }
 
 notify_test() {
@@ -986,6 +1191,18 @@ invalidate() {
   [ -p "$C/wake" ] && echo all 1<> "$C/wake"
 }
 
+# POST body (form, < 4 KB) in $BODY
+read_body() {
+  BODY=""; CL=${CONTENT_LENGTH:-0}
+  case "$CL" in *[!0-9]*) CL=0;; esac
+  [ "$CL" -lt 4096 ] || fail "413 Request Entity Too Large" "$(tx "too much data" "trop de données" "zu viele Daten")"
+  [ "$CL" -gt 0 ] && BODY=$(head -c "$CL")
+  [ ${#BODY} -eq "$CL" ] || fail "500 Internal Server Error" "$(tx "Incomplete data received, please retry" "Données reçues incomplètes, réessayez" "Daten unvollständig angekommen, bitte nochmal")"
+}
+
+# /cgi-bin/setup: nothing else than the first setup is reachable through this name
+[ -n "$SETUP" ] && { first_setup; exit 0; }
+
 qp a; A=$QP
 if [ "$REQUEST_METHOD" = "POST" ]; then
   # CSRF protection: a form from another site cannot set this header
@@ -996,11 +1213,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
     else fail "409 Conflict" "$OUT"; fi
     exit 0
   fi
-  BODY=""; CL=${CONTENT_LENGTH:-0}
-  case "$CL" in *[!0-9]*) CL=0;; esac
-  [ "$CL" -lt 4096 ] || fail "413 Request Entity Too Large" "$(tx "too much data" "trop de données" "zu viele Daten")"
-  [ "$CL" -gt 0 ] && BODY=$(head -c "$CL")
-  [ ${#BODY} -eq "$CL" ] || fail "500 Internal Server Error" "$(tx "Incomplete data received, please retry" "Données reçues incomplètes, réessayez" "Daten unvollständig angekommen, bitte nochmal")"
+  read_body
   case "$A" in
     spindown)
       for d in $(disks); do hdparm -y /dev/$d >/dev/null 2>&1; done; ok "$(tx "Disks spun down" "Disques en veille" "Platten schlafen")" ;;
@@ -1020,6 +1233,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
     nfs_add|nfs_del) nfs_change "$A" ;;
     sys_set) sys_set ;;
     notify_test) notify_test ;;
+    ssh_set) ssh_set ;;
+    smb_enc) smb_enc ;;
     svc_set) svc_set ;;
     dlna_set) dlna_set ;;
     dlna_scan)
