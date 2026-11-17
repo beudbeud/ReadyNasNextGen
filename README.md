@@ -77,10 +77,8 @@ elles sont décrites, avec leurs précautions, dans [docs/XRAID.md](docs/XRAID.m
 
 - **Démarrage depuis le PC** : à chaque démarrage, il faut l'adaptateur série et le serveur
   TFTP. Le démarrage autonome (sans PC) est à l'étude.
-- **Montage du volume X-RAID** : en cours de correction (outil LVM), le stockage peut
-  apparaître absent.
-- Pas d'horloge sauvegardée : au démarrage, mettez l'heure à jour par le réseau (bouton
-  « Mettre l'heure à jour » de l'interface).
+- **Écriture sur un volume X-RAID** : la lecture est validée ; l'écriture (interrupteur de la
+  carte Stockage) n'a encore été essayée qu'en simulation.
 
 ## Revenir au système d'origine
 
