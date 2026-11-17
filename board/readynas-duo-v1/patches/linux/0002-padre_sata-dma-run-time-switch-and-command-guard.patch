@@ -1,0 +1,133 @@
+padre_sata: LP DMA switchable at run time (dma=2 at boot: ready, starting in
+PIO), non read/write DMA commands refused (READ LOG DMA EXT, FUA, TRIM),
+2.6.17 IDE segment limits (64 KiB, no 64 KiB crossing).
+
+--- a/drivers/platform/padre/padre_sata.c
++++ b/drivers/platform/padre/padre_sata.c
+@@ -12,7 +12,8 @@
+  *   bit 5 (write) before each word, IRQ 32 + n.
+  * All accesses stay 32-bit (like the validated driver): the driver provides
+  * its own SFF operations instead of the libata ioread8 ones.
+- * DMA through the List Processor (padre_sata.dma=1, DMA = PIO self-test at
++ * DMA through the List Processor (padre_sata.dma=1, switchable at run time
++ * through /sys/module/padre_sata/parameters/dma; DMA = PIO self-test at
+  * boot, see below). No X-RAID (standard md/RAID1 on top).
+  *
+  * Parameter: padre_sata.read_only=1 (command line) refuses any write, for a
+@@ -308,9 +309,18 @@
+ #define LP_MAX_SEG	64		/* 64 x 4 KiB = 256 KiB per command */
+ #define LP_MAX_SECT	512
+ 
++/* Boot value 1: LP set up, self-test, UDMA advertised. Boot value 2: the
++ * same, but DMA commands start in PIO (dma reads 0 after boot): for a first
++ * test. Then writable at run time (/sys/module/padre_sata/parameters/dma):
++ * 0 = DMA commands are run in PIO, 1 = through the LP. Booted with 0,
++ * writing 1 changes nothing (like padre_ide_libre).
++ */
+ static int dma;
+-module_param(dma, int, 0444);
+-MODULE_PARM_DESC(dma, "1 = DMA through the List Processor after self-test (default 0: PIO)");
++module_param(dma, int, 0644);
++MODULE_PARM_DESC(dma, "1 = DMA through the List Processor after self-test (default 0: PIO); "
++		 "writable at run time: 0 = DMA commands run in PIO");
++static unsigned long dma_cmds;	/* commands served by the LP */
++module_param(dma_cmds, ulong, 0444);
+ 
+ struct padre_port {
+ 	u8 *list;			/* one page: up to 128 descriptors */
+@@ -397,6 +407,17 @@
+ 
+ 	if (qc->tf.protocol != ATA_PROT_DMA)
+ 		return AC_ERR_OK;
++	/* the LP always sends READ/WRITE DMA EXT: any other DMA command (READ
++	 * LOG DMA EXT, DSM, TRUSTED...) would become a read or write at a
++	 * wrong LBA. Refused: libata retries READ LOG in PIO.
++	 */
++	switch (qc->tf.command) {
++	case ATA_CMD_READ: case ATA_CMD_READ_EXT:
++	case ATA_CMD_WRITE: case ATA_CMD_WRITE_EXT:
++		break;
++	default:
++		return AC_ERR_SYSTEM;
++	}
+ 	if (n < 1 || n > LP_MAX_SEG)
+ 		return AC_ERR_SYSTEM;
+ 	for_each_sg(qc->sg, sg, n, si) {
+@@ -448,8 +469,21 @@
+ 		return ata_sff_qc_issue(qc);
+ 	}
+ 
++	if (!dma) {	/* run-time switch: same command in polled PIO */
++		switch (qc->tf.command) {
++		case ATA_CMD_READ:	qc->tf.command = ATA_CMD_PIO_READ; break;
++		case ATA_CMD_READ_EXT:	qc->tf.command = ATA_CMD_PIO_READ_EXT; break;
++		case ATA_CMD_WRITE:	qc->tf.command = ATA_CMD_PIO_WRITE; break;
++		case ATA_CMD_WRITE_EXT:	qc->tf.command = ATA_CMD_PIO_WRITE_EXT; break;
++		default:		return AC_ERR_SYSTEM;
++		}
++		qc->tf.protocol = ATA_PROT_PIO;
++		qc->tf.flags |= ATA_TFLAG_POLLING;
++		return ata_sff_qc_issue(qc);
++	}
+ 	if ((lp_rd(LP_STAT) & 0xff) != 1 || lp_owner)
+ 		return AC_ERR_SYSTEM;
++	dma_cmds++;
+ 	lp_owner = ap;
+ 	pp->dma_qc = qc;
+ 	lp_start(ap->port_no, pp->list, qc->n_elem);
+@@ -538,6 +572,14 @@
+ 	ata_sff_error_handler(ap);
+ }
+ 
++/* DMA commands other than READ/WRITE are refused (padre_qc_prep): keep
++ * libata from choosing them (READ LOG DMA EXT at probe, FUA, TRIM).
++ */
++static void padre_dev_config(struct ata_device *dev)
++{
++	dev->quirks |= ATA_QUIRK_NO_DMA_LOG | ATA_QUIRK_NO_FUA | ATA_QUIRK_NOTRIM;
++}
++
+ /* ---------- boot self-test (before libata): DMA compared with PIO ---------- */
+ 
+ static int link_ready(int c)
+@@ -686,7 +728,11 @@
+ static const struct scsi_host_template padre_sht = {
+ 	ATA_BASE_SHT(DRV_NAME),
+ 	.sg_tablesize	= LP_MAX_SEG,
+-	.dma_boundary	= 0xffffffff,
++	/* same limits as the 2.6.17 IDE layer, under which the LP was
++	 * validated: segments of at most 64 KiB, never crossing 64 KiB
++	 */
++	.dma_boundary	= ATA_DMA_BOUNDARY,
++	.max_segment_size = 65536,
+ 	.max_sectors	= LP_MAX_SECT,
+ };
+ 
+@@ -696,6 +742,7 @@
+ 	.qc_prep		= padre_qc_prep,
+ 	.qc_issue		= padre_qc_issue,
+ 	.error_handler		= padre_error_handler,
++	.dev_config		= padre_dev_config,
+ 	.reset.softreset	= NULL,
+ 	.reset.hardreset	= padre_hardreset,
+ 	.scr_read		= padre_scr_read,
+@@ -762,6 +809,8 @@
+ 		return -ENOMEM;
+ 
+ 	lp_ok = dma && !padre_disabled("dma") && (lp_rd(LP_STAT) & 0xff) == 1;
++	if (!lp_ok)
++		dma = 0;	/* nothing set up: writing 1 later has no effect */
+ 	pr_info(DRV_NAME ": DMA %s (LP STAT=%02x version %04x)\n",
+ 		lp_ok ? "requested, self-test" : "no (PIO)", lp_rd(LP_STAT) & 0xff,
+ 		lp_rd(LP_VERSION) & 0xffff);
+@@ -819,6 +868,10 @@
+ 		if (rc)
+ 			return rc;
+ 	}
++	if (dma == 2) {
++		dma = 0;
++		pr_info(DRV_NAME ": DMA ready, starting in PIO (write 1 to parameters/dma)\n");
++	}	/* before any disk command */
+ 	pr_info("padre_sata: %d channels, IRQs requested, registering with libata\n", n);
+ 	rc = ata_host_register(host, &padre_sht);
+ 	pr_info("padre_sata: done (%d)\n", rc);
