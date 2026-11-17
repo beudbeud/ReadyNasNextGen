@@ -23,6 +23,9 @@ deux disques SATA.
 | USB EHCI (VIA VT6212) | marche : arbitrage AHB du 2.6.17 rétabli ; le VT6212 ne relit jamais le lien horizontal du QH de tête une fois réécrit par le CPU, un QH factice permanent suit donc la tête et les vrais QH sont chaînés après lui |
 | Démarrage sur la clé USB (`/rootfs-6.18`), console `quiet` | marche : racine atteinte vers 3 s après le lancement du noyau |
 | Programmes dynamiques (ld-uClibc) | marche : ld.so exécute `flush` après avoir réécrit la PLT (patch uClibc), le noyau traite ce `flush` (écriture de l'antémémoire D, invalidation de la I) |
+| Accès entiers non alignés en espace utilisateur | émulés par le noyau (`user_unaligned_trap`, `unaligned_32.c`), comme le 2.6.17 et sparc64 ; le sparc32 d'origine envoyait SIGBUS. Les 10 premiers sont notés dans `dmesg` (`padre: emulated unaligned access, …`) |
+| Horloge matérielle (Dallas DS1337, I2C 0x68) | marche : `padre_rtc` (`/dev/rtc0`), heure reprise au démarrage (`RTC_HCTOSYS`), réécrite après NTP (`S41time`, `hwclock -w`, et `RTC_SYSTOHC`) ; les 16 registres sont affichés dans `dmesg` au démarrage |
+| LVM (lvm2 2.03.31) | marche : `board/readynas-duo-v1/patches/lvm2/` aligne sur 8 octets la liste de `dm_task_get_device_list()` (`dev_t` de 64 bits : SIGBUS de `lvm pvs` sur SPARC) |
 | ksmbd, NFS v3/v4, mdadm, fuse2fs (ext3 X-RAID à blocs de 16 Ko) | construits, non testés |
 | Tableau de bord web [DIET](#tableau-de-bord-web-diet) (lighttpd HTTPS) | porté, testé en simulation |
 
@@ -101,7 +104,7 @@ uClibc-ng, des en-têtes Linux et des outils hôtes avec leurs correctifs, plus
 
 | Paramètre | Rôle |
 |---|---|
-| `padre.disable=a,b` | ne pas lancer certains pilotes Padre (mise au point) |
+| `padre.disable=a,b` | ne pas lancer certains pilotes Padre : `i2c`, `rtc`, `led`, `hwmon`, `gmac`, `sata`, `dma`, `pci` (mise au point) |
 | `padre_sata.dma=0/1` | DMA disque par le coprocesseur LP (0 = PIO, défaut) |
 | `padre.trace_fault=N` | affiche les N premières fautes de page utilisateur |
 | `padre.trace_tick=1` | état du tic dans `/proc/padre_tick` et lignes `[pulse]`/`[watchdog]` sur la console (défaut 0) |
@@ -115,7 +118,8 @@ Défaut : `console=ttyS1,9600 quiet panic=10` (journal complet dans `dmesg`).
 
 Essais à la console (paquet `readynas-tests`, dans `/usr/bin`) : `test-flush with` (antémémoire I
 après réécriture de code, 0 erreur attendue ; `without` doit en montrer), `test-fp-s`, `test-fp-d`,
-`test-fp-n` (émulation FPU en statique, dynamique PIE, dynamique non PIE), `test-ldso 200`
+`test-fp-n` (émulation FPU en statique, dynamique PIE, dynamique non PIE), `test-align` (accès
+non alignés émulés, alignement de `malloc`), `test-ldso 200`
 (programmes dynamiques en boucle, 0 échec et 0 segfault ld-uClibc attendus).
 
 ## Tableau de bord : essais sur le PC
@@ -136,7 +140,7 @@ configs/readynas_ng_defconfig            système complet, chaîne construite
 configs/readynas_ng_rapide_defconfig     même système, chaîne précompilée (make rapide)
 configs/readynas_ng_toolchain_defconfig  chaîne seule (make toolchain-sdk)
 package/readynas-initramfs/      busybox statique sans flottant + tests, pour l'initramfs
-package/readynas-tests/          essais du portage dans le rootfs (test-flush, test-fp-*, test-ldso)
+package/readynas-tests/          essais du portage dans le rootfs (test-flush, test-fp-*, test-align, test-ldso)
 package/diet/                    tableau de bord web DIET porté sur 6.18 (+ tests/test-api.sh)
 docs/DIET.md                     ce qui change par rapport à DIET
 board/readynas-duo-v1/
@@ -144,6 +148,7 @@ board/readynas-duo-v1/
   patches/linux/                 plateforme Padre pour Linux 6.18.63 (arch/sparc, pilotes)
   patches/e2fsprogs/             fuse2fs avec uClibc-ng
   patches/uclibc/                flush après réécriture de la PLT par ld-uClibc
+  patches/lvm2/                  alignement de la liste des périphériques dm (libdm)
   initramfs/                     /init, `list` (gen_init_cpio), sources des tests
   rootfs-overlay/                ksmbd, NFS, régulation du ventilateur
   readynas_crypto/               outil de chiffrement iboot (GPL), compilé par post-image.sh

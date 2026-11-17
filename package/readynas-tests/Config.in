@@ -4,6 +4,7 @@ config BR2_PACKAGE_READYNAS_TESTS
 	  Small tests to run on the ReadyNAS Duo v1 console:
 	  test-flush (I-cache after code rewrite + floating point),
 	  test-fp-s / test-fp-d / test-fp-n (FPU emulation, static,
-	  dynamic PIE and dynamic non-PIE), test-ldso (dynamic programs
+	  dynamic PIE and dynamic non-PIE), test-align (unaligned integer
+	  accesses emulated by the kernel, malloc alignment), test-ldso (dynamic programs
 	  in a loop, counts ld-uClibc segfaults).
 	  Installed in /usr/bin.

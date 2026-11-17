@@ -1,6 +1,6 @@
 ################################################################################
 #
-# readynas-tests: Padre port tests (I-cache, emulated FPU, ld.so)
+# readynas-tests: Padre port tests (I-cache, emulated FPU, unaligned accesses, ld.so)
 #
 ################################################################################
 
@@ -14,10 +14,11 @@ define READYNAS_TESTS_BUILD_CMDS
 	$(TARGET_CC) $(TARGET_CFLAGS) -static -o $(@D)/test-fp-s $(@D)/test-fp.c
 	$(TARGET_CC) $(TARGET_CFLAGS) -fPIE -pie -o $(@D)/test-fp-d $(@D)/test-fp.c
 	$(TARGET_CC) $(TARGET_CFLAGS) -no-pie -o $(@D)/test-fp-n $(@D)/test-fp.c
+	$(TARGET_CC) $(TARGET_CFLAGS) -static -o $(@D)/test-align $(@D)/test-align.c
 endef
 
 define READYNAS_TESTS_INSTALL_TARGET_CMDS
-	for p in test-flush test-fp-s test-fp-d test-fp-n test-ldso; do \
+	for p in test-flush test-fp-s test-fp-d test-fp-n test-align test-ldso; do \
 		$(INSTALL) -D -m 0755 $(@D)/$$p $(TARGET_DIR)/usr/bin/$$p || exit 1; \
 	done
 endef

@@ -3284,6 +3284,84 @@
  t_bad3d:BAD_TRAP(0x3d) BAD_TRAP(0x3e) BAD_TRAP(0x3f) BAD_TRAP(0x40) BAD_TRAP(0x41)
  t_bad42:BAD_TRAP(0x42) BAD_TRAP(0x43) BAD_TRAP(0x44) BAD_TRAP(0x45) BAD_TRAP(0x46)
  t_bad47:BAD_TRAP(0x47) BAD_TRAP(0x48) BAD_TRAP(0x49) BAD_TRAP(0x4a) BAD_TRAP(0x4b)
+--- a/arch/sparc/kernel/unaligned_32.c
++++ b/arch/sparc/kernel/unaligned_32.c
+@@ -274,9 +274,75 @@
+ 	}
+ }
+ 
++#ifdef CONFIG_SPARC_PADRE
++/* Padre: unaligned integer user accesses are emulated, as in 2.6.17
++ * (arch/padre/kernel/unaligned.c) and on sparc64; stock sparc32 sends
++ * SIGBUS (lvm2: "Bus error" as soon as a PV is read).
++ * Still SIGBUS: floating point (emulated separately on Padre), swap/ldstub.
++ * The first 10 emulated accesses are logged in dmesg (command, pc, address).
++ */
++static int padre_set_ureg(struct pt_regs *regs, unsigned int reg, unsigned long v)
++{
++	struct reg_window32 __user *win;
++
++	if (!reg)
++		return 0;
++	if (reg < 16) {
++		regs->u_regs[reg] = v;
++		return 0;
++	}
++	/* window already flushed to the stack by safe_compute_effective_address() */
++	win = (struct reg_window32 __user *)regs->u_regs[UREG_FP];
++	return put_user(v, &win->locals[reg - 16]);
++}
++
++asmlinkage void user_unaligned_trap(struct pt_regs *regs, unsigned int insn)
++{
++	static unsigned int logged;
++	enum direction dir = decode_direction(insn);
++	unsigned int rd = (insn >> 25) & 0x1f;
++	unsigned long addr, val[2] = { 0, 0 };
++	int size;
++
++	addr = safe_compute_effective_address(regs, insn);
++	if (((insn >> 30) & 3) != 3 || floating_point_load_or_store_p(insn) ||
++	    dir == both)
++		goto sigbus;
++	size = decode_access_size(insn);
++	if (!access_ok((void __user *)addr, size))
++		goto sigbus;
++	perf_sw_event(PERF_COUNT_SW_ALIGNMENT_FAULTS, 1, regs, addr);
++	if (logged < 10) {
++		logged++;
++		pr_info("padre: emulated unaligned access, %s[%d] pc %08lx addr %08lx size %d\n",
++			current->comm, task_pid_nr(current), regs->pc, addr, size);
++	}
++	if (dir == load) {
++		if (do_int_load(val, size, (unsigned long *)addr,
++				decode_signedness(insn)) ||
++		    padre_set_ureg(regs, rd, val[0]) ||
++		    (size == 8 && padre_set_ureg(regs, rd + 1, val[1])))
++			goto segv;
++	} else {
++		val[0] = rd ? safe_fetch_reg(rd, regs) : 0;
++		if (size == 8)
++			val[1] = safe_fetch_reg(rd + 1, regs);
++		if (__do_int_store((unsigned long *)addr, size, val))
++			goto segv;
++	}
++	advance(regs);
++	return;
++segv:
++	force_sig_fault(SIGSEGV, SEGV_MAPERR, (void __user *)addr);
++	return;
++sigbus:
++	send_sig_fault(SIGBUS, BUS_ADRALN, (void __user *)addr, current);
++}
++#else
+ asmlinkage void user_unaligned_trap(struct pt_regs *regs, unsigned int insn)
+ {
+ 	send_sig_fault(SIGBUS, BUS_ADRALN,
+ 		       (void __user *)safe_compute_effective_address(regs, insn),
+ 		       current);
+ }
++#endif
 --- a/arch/sparc/kernel/vmlinux.lds.S
 +++ b/arch/sparc/kernel/vmlinux.lds.S
 @@ -8,7 +8,12 @@
@@ -4402,7 +4480,7 @@
 +obj-$(CONFIG_SPARC_PADRE)	+= padre/
 --- a/drivers/platform/padre/Kconfig
 +++ b/drivers/platform/padre/Kconfig
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,49 @@
 +# SPDX-License-Identifier: GPL-2.0
 +menu "Infrant Padre drivers (ReadyNAS Duo v1)"
 +	depends on SPARC_PADRE
@@ -4413,6 +4491,14 @@
 +	help
 +	  I2C access on the SoC (DS1337 clock, LM75, ICS clock generator),
 +	  ported from the GPL i2c driver for 2.6.17.
++
++config PADRE_RTC
++	bool "DS1337 hardware clock (/dev/rtc0)"
++	depends on PADRE_I2C && RTC_CLASS
++	default y
++	help
++	  Dallas DS1337 RTC at I2C address 0x68, through the padre_i2c TWSI
++	  accesses; with RTC_HCTOSYS the time is restored at boot.
 +
 +config PADRE_LED
 +	bool "LEDs and backup button"
@@ -4446,9 +4532,10 @@
 +endmenu
 --- a/drivers/platform/padre/Makefile
 +++ b/drivers/platform/padre/Makefile
-@@ -0,0 +1,6 @@
+@@ -0,0 +1,7 @@
 +# SPDX-License-Identifier: GPL-2.0
 +obj-$(CONFIG_PADRE_I2C)		+= padre_i2c.o
++obj-$(CONFIG_PADRE_RTC)		+= padre_rtc.o
 +obj-$(CONFIG_PADRE_LED)		+= padre_led.o
 +obj-$(CONFIG_PADRE_HWMON)	+= padre_hwmon.o
 +obj-$(CONFIG_PADRE_GMAC)	+= padre_gmac.o
@@ -6682,9 +6769,162 @@
 +	return 0;
 +}
 +device_initcall(padre_led_init);
+--- a/drivers/platform/padre/padre_rtc.c
++++ b/drivers/platform/padre/padre_rtc.c
+@@ -0,0 +1,150 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * padre_rtc.c: hardware clock of the ReadyNAS Duo v1, a Dallas/Maxim
++ * DS1337 at I2C address 0x68 (registers from include/asm-padre/ds1337.h of
++ * NETGEAR's GPL 2.6.17 kernel, which drove it with drivers/i2c/chips/
++ * ds1337.c). Accessed through the padre_i2c TWSI functions (CMOS_READ/WRITE),
++ * exposed as /dev/rtc0 by the rtc class.
++ *
++ * Registers (BCD): 0 sec, 1 min, 2 hour (bit 6 = 12 h, bit 5 = PM), 3 day of
++ * week 1-7, 4 date, 5 month (bit 7 = century), 6 year 00-99; 0x0e control
++ * (bit 7 /EOSC: 1 = oscillator stopped on battery), 0x0f status (bit 7 OSF:
++ * oscillator stopped since, time invalid).
++ * Years 2000 to 2199 (century bit), as rtc-ds1307 does for the DS1337.
++ */
++
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/bcd.h>
++#include <linux/rtc.h>
++#include <linux/platform_device.h>
++
++#include <asm/padre.h>
++#include <asm/padre_i2c.h>
++
++#define RTC_ADDR	0x68
++#define REG_SEC		0x00
++#define REG_HOUR	0x02
++#define REG_MONTH	0x05
++#define REG_CTRL	0x0e
++#define REG_STATUS	0x0f
++#define HOUR_12		0x40
++#define HOUR_PM		0x20
++#define MONTH_CENTURY	0x80
++#define CTRL_EOSC	0x80
++#define STATUS_OSF	0x80
++
++static void padre_rtc_read_regs(u8 r[7])
++{
++	int i;
++
++	for (i = 0; i < 7; i++)
++		r[i] = CMOS_READ(i);
++}
++
++static int padre_rtc_read_time(struct device *dev, struct rtc_time *tm)
++{
++	u8 r[7], s;
++	int try;
++
++	if (CMOS_READ(REG_STATUS) & STATUS_OSF) {
++		dev_warn_once(dev, "oscillator stopped (OSF): time invalid, set it (hwclock -w)\n");
++		return -EINVAL;
++	}
++	/* ponytail: byte by byte (validated one-byte TWSI accesses); read again
++	 * if the seconds changed during the read (carry in progress).
++	 */
++	for (try = 0; try < 3; try++) {
++		padre_rtc_read_regs(r);
++		s = CMOS_READ(REG_SEC);
++		if (s == r[0])
++			break;
++	}
++	tm->tm_sec = bcd2bin(r[0] & 0x7f);
++	tm->tm_min = bcd2bin(r[1] & 0x7f);
++	if (r[2] & HOUR_12) {
++		tm->tm_hour = bcd2bin(r[2] & 0x1f) % 12;
++		if (r[2] & HOUR_PM)
++			tm->tm_hour += 12;
++	} else {
++		tm->tm_hour = bcd2bin(r[2] & 0x3f);
++	}
++	tm->tm_wday = bcd2bin(r[3] & 0x07) - 1;
++	tm->tm_mday = bcd2bin(r[4] & 0x3f);
++	tm->tm_mon = bcd2bin(r[5] & 0x1f) - 1;
++	tm->tm_year = bcd2bin(r[6]) + 100 + ((r[5] & MONTH_CENTURY) ? 100 : 0);
++	return 0;
++}
++
++static int padre_rtc_set_time(struct device *dev, struct rtc_time *tm)
++{
++	u8 r[7], c;
++	int i;
++
++	r[0] = bin2bcd(tm->tm_sec);
++	r[1] = bin2bcd(tm->tm_min);
++	r[2] = bin2bcd(tm->tm_hour);			/* 24 h mode */
++	r[3] = bin2bcd(tm->tm_wday + 1);
++	r[4] = bin2bcd(tm->tm_mday);
++	r[5] = bin2bcd(tm->tm_mon + 1) | (tm->tm_year >= 200 ? MONTH_CENTURY : 0);
++	r[6] = bin2bcd(tm->tm_year % 100);
++
++	/* oscillator running, even on battery */
++	c = CMOS_READ(REG_CTRL);
++	if (c & CTRL_EOSC)
++		CMOS_WRITE(c & ~CTRL_EOSC, REG_CTRL);
++	/* seconds first: writing them resets the divider, the rest is
++	 * written within the same second
++	 */
++	for (i = 0; i < 7; i++)
++		CMOS_WRITE(r[i], i);
++	CMOS_WRITE(CMOS_READ(REG_STATUS) & ~STATUS_OSF, REG_STATUS);
++	return 0;
++}
++
++static const struct rtc_class_ops padre_rtc_ops = {
++	.read_time	= padre_rtc_read_time,
++	.set_time	= padre_rtc_set_time,
++};
++
++static int padre_rtc_probe(struct platform_device *pdev)
++{
++	struct rtc_device *rtc = devm_rtc_allocate_device(&pdev->dev);
++	u8 r[16];
++	int i;
++
++	for (i = 0; i < 16; i++)
++		r[i] = CMOS_READ(i);
++	dev_info(&pdev->dev, "DS1337 0x%02x, registers 00-0f: %16ph\n", RTC_ADDR, r);
++	if (IS_ERR(rtc))
++		return PTR_ERR(rtc);
++	rtc->ops = &padre_rtc_ops;
++	rtc->range_min = RTC_TIMESTAMP_BEGIN_2000;
++	rtc->range_max = mktime64(2199, 12, 31, 23, 59, 59);
++	return devm_rtc_register_device(rtc);
++}
++
++static struct platform_driver padre_rtc_driver = {
++	.probe	= padre_rtc_probe,
++	.driver	= { .name = "padre-rtc" },
++};
++
++static int __init padre_rtc_init(void)
++{
++	struct platform_device *pdev;
++	int r;
++
++	if (padre_disabled("rtc") || !i2c_device_exist(RTC_ADDR))
++		return 0;
++	r = platform_driver_register(&padre_rtc_driver);
++	if (r)
++		return r;
++	pdev = platform_device_register_simple("padre-rtc", -1, NULL, 0);
++	if (IS_ERR(pdev)) {
++		platform_driver_unregister(&padre_rtc_driver);
++		return PTR_ERR(pdev);
++	}
++	return 0;
++}
++device_initcall(padre_rtc_init);
 --- a/drivers/platform/padre/padre_sata.c
 +++ b/drivers/platform/padre/padre_sata.c
-@@ -0,0 +1,823 @@
+@@ -0,0 +1,829 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * padre_sata.c: SATA disks of the ReadyNAS Duo v1 (IT3107 "Padre"), libata
@@ -6862,6 +7102,12 @@
 +		if (fifo_wait(ap, rw == READ ? STAT_READ : STAT_WRITE)) {
 +			ata_port_err(ap, "PIO FIFO not responding (+0x84 = %08x)\n",
 +				     __raw_readl(pbase(ap) + S_STAT));
++			/* ata_pio_xfer() ignores the returned count: without
++			 * err_mask the command would complete "successfully"
++			 */
++			qc->err_mask |= AC_ERR_HOST_BUS;
++			if (rw == READ)
++				memset(p, 0, buflen - (n << 1));
 +			return n << 1;
 +		}
 +		if (rw == READ)

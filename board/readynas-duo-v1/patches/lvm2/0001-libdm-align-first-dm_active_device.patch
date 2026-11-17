@@ -1,0 +1,29 @@
+libdm: align the first dm_active_device in dm_task_get_device_list()
+
+The dm_active_device array started right after cnt pointers; with an odd
+cnt on a 32-bit target it was only 4-byte aligned, and storing the 64-bit
+dev_t faulted on strict-alignment CPUs (SPARC: SIGBUS in lvm pvs).
+Align it to 8 bytes like the following entries, and reserve the 8 bytes.
+
+--- a/device_mapper/ioctl/libdm-iface.c
++++ b/device_mapper/ioctl/libdm-iface.c
+@@ -811,7 +811,7 @@
+ 
+ 	/* buffer for devs +  sorted ptrs + dm_devs + aligned strings */
+ 	if (!(devs = malloc(sizeof(*devs) + cnt * (2 * sizeof(void*) + sizeof(*dm_dev)) +
+-			    (cnt ? (char*)names1 - (char*)names + 256 : 0))))
++			    (cnt ? (char*)names1 - (char*)names + 256 + 8 : 0))))
+ 		return_0;
+ 
+ 	dm_list_init(devs);
+@@ -823,7 +823,9 @@
+ 	}
+ 
+ 	/* Shift position where to store individual dm_devs */
+-	dm_dev = (struct dm_active_device *) ((long*) (devs + 1) + cnt);
++	/* aligned like the following entries (_align_ptr): dev_t is 64-bit,
++	 * an odd cnt left it 4-byte aligned on 32-bit (SIGBUS on SPARC) */
++	dm_dev = _align_ptr((long*) (devs + 1) + cnt);
+ 
+ 	do {
+ 		names = (struct dm_names *)((char *) names + next);
