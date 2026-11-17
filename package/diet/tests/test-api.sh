@@ -592,6 +592,8 @@ echo 'xraid-ro unclean_shutdown unclean_shutdown_linux' > "$R"/var/run/nas-raid.
 api POST a=raid_quick ''
 check "raid_quick: started" '[ "$ST" = 200 ] && json "\"Quick check started\" in j[\"msg\"]"'
 i=0; while [ $i -lt 30 ] && { [ ! -s "$R"/var/lib/nas-raid/quick.state ] || grep -qs '^running' "$R"/var/lib/nas-raid/quick.state; }; do sleep 1; i=$((i + 1)); done
+# diagnostics when the quick check did not end as expected (CI)
+grep -qs '^confirm' "$R"/var/lib/nas-raid/quick.state || { echo "quick.state after ${i}s: $(cat "$R"/var/lib/nas-raid/quick.state 2>&1)"; head -n 30 "$R"/var/lib/nas-raid/quick.res "$R"/var/lib/nas-raid/quick.progress 2>&1; tail -n 15 "$R"/var/lib/nas-raid/log 2>&1; } >&2
 api GET a=storage
 check "storage: quick check done, no difference, confirmation offered (valid JSON)" "json 'j[\"quick\"][\"state\"]==\"confirm\" and j[\"quick\"][\"accept\"]==1 and j[\"quick\"][\"result\"][\"differences\"]==0 and j[\"quick\"][\"result\"][\"complete\"]==1'"
 for b in 'confirm=ACCEPT' 'yes=1' 'confirm=accept&yes=1'; do
