@@ -64,6 +64,8 @@ BR2_PACKAGE_DROPBEAR=y
 # DIET web dashboard (package/diet, docs/DIET.md): lighttpd over HTTPS
 # with mbedTLS (gen_key/cert_write for the first-boot certificate)
 BR2_PACKAGE_DIET=y
+# SMART for DIET (smartmontools needs C++): package/smart-lite
+BR2_PACKAGE_SMART_LITE=y
 BR2_PACKAGE_LIGHTTPD=y
 BR2_PACKAGE_LIGHTTPD_MBEDTLS=y
 BR2_PACKAGE_LIGHTTPD_PCRE=y

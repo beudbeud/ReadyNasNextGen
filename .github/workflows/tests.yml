@@ -14,6 +14,8 @@ jobs:
         run: sh package/diet/tests/test-api.sh
       - name: xraid-compat
         run: sh package/xraid-compat/tests/test.sh
+      - name: smart-lite
+        run: sh package/smart-lite/tests/test.sh
       - name: relay add-ons
         # The real padre_relay.ko needs the SPARC cross toolchain and qemu
         # (build-module.sh); the add-on tests only copy and compare it, so a stand-in is used.

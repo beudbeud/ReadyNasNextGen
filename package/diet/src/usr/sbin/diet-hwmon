@@ -1,6 +1,6 @@
 #!/bin/sh
 # DIET monitoring (one sample per minute): temperature/fan history for the web
-# interface, SMART summary (if smartctl exists), Telegram alerts on state
+# interface, SMART summary (smartctl or smart-lite), Telegram alerts on state
 # change. Fan control and the emergency shutdown stay with padre-fan
 # (/etc/fan.conf), whose /var/run/fan.state is read here.
 # DIET_ROOT and DIET_ONCE=1 are only for tests on a PC.
@@ -16,15 +16,21 @@ while true; do
 		v=${kv#*=}; case "$v" in ''|*[!0-9]*) continue;; esac
 		case "${kv%%=*}" in temp) temp=$v;; fan) fan=$v;; pwm) pwm=$v;; esac
 	done
-	# SMART every 5 minutes, without waking up a sleeping disk
-	if [ $((N % 5)) -eq 0 ] && [ -x $R/usr/sbin/smartctl ]; then
+	# SMART every 5 minutes, never sent to a disk in standby: smart-lite checks
+	# the power mode first (exit 2, file kept), smartctl -n standby. On a WD
+	# disk in standby, CHECK POWER MODE and drivetemp do not spin it up.
+	if [ $((N % 5)) -eq 0 ]; then
 		for b in $R/sys/block/sd*; do
 			d=${b##*/}; [ -d "$b" ] || continue
-			out=$($R/usr/sbin/smartctl -n standby -H -A /dev/$d 2>/dev/null)
-			echo "$out" | grep -q STANDBY && continue
-			sh=$(echo "$out" | sed -n 's/.*self-assessment test result: //p' | tr -cd 'A-Za-z')
-			echo "$out" | awk -v h="$sh" '$1==5{r=$10} $1==9{p=$10} $1==197{c=$10} $1==198{u=$10}
-				END{printf "health=%s realloc=%d pending=%d uncorr=%d hours=%d\n", h, r, c, u, p}' > $RUN/smart.$d
+			if [ -x $R/usr/sbin/smartctl ]; then
+				out=$($R/usr/sbin/smartctl -n standby -H -A /dev/$d 2>/dev/null)
+				echo "$out" | grep -q STANDBY && continue
+				sh=$(echo "$out" | sed -n 's/.*self-assessment test result: //p' | tr -cd 'A-Za-z')
+				echo "$out" | awk -v h="$sh" '$1==5{r=$10} $1==9{p=$10} $1==12{y=$10} $1==194{t=$10} $1==197{c=$10} $1==198{u=$10}
+					END{printf "health=%s realloc=%d pending=%d uncorr=%d hours=%d cycles=%d%s\n", h, r, c, u, p, y, t != "" ? " celsius=" t+0 : ""}' > $RUN/smart.$d
+			elif [ -x $R/usr/sbin/smart-lite ]; then
+				out=$($R/usr/sbin/smart-lite -s /dev/$d 2>/dev/null) && echo "$out" > $RUN/smart.$d
+			fi
 		done
 	fi
 	# history: time, temperature (- = unknown), rpm, setpoint; about 12 h

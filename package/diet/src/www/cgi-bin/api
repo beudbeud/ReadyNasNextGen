@@ -1186,7 +1186,7 @@ metrics() {
   mh swap_used_bytes gauge "Swap in use."; echo "readynas_swap_used_bytes $(((swt - swf) * 1024))"
   # disks: temperature (drivetemp), I/O (/proc/diskstats), SMART if diet-hwmon read it
   T=; [ -n "$temp" ] && T="readynas_temperature_celsius{sensor=\"board\"} $temp$NL"
-  IORB=; IOWB=; IORO=; IOWO=; SP=; SR=; SPE=; SU=; SH=
+  IORB=; IOWB=; IORO=; IOWO=; SP=; SR=; SPE=; SU=; SH=; SY=; SC=
   while read -r _ _ dv rc _ rs _ wc _ ws _; do
     case $dv in sd[a-z]|sd[a-z][a-z]) ;; *) continue;; esac
     int0 rc rs wc ws; l="{device=\"$dv\"}"
@@ -1197,10 +1197,12 @@ metrics() {
     l="{device=\"$d\"}"
     dtemp "$d"; [ -n "$DT" ] && T="${T}readynas_temperature_celsius{sensor=\"$d\"} $DT$NL"
     if [ -r "$RUN/smart.$d" ]; then
-      health=""; realloc=0; pending=0; uncorr=0; hours=0; . "$RUN/smart.$d"; int0 realloc pending uncorr hours
+      health=""; realloc=0; pending=0; uncorr=0; hours=0; cycles=; celsius=; . "$RUN/smart.$d"; int0 realloc pending uncorr hours
       case $health in '') ;; PASSED) SP="${SP}readynas_disk_smart_passed$l 1$NL";; *) SP="${SP}readynas_disk_smart_passed$l 0$NL";; esac
       SR="${SR}readynas_disk_reallocated_sectors$l $realloc$NL"; SPE="${SPE}readynas_disk_pending_sectors$l $pending$NL"
       SU="${SU}readynas_disk_offline_uncorrectable_sectors$l $uncorr$NL"; SH="${SH}readynas_disk_power_on_seconds$l $((hours * 3600))$NL"
+      case $cycles in ''|*[!0-9]*) ;; *) SY="${SY}readynas_disk_power_cycles$l $cycles$NL";; esac
+      case $celsius in ''|*[!0-9]*) ;; *) SC="${SC}readynas_disk_smart_temperature_celsius$l $celsius$NL";; esac
     fi
   done
   mf temperature_celsius gauge "Temperature: board (fan controller) and disks (drivetemp)." "$T"
@@ -1213,6 +1215,8 @@ metrics() {
   mf disk_pending_sectors gauge "SMART current pending sectors (attribute 197)." "$SPE"
   mf disk_offline_uncorrectable_sectors gauge "SMART offline uncorrectable sectors (attribute 198)." "$SU"
   mf disk_power_on_seconds gauge "SMART power-on time (attribute 9)." "$SH"
+  mf disk_power_cycles gauge "SMART power cycle count (attribute 12)." "$SY"
+  mf disk_smart_temperature_celsius gauge "SMART temperature (attribute 194, else 190)." "$SC"
   mf fan_pwm gauge "Fan setpoint (PWM, 0-255)." "${pwm:+readynas_fan_pwm $pwm$NL}"
   mf fan_speed_rpm gauge "Fan speed (revolutions per minute)." "${fan:+readynas_fan_speed_rpm $fan$NL}"
   # network eth0: bytes, packets, errors
@@ -1524,9 +1528,10 @@ case "$A" in
     disks | grep -qx "$d" || fail "400 Bad Request" "$(tx "unknown disk" "disque inconnu" "unbekannte Platte")"
     hdr 'text/plain; charset=utf-8'
     if [ -x "$R/usr/sbin/smartctl" ]; then "$R/usr/sbin/smartctl" -H -i -A /dev/$d 2>&1
+    elif [ -x "$R/usr/sbin/smart-lite" ]; then "$R/usr/sbin/smart-lite" -f /dev/$d 2>&1
     else
-      # no smartctl (toolchain without C++): model, drivetemp temperature and kernel messages
-      echo "$(tx "smartctl is not on this system; available information:" "smartctl absent de ce système ; informations disponibles :" "smartctl fehlt auf diesem System; verfügbare Angaben:")"
+      # no SMART tool: model, drivetemp temperature and kernel messages
+      echo "$(tx "no SMART tool on this system; available information:" "aucun outil SMART sur ce système ; informations disponibles :" "kein SMART-Werkzeug auf diesem System; verfügbare Angaben:")"
       echo "  /dev/$d : $(cat "$R/sys/block/$d/device/model" 2>/dev/null), $(($(cat "$R/sys/block/$d/size" 2>/dev/null || echo 0) / 1953125)) GB, $(dtemp "$d"; echo "${DT:-?}") °C (drivetemp)"
       echo; dmesg | grep -w "$d" | tail -n 50
     fi ;;

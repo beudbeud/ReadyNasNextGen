@@ -675,7 +675,7 @@ api GET a=sys
 check "sys: metrics setting 1" "json 'j[\"metrics\"]==1'"
 # what the collector finds on a running NAS: SMART read by diet-hwmon, X-RAID
 # superblock (xraid.json of nas-raid), last checks
-echo 'health=PASSED realloc=3 pending=0 uncorr=0 hours=1000' > "$R"/var/run/smart.sda
+echo 'health=PASSED realloc=3 pending=0 uncorr=0 hours=1000 cycles=369 celsius=33' > "$R"/var/run/smart.sda
 "$R"/bin/xraid-info --json "$R"/img/clean/*.img > "$R"/var/run/xraid.json
 echo 'xraid-rw' > "$R"/var/run/nas-raid.mode
 echo 'ok 1700000000' > "$R"/var/lib/nas-raid/verify.state; echo 'accepted 1700000500' > "$R"/var/lib/nas-raid/quick.state
@@ -712,6 +712,7 @@ want = {
  "readynas_xraid_check_result{check=\"quick\",result=\"accepted\"}": "1",
  "readynas_disk_smart_passed{device=\"sda\"}": "1", "readynas_disk_reallocated_sectors{device=\"sda\"}": "3",
  "readynas_disk_power_on_seconds{device=\"sda\"}": "3600000",
+ "readynas_disk_power_cycles{device=\"sda\"}": "369", "readynas_disk_smart_temperature_celsius{device=\"sda\"}": "33",
  "readynas_service_up{service=\"ksmbd\"}": "1", "readynas_service_up{service=\"ntpd\"}": "0",
 }
 bad = [(k, v, m.get(k)) for k, v in want.items() if m.get(k) != v]
@@ -802,6 +803,19 @@ api GET 'a=md&d=md9'
 check "md: unknown volume refused" '[ "$ST" = 400 ]'
 api GET 'a=smart&d=sda'
 check "smart without smartctl: drivetemp and dmesg" 'case "$OUT" in *"38 °C (drivetemp)"*"[sda]"*) true;; *) false;; esac'
+# smart-lite (package/smart-lite): -s = diet-hwmon summary line, exit 2 = disk in standby
+mkdir -p "$R"/usr/sbin; cat > "$R"/usr/sbin/smart-lite <<'SLEOF'
+#!/bin/sh
+echo "smart-lite $*" >> "${0%/usr/sbin/smart-lite}"/cmd.log
+case "$*" in
+-s*/dev/sdb) echo power=standby; exit 2;;
+-s*) echo 'health=PASSED realloc=0 pending=2 uncorr=2 hours=2551 cycles=369 celsius=33';;
+*) echo "Device:   $2"; echo 'SMART overall-health self-assessment test result: PASSED';;
+esac
+SLEOF
+chmod 755 "$R"/usr/sbin/smart-lite
+api GET 'a=smart&d=sda'
+check "smart with smart-lite: full report, forced (-f: the user asked for it)" 'case "$OUT" in *"Device:   /dev/sda"*"result: PASSED"*) true;; *) false;; esac && grep -q "^smart-lite -f /dev/sda$" "$R"/cmd.log'
 api GET 'a=smart&d=..%2Fetc'
 check "smart: unknown disk refused" '[ "$ST" = 400 ]'
 
@@ -943,10 +957,13 @@ unset DIET_STICK NAS_UPDATE_SYNC
 echo "$DEGRADED" > "$R"/proc/mdstat
 echo 'TG_TOKEN=1:x
 TG_CHAT=1' > "$R"/etc/diet-notify.conf
+echo 'health=PASSED realloc=0 pending=0 uncorr=0 hours=7' > "$R"/var/run/smart.sdb
 PATH="$R/bin:$PATH" DIET_ONCE=1 $SH "$SRC"/usr/sbin/diet-hwmon
 sleep 1
 check "diet-hwmon: history written" 'grep -q " 45 1800 120$" "$R"/var/run/hwmon.hist'
 check "diet-hwmon: alert logged and sent" 'grep -q "RAID degraded" "$R"/var/run/alert.last && grep -q "ALERT" "$R"/var/log/diet.log && grep -q "wget .*sendMessage" "$R"/cmd.log'
+check "diet-hwmon: SMART by smart-lite -s, disk in standby left alone (previous reading kept)" 'grep -qx "health=PASSED realloc=0 pending=2 uncorr=2 hours=2551 cycles=369 celsius=33" "$R"/var/run/smart.sda && [ "$(cat "$R"/var/run/smart.sdb)" = "health=PASSED realloc=0 pending=0 uncorr=0 hours=7" ] && grep -q "^smart-lite -s /dev/sdb$" "$R"/cmd.log && ! grep -q "^smart-lite -f /dev/sdb" "$R"/cmd.log'
+check "diet-hwmon: SMART problems in the alert" 'grep -q "sda : 2 pending sectors, 2 unreadable sectors" "$R"/var/run/alert.last'
 
 # ---------- real lighttpd (host build: LIGHTTPD=/path/to/lighttpd, otherwise lighttpd from PATH; skipped if absent) ----------
 # lighttpd.conf of the NAS with only paths, port and the :80 redirect changed:

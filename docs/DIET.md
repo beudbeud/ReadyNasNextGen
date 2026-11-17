@@ -70,9 +70,9 @@ in `package/diet/src/`, laid out as on the target system.
 | Shares | Samba 3.6, `smb.conf` + `shares.conf`, `smbpasswd` | ksmbd: `/etc/ksmbd/ksmbd.conf`, `ksmbd.adduser` (password on standard input), `ksmbd.control -r` |
 | NFS | RAIDiator programs in a chroot (`diet-nfs`) | kernel nfsd + nfs-utils 2.x: the interface edits `/etc/exports` and runs `exportfs -ra` |
 | Storage | X-RAID (`/proc/xraid`), LVM `/dev/c/c` | md (`/proc/mdstat`, `mdadm --detail`), `df /c`, libata disks `sda`/`sdb` (bay = ata port); existing X-RAID through `nas-raid` (docs/XRAID.md); md: disabled for now (docs/XRAID-MIGRATION.md) |
-| Temperatures | `smartctl` every 5 min | drivetemp (`/sys/block/sdX/device/hwmon/*/temp1_input`); `smartctl` used only if present |
+| Temperatures, SMART | `smartctl` every 5 min | temperatures from drivetemp (`/sys/block/sdX/device/hwmon/*/temp1_input`); SMART every 5 min by `smart-lite` (see [SMART](#smart)), `smartctl` preferred if present |
 | Fan | controlled by `diet-hwmon` | controlled by `padre-fan` (S03fan); the interface shows its state (`/var/run/fan.state`) and edits `/etc/fan.conf` (curve, period, thresholds), then restarts the service |
-| `diet-hwmon` | control, SMART, history, alerts, emergency shutdown | monitoring only: history, SMART if present, Telegram alerts. The emergency shutdown is done by `padre-fan` |
+| `diet-hwmon` | control, SMART, history, alerts, emergency shutdown | monitoring only: history, SMART (disks in standby left asleep), Telegram alerts. The emergency shutdown is done by `padre-fan` |
 | Power button | `diet-hotplug` (`/proc/sys/kernel/hotplug`) | `/sbin/hotplug` → `diet-hotplug` (CONFIG_UEVENT_HELPER): held 3 s = power off |
 | Network | `/etc/diet-net.conf` + `S41diet-net` | `/etc/network/interfaces` (busybox ifupdown), applied at next boot |
 | Time | `ntpd -q` at boot | `ntpd` in the background + "Update the time" button |
@@ -406,7 +406,7 @@ Metrics (prefix `readynas_`, base units):
 | `network_{receive,transmit}_{bytes,packets,errors}_total` | counter | `device` (eth0) |
 | `disk_{read,written}_bytes_total`, `disk_{reads,writes}_completed_total` | counter | `device` |
 | `filesystem_size_bytes`, `filesystem_free_bytes` | gauge | `mountpoint` (/c) |
-| `disk_smart_passed`, `disk_{reallocated,pending,offline_uncorrectable}_sectors`, `disk_power_on_seconds` (if smartctl is on the system and diet-hwmon read them) | gauge | `device` |
+| `disk_smart_passed`, `disk_{reallocated,pending,offline_uncorrectable}_sectors`, `disk_power_on_seconds`, `disk_power_cycles`, `disk_smart_temperature_celsius` (last reading of diet-hwmon, see [SMART](#smart)) | gauge | `device` |
 | `service_up` | gauge | `service` (ksmbd, web, ssh, ntpd, fan, hwmon, nfs) |
 | `storage_mode_info` (1) | gauge | `mode` (xraid-rw, xraid-ro, md…), `reasons` |
 | `xraid_writable`, `xraid_superblock_clean`, `xraid_disks_online`, `xraid_disks_failed`, `xraid_sections`, `xraid_sections_synced` | gauge | |
@@ -443,8 +443,36 @@ lighttpd (with mbedTLS; only `gen_key` and `cert_write` are kept among
 the mbedTLS programs), ksmbd-tools, nfs-utils, mdadm. The package enables
 `ntpd` and HTTPS wget (Telegram) in busybox. The rest is busybox
 (`sh`, `awk`, `sed`, `hdparm`, `mkpasswd`, `start-stop-daemon`…).
+## SMART
+
 `smartctl` is not in the image: smartmontools needs a C++ toolchain,
-which neither the internal toolchain nor the prebuilt toolchain has.
+which neither the internal toolchain nor the prebuilt toolchain has
+(libstdc++ alone is about 1.5 MB, plus a new toolchain release), and
+libatasmart needs libudev (the system uses mdev). SMART is read by
+`smart-lite` (package/smart-lite, one C file, 18 KB on the NAS): SG_IO with ATA
+PASS-THROUGH (16), which libata (`padre_sata`) translates. It only sends
+CHECK POWER MODE, IDENTIFY DEVICE, SMART READ DATA, SMART READ THRESHOLDS
+and SMART RETURN STATUS: never SMART ENABLE/DISABLE, self-tests or
+SET FEATURES.
+
+    smart-lite /dev/sda        identity, health, temperature, attribute table
+    smart-lite -s /dev/sda     one line: health= realloc= pending= uncorr= hours= cycles= celsius=
+    smart-lite -f /dev/sda     also read a disk in standby (may spin it up)
+    smart-lite -F id.bin smart.bin thresh.bin [PASSED|FAILED]   decode saved sectors
+
+Exit status: 0 read, 1 error, 2 disk in standby (not read, `power=standby`).
+`diet-hwmon` runs `smart-lite -s` every 5 minutes and writes the line to
+`/var/run/smart.sdX` (kept as it is while the disk sleeps); `diet-alerts`,
+the disk list and the metrics read that file. The "SMART report" buttons
+call `smart-lite -f` (the user asked for it). If `/usr/sbin/smartctl` exists
+(an image built with C++), it is used instead, with `-n standby`.
+
+On the WD7500AADS disks of the test NAS, neither CHECK POWER MODE, SMART
+READ DATA nor drivetemp spins up a disk in standby (`hdparm -C` stays
+`standby`); other disks may differ, hence the power check.
+
+Test on the PC: `sh package/smart-lite/tests/test.sh` (sample sectors,
+made-up serial number).
 
 ## Test on the PC
 
