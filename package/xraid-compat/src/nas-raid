@@ -24,7 +24,8 @@
 # fails (what RAIDiator writes in each case). Each section
 # becomes two dm-linear (base, mirror) assembled by "mdadm --build" (RAID 1
 # without metadata); the partitions of the base disk are mapped by dm-linear
-# onto these md; LVM (VG c) then /c through fuse2fs (ext3 with 16 KiB blocks).
+# onto these md; LVM (VG c) then /c mounted by the kernel (ext3 with 16 KiB
+# blocks: ext4 driver, 16 KiB pages since linux/0003).
 #
 # Tests on a PC: NAS_RAID_ROOT prefixes /proc, /var, /etc and puts
 # $NAS_RAID_ROOT/bin first in PATH; NAS_RAID_DISKS replaces the list of
@@ -42,7 +43,7 @@ VG_MD=donnees
 LV_MD=c
 XRAID_VG=c				# LVM group created by RAIDiator, LV "c"
 XRAID_LV=c
-FUSE2FS_OPTS=allow_other
+EXT4_OPTS=noatime			# options of the kernel mount of /c
 XRAID_RW=no				# "yes": X-RAID writable if all safeguards pass
 SAMPLES=256				# 64 KiB blocks compared per section before a rw mount (0 = none)
 [ -r "$R/etc/nas-raid.conf" ] && . "$R/etc/nas-raid.conf"
@@ -80,8 +81,8 @@ x() {
 	echo "$l"
 	[ -n "$DRY_RUN" ] && return 0
 	mkdir -p "$STATE" && echo "[$(date '+%F %T')] $l" >> "$LOG"
-	# 9>&-: the lock must not leak into the commands; fuse2fs stays running
-	# and would otherwise hold it for as long as /c is mounted.
+	# 9>&-: the lock must not leak into the commands (a daemon they start
+	# would hold it).
 	"$@" 9>&-
 }
 # x_: like x, without stopping on failure (teardown)
@@ -185,10 +186,13 @@ assemble_xraid() {	# $1 = rw | ro
 	done
 	if [ $m = rw ]; then
 		x lvm vgchange -ay --config "$LVM_XR" "$XRAID_VG" || return 1
-		x fuse2fs -o "$FUSE2FS_OPTS" "/dev/mapper/$XRAID_VG-$XRAID_LV" "$MOUNTPOINT" || return 1
+		x mount -t ext4 -o "$EXT4_OPTS" "/dev/mapper/$XRAID_VG-$XRAID_LV" "$MOUNTPOINT" || return 1
 	else
 		x lvm vgchange -ay --config "$LVM_XR_RO" "$XRAID_VG" || return 1
-		x fuse2fs -o "ro,$FUSE2FS_OPTS" "/dev/mapper/$XRAID_VG-$XRAID_LV" "$MOUNTPOINT" || return 1
+		# read-only device: a journal left to replay (RAIDiator cut off)
+		# cannot be replayed, the volume is then read without it (noload)
+		x mount -t ext4 -o "ro,$EXT4_OPTS" "/dev/mapper/$XRAID_VG-$XRAID_LV" "$MOUNTPOINT" ||
+			x mount -t ext4 -o "ro,noload,$EXT4_OPTS" "/dev/mapper/$XRAID_VG-$XRAID_LV" "$MOUNTPOINT" || return 1
 	fi
 }
 

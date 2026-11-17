@@ -263,8 +263,8 @@ Prior checks (as today): healthy X-RAID with both disks online and `inited` = 1 
 section (otherwise every boot, relay included, copies A over B; `init_mark` is ignored), successful full
 verification < 7 days, SMART, data in `/c` smaller than p5 − 1 MiB, relay boot working.
 Plus: record the number of "starting the previous init" / "not tried" lines of
-`/relay/relay.log` and the size of `/diet-boot.log` on p1 (read-only, `fuse2fs -o ro` on
-`xr-p1`) in `/var/lib/nas-raid/migration`.
+`/relay/relay.log` and the size of `/diet-boot.log` on p1 (read-only, `mount -t ext4 -o ro`
+of `xr-p1`) in `/var/lib/nas-raid/migration`.
 
 1. **break**: services stopped, X-RAID unmounted; then on B only, inside p5 only:
 

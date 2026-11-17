@@ -1,0 +1,439 @@
+sparc: Padre: 16 KiB pages, like the stock 2.6.17 kernel
+
+A Linux page is 4 consecutive 4 KiB entries of the Infrant MMU
+(2.6.17 CONFIG_PADRE_16K_PAGE): pte_t holds the 4 hardware words,
+pte_val()/__pte() work on entry 0 (plus the A/D bits the MMU set in the
+others), a table of 256 Linux PTEs is one 4 KiB hardware table.
+Directories and tables are 4 KiB blocks of the uncached pool; the TLB
+probe of a page covers its 4 entries; the kernel stack is one page;
+AT_PAGESZ = 16384. The kernel then mounts the ext3 volumes with 16 KiB
+blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
+
+--- a/arch/sparc/include/asm/elf_32.h
++++ b/arch/sparc/include/asm/elf_32.h
+@@ -105,7 +105,12 @@
+ #define ELF_CLASS	ELFCLASS32
+ #define ELF_DATA	ELFDATA2MSB
+ 
++#ifdef CONFIG_SPARC_PADRE
++/* 16 KiB pages: also the AT_PAGESZ given to user space */
++#define ELF_EXEC_PAGESIZE	PAGE_SIZE
++#else
+ #define ELF_EXEC_PAGESIZE	4096
++#endif
+ 
+ 
+ /* This is the location that an ET_DYN program is loaded if exec'ed.  Typical
+--- a/arch/sparc/include/asm/page_32.h
++++ b/arch/sparc/include/asm/page_32.h
+@@ -78,7 +78,15 @@
+ /*
+  * .. while these make it easier on the compiler
+  */
++#ifdef CONFIG_SPARC_PADRE
++/* 16 KiB page = 4 consecutive hardware entries of 4 KiB (2.6.17
++ * CONFIG_PADRE_16K_PAGE). pte_val()/__pte() (pgtable_32_padre.h) give a
++ * single word: entry 0, plus the A/D bits the MMU set in entries 1-3.
++ */
++typedef struct { unsigned long hw[4]; } pte_t;
++#else
+ typedef unsigned long pte_t;
++#endif
+ typedef unsigned long iopte_t;
+ #ifndef CONFIG_SPARC_PADRE	/* Padre: folded pmd (pgtable-nopmd.h) */
+ typedef unsigned long pmd_t;
+@@ -88,18 +96,18 @@
+ typedef unsigned long pgprot_t;
+ typedef unsigned long iopgprot_t;
+ 
+-#define pte_val(x)	(x)
+-#define iopte_val(x)	(x)
+ #ifndef CONFIG_SPARC_PADRE
++#define pte_val(x)	(x)
+ #define pmd_val(x)      (x)
+ #endif
++#define iopte_val(x)	(x)
+ #define pgd_val(x)	(x)
+ #define ctxd_val(x)	(x)
+ #define pgprot_val(x)	(x)
+ #define iopgprot_val(x)	(x)
+ 
+-#define __pte(x)	(x)
+ #ifndef CONFIG_SPARC_PADRE
++#define __pte(x)	(x)
+ #define __pmd(x)	(x)
+ #endif
+ #define __iopte(x)	(x)
+@@ -113,6 +121,31 @@
+ typedef pte_t *pgtable_t;
+ 
+ #ifdef CONFIG_SPARC_PADRE
++#include <asm/padre.h>
++
++/* Entry 0 + the accessed/dirty bits written by the MMU in entries 1-3 */
++static inline unsigned long pte_val(pte_t pte)
++{
++	unsigned long v = pte.hw[0];
++
++	if (v & _PADRE_PAGE_V)
++		v |= (pte.hw[1] | pte.hw[2] | pte.hw[3]) &
++		     (_PADRE_PAGE_A | _PADRE_PAGE_D);
++	return v;
++}
++
++/* Valid mapping: 4 entries for the 4 consecutive 4 KiB frames;
++ * otherwise (swap, PROT_NONE, empty) the same invalid word 4 times.
++ */
++static inline pte_t __pte(unsigned long v)
++{
++	unsigned long step = (v & _PADRE_PAGE_V) ? 0x1000 : 0;
++
++	return (pte_t) { { v, v + step, v + 2 * step, v + 3 * step } };
++}
++#endif
++
++#ifdef CONFIG_SPARC_PADRE
+ #define TASK_UNMAPPED_BASE	0x20000000
+ #else
+ #define TASK_UNMAPPED_BASE	0x50000000
+--- a/arch/sparc/include/asm/pgtable_32_padre.h
++++ b/arch/sparc/include/asm/pgtable_32_padre.h
+@@ -7,9 +7,11 @@
+  *   - directory of 1024 entries of 4 MB (PGT register, bus address);
+  *   - tables of 1024 entries, 4 KB hardware pages;
+  *   - entry = bus address (bits 31-12) | U R W X C T A D Z V.
+- * The shipped 2.6.17 kernel uses 16 KB Linux pages (4 hardware entries
+- * per page); here we keep 4 KB pages, a mode supported by the same code
+- * (CONFIG_PADRE_4K_PAGE), so one entry per page.
++ * Linux pages are 16 KB like the shipped 2.6.17 kernel
++ * (CONFIG_PADRE_16K_PAGE): a Linux PTE (pte_t, page_32.h) is 4
++ * consecutive hardware entries, so a table of 256 Linux PTEs is exactly
++ * one 4 KB hardware table. Directories and tables are 4 KB blocks carved
++ * out of 16 KB pages (padre_mm.c).
+  * The kernel itself (0x8000_0000, I/O at 0x4000_0000) needs no tables:
+  * fixed windows. Only user space and vmalloc go through the
+  * tables.
+@@ -49,11 +51,12 @@
+ #define pmd_ERROR(e)   __builtin_trap()
+ #define pgd_ERROR(e)   __builtin_trap()
+ 
+-#define PTRS_PER_PTE		1024
++#define PTRS_PER_PTE		(PGDIR_SIZE / PAGE_SIZE)	/* 256 */
+ #define PTRS_PER_PGD		1024
+ #define USER_PTRS_PER_PGD	(TASK_SIZE / PGDIR_SIZE)
+-#define PADRE_PGD_TABLE_SIZE	(PTRS_PER_PGD * 4)
+-#define PADRE_PTE_TABLE_SIZE	(PTRS_PER_PTE * 4)
++/* hardware tables: 1024 entries of 4 bytes, 4 KB aligned */
++#define PADRE_HW_TABLE_SIZE	4096
++#define PADRE_HW_TABLE_MASK	(~(PADRE_HW_TABLE_SIZE - 1UL))
+ 
+ /* Software bit, only when V = 0: PROT_NONE (page "present" for Linux,
+  * invalid for the MMU). Bits 10 and 11 are unused by the hardware
+@@ -84,10 +87,26 @@
+ extern unsigned long empty_zero_page[PAGE_SIZE / sizeof(unsigned long)];
+ #define ZERO_PAGE(vaddr) (virt_to_page(empty_zero_page))
+ 
+-/* Tables in uncached memory: a plain store is enough. */
++/* Tables in uncached memory: plain stores are enough. */
+ static inline void set_pte(pte_t *ptep, pte_t pteval)
+ {
+-	WRITE_ONCE(*ptep, pteval);
++	WRITE_ONCE(ptep->hw[0], pteval.hw[0]);
++	WRITE_ONCE(ptep->hw[1], pteval.hw[1]);
++	WRITE_ONCE(ptep->hw[2], pteval.hw[2]);
++	WRITE_ONCE(ptep->hw[3], pteval.hw[3]);
++}
++
++/* 16-byte pte_t: no READ_ONCE of the whole (the generic ptep_get) */
++#define ptep_get ptep_get
++static inline pte_t ptep_get(pte_t *ptep)
++{
++	pte_t pte;
++
++	pte.hw[0] = READ_ONCE(ptep->hw[0]);
++	pte.hw[1] = READ_ONCE(ptep->hw[1]);
++	pte.hw[2] = READ_ONCE(ptep->hw[2]);
++	pte.hw[3] = READ_ONCE(ptep->hw[3]);
++	return pte;
+ }
+ 
+ static inline int pte_present(pte_t pte)
+@@ -114,7 +133,7 @@
+ 
+ static inline int pmd_bad(pmd_t pmd)
+ {
+-	return (pmd_val(pmd) & ~PAGE_MASK) != _PADRE_PGD_TABLE;
++	return (pmd_val(pmd) & ~PADRE_HW_TABLE_MASK) != _PADRE_PGD_TABLE;
+ }
+ 
+ static inline int pmd_present(pmd_t pmd)
+@@ -139,7 +158,7 @@
+ 
+ static inline unsigned long pmd_page_vaddr(pmd_t pmd)
+ {
+-	return (unsigned long)__va(pmd_val(pmd) & PAGE_MASK);
++	return (unsigned long)__va(pmd_val(pmd) & PADRE_HW_TABLE_MASK);
+ }
+ 
+ #define __pmd_page(pmd)		pmd_page_vaddr(pmd)
+@@ -264,7 +283,7 @@
+ }
+ 
+ #define __pte_to_swp_entry(pte)		((swp_entry_t) { pte_val(pte) })
+-#define __swp_entry_to_pte(x)		((pte_t) { (x).val })
++#define __swp_entry_to_pte(x)		__pte((x).val)
+ 
+ static inline bool pte_swp_exclusive(pte_t pte)
+ {
+@@ -284,7 +303,7 @@
+ #define __HAVE_ARCH_PTEP_SET_ACCESS_FLAGS
+ #define ptep_set_access_flags(__vma, __address, __ptep, __entry, __dirty) \
+ ({									  \
+-	int __changed = !pte_same(*(__ptep), __entry);			  \
++	int __changed = !pte_same(ptep_get(__ptep), __entry);		  \
+ 	if (__changed) {						  \
+ 		set_pte(__ptep, __entry);				  \
+ 		flush_tlb_page(__vma, __address);			  \
+--- a/arch/sparc/include/asm/thread_info_32.h
++++ b/arch/sparc/include/asm/thread_info_32.h
+@@ -70,12 +70,20 @@
+ /*
+  * thread information allocation
+  */
++#ifdef CONFIG_SPARC_PADRE
++#define THREAD_SIZE_ORDER  0	/* one 16 KiB page (2.6.17: PADRE_STACK_16K) */
++#else
+ #define THREAD_SIZE_ORDER  1
++#endif
+ 
+ #endif /* __ASSEMBLER__ */
+ 
+ /* Size of kernel stack for each process */
++#ifdef CONFIG_SPARC_PADRE
++#define THREAD_SIZE		PAGE_SIZE
++#else
+ #define THREAD_SIZE		(2 * PAGE_SIZE)
++#endif
+ 
+ /*
+  * Offsets in thread_info structure, used in assembly code
+--- a/arch/sparc/Kconfig
++++ b/arch/sparc/Kconfig
+@@ -61,7 +61,7 @@
+ 	select GENERIC_LIB_CMPDI2
+ 	select GENERIC_LIB_UCMPDI2
+ 	select HAVE_UID16
+-	select HAVE_PAGE_SIZE_4KB
++	select HAVE_PAGE_SIZE_4KB if !SPARC_PADRE
+ 	select LOCK_MM_AND_FIND_VMA
+ 	select OLD_SIGACTION
+ 	select ZONE_DMA
+@@ -354,11 +354,15 @@
+ 	select ARCH_HAS_SYNC_DMA_FOR_DEVICE
+ 	select ARCH_HAS_DMA_PREP_COHERENT
+ 	select ARCH_HAS_DMA_ALLOC
++	select HAVE_PAGE_SIZE_16KB
+ 	select USB_EHCI_BIG_ENDIAN_MMIO if USB_EHCI_HCD
+ 	help
+ 	  Kernel for the Infrant IT3107 SoC (ReadyNAS Duo v1, NV+ v1): two-level
+ 	  Infrant MMU (not SRMMU), no PROM (iboot), raw kernel linked at
+ 	  0x80004000, C code compiled as SPARC v7 (sdiv is broken).
++	  16 KiB pages (4 hardware entries of 4 KiB each, like the stock
++	  2.6.17 kernel): the kernel mounts the ext3 volumes with 16 KiB
++	  blocks made by RAIDiator.
+ 	  A Padre kernel does not boot on any other machine.
+ 
+ 
+--- a/arch/sparc/kernel/padre_kernel.c
++++ b/arch/sparc/kernel/padre_kernel.c
+@@ -298,7 +298,7 @@
+ 		struct reg_window32 *rw = (struct reg_window32 *)fp;
+ 
+ 		if (fp < base + sizeof(struct thread_info) ||
+-		    fp >= base + (PAGE_SIZE << 1) || (fp & 7))
++		    fp >= base + THREAD_SIZE || (fp & 7))
+ 			break;
+ 		padre_raw("[watchdog]   %08lx %pS\n", rw->ins[7], (void *)rw->ins[7]);
+ 		fp = rw->ins[6];
+--- a/arch/sparc/mm/fault_32.c
++++ b/arch/sparc/mm/fault_32.c
+@@ -130,7 +130,7 @@
+ 	if (mm && mm->pgd) {
+ 		pgd = pgd_val(*pgd_offset(mm, address));
+ 		if (pgd & 1)
+-			pte = ((unsigned long *)__va(pgd & PAGE_MASK))[(address >> PAGE_SHIFT) & 1023];
++			pte = ((unsigned long *)__va(pgd & PADRE_HW_TABLE_MASK))[(address >> 12) & 1023];
+ 	}
+ 	pr_info("padre fault %s %s[%d] addr %08lx pc %08lx pgd %08lx pte %08lx\n",
+ 		what, current->comm, task_pid_nr(current), address, pc, pgd, pte);
+--- a/arch/sparc/mm/padre_mm.c
++++ b/arch/sparc/mm/padre_mm.c
+@@ -191,7 +191,7 @@
+ 	pmd = pmd_off(mm, ea);
+ 	if (pmd_none(*pmd))
+ 		goto all;
+-	pte = READ_ONCE(*((pte_t *)pmd_page_vaddr(*pmd) + pte_index(ea)));
++	pte = ptep_get((pte_t *)pmd_page_vaddr(*pmd) + pte_index(ea));
+ 	if (!pte_present(pte) || !pfn_valid(pte_pfn(pte)))
+ 		goto all;
+ 	k = (unsigned long)__va(pte_pfn(pte) << PAGE_SHIFT) + (ea & ~PAGE_MASK);
+@@ -216,11 +216,11 @@
+ void update_mmu_cache_range(struct vm_fault *vmf, struct vm_area_struct *vma,
+ 			    unsigned long address, pte_t *ptep, unsigned int nr)
+ {
+-	unsigned long kaddr;
++	unsigned long kaddr, pfn = pte_pfn(ptep_get(ptep));
+ 
+-	if (!(vma->vm_flags & VM_EXEC) || !pfn_valid(pte_pfn(*ptep)))
++	if (!(vma->vm_flags & VM_EXEC) || !pfn_valid(pfn))
+ 		return;
+-	kaddr = (unsigned long)__va(pte_pfn(*ptep) << PAGE_SHIFT);
++	kaddr = (unsigned long)__va(pfn << PAGE_SHIFT);
+ 	padre_flush_icache_range(kaddr, kaddr + nr * PAGE_SIZE);
+ }
+ 
+@@ -278,7 +278,19 @@
+ 
+ /* 2.6.17: the TLB probe may write the entry back to memory, so restore
+  * the value read before (flush_tlb_page in asm-padre/tlbflush.h).
++ * 16 KB page: one probe per 4 KB hardware entry, as 2.6.17 did.
+  */
++static inline void padre_tlb_probe(unsigned long addr)
++{
++	__asm__ __volatile__("sta %%g0, [%0] %4\n\t"
++			     "sta %%g0, [%1] %4\n\t"
++			     "sta %%g0, [%2] %4\n\t"
++			     "sta %%g0, [%3] %4"
++			     : : "r" (addr), "r" (addr + 0x1000),
++			       "r" (addr + 0x2000), "r" (addr + 0x3000),
++			       "i" (ASI_PADRE_TLBPROBE) : "memory");
++}
++
+ static void padre_tlb_page(struct vm_area_struct *vma, unsigned long addr)
+ {
+ 	struct mm_struct *mm = vma->vm_mm;
+@@ -292,16 +304,12 @@
+ 	pmd = pmd_off(mm, addr);
+ 	local_irq_save(flags);
+ 	if (pmd_none(*pmd)) {
+-		__asm__ __volatile__("sta %%g0, [%0] %1"
+-				     : : "r" (addr), "i" (ASI_PADRE_TLBPROBE)
+-				     : "memory");
++		padre_tlb_probe(addr);
+ 	} else {
+ 		ptep = (pte_t *)pmd_page_vaddr(*pmd) + pte_index(addr);
+-		pte = READ_ONCE(*ptep);
+-		__asm__ __volatile__("sta %%g0, [%0] %1"
+-				     : : "r" (addr), "i" (ASI_PADRE_TLBPROBE)
+-				     : "memory");
+-		WRITE_ONCE(*ptep, pte);
++		pte = ptep_get(ptep);	/* raw words, no merge */
++		padre_tlb_probe(addr);
++		set_pte(ptep, pte);
+ 	}
+ 	local_irq_restore(flags);
+ }
+@@ -327,13 +335,15 @@
+ 
+ /* ---------------------------------------------------------------------
+  * Uncached area (last 16 MB of DDR, threshold set in head_32.S):
+- * first 8 MB (2048 pages) for page directories and page tables,
++ * first 8 MB (2048 blocks of 4 KB) for page directories and page tables
++ * (hardware size: 4 KB each, also with 16 KB Linux pages),
+  * last 8 MB for coherent DMA (arch_dma_alloc below).
+  * ponytail: first-fit bitmap allocators; enough for EHCI and a few pools,
+  * revisit if a driver makes large allocations.
+  */
+ #define PADRE_NOCACHE_SIZE	(16UL << 20)
+-#define PADRE_PT_PAGES		2048
++#define PADRE_PT_PAGES		2048	/* 4 KB blocks */
++#define PADRE_PT_AREA		(PADRE_PT_PAGES * PADRE_HW_TABLE_SIZE)
+ 
+ unsigned long padre_nocache_phys;
+ static void *padre_pt_pool;
+@@ -352,12 +362,12 @@
+ 	if (i < PADRE_PT_PAGES) {
+ 		__set_bit(i, padre_pt_map);
+ 		padre_pt_used++;
+-		p = padre_pt_pool + i * PAGE_SIZE;
++		p = padre_pt_pool + i * PADRE_HW_TABLE_SIZE;
+ 	}
+ 	spin_unlock_irqrestore(&padre_pt_lock, flags);
+ 
+ 	if (p)
+-		memset(p, 0, PAGE_SIZE);
++		memset(p, 0, PADRE_HW_TABLE_SIZE);
+ 	else
+ 		pr_err("padre: out of uncached pages for page tables\n");
+ 	return p;
+@@ -366,7 +376,7 @@
+ void padre_free_nocache_page(void *addr)
+ {
+ 	unsigned long flags;
+-	unsigned int i = (addr - padre_pt_pool) / PAGE_SIZE;
++	unsigned int i = (addr - padre_pt_pool) / PADRE_HW_TABLE_SIZE;
+ 
+ 	BUG_ON(addr < padre_pt_pool || i >= PADRE_PT_PAGES);
+ 	spin_lock_irqsave(&padre_pt_lock, flags);
+@@ -386,7 +396,7 @@
+  * DMA address = Linux physical address (DDR at 0x4000_0000 on the bus,
+  * like 2.6.17 virt_to_bus).
+  */
+-#define PADRE_DMA_PAGES		(PADRE_NOCACHE_SIZE / PAGE_SIZE - PADRE_PT_PAGES)
++#define PADRE_DMA_PAGES		((PADRE_NOCACHE_SIZE - PADRE_PT_AREA) / PAGE_SIZE)
+ 
+ static DECLARE_BITMAP(padre_dma_map, PADRE_DMA_PAGES);
+ static DEFINE_SPINLOCK(padre_dma_lock);
+@@ -407,7 +417,7 @@
+ 		pr_err_ratelimited("padre: coherent DMA exhausted (%zu bytes)\n", size);
+ 		return NULL;
+ 	}
+-	va = padre_pt_pool + (PADRE_PT_PAGES + i) * PAGE_SIZE;
++	va = padre_pt_pool + PADRE_PT_AREA + i * PAGE_SIZE;
+ 	memset(va, 0, n * PAGE_SIZE);
+ 	*dma_handle = phys_to_dma(dev, __pa(va));
+ 	return va;
+@@ -416,7 +426,7 @@
+ void arch_dma_free(struct device *dev, size_t size, void *cpu_addr,
+ 		   dma_addr_t dma_handle, unsigned long attrs)
+ {
+-	void *base = padre_pt_pool + PADRE_PT_PAGES * PAGE_SIZE;
++	void *base = padre_pt_pool + PADRE_PT_AREA;
+ 	unsigned int n = PAGE_ALIGN(size) >> PAGE_SHIFT;
+ 	unsigned long flags, i = (cpu_addr - base) >> PAGE_SHIFT;
+ 
+@@ -442,20 +452,17 @@
+ 	padre_free_nocache_page(pgd);
+ }
+ 
++/* ponytail: no pagetable_pte_ctor/dtor: 4 tables share a 16 KB page
++ * (reserved pool) and UP has no split page-table locks; only the
++ * NR_PAGETABLE statistic is missing.
++ */
+ pgtable_t pte_alloc_one(struct mm_struct *mm)
+ {
+-	pte_t *ptep = padre_get_nocache_page();
+-
+-	if (ptep && !pagetable_pte_ctor(mm, virt_to_ptdesc(ptep))) {
+-		padre_free_nocache_page(ptep);
+-		ptep = NULL;
+-	}
+-	return ptep;
++	return padre_get_nocache_page();
+ }
+ 
+ void pte_free(struct mm_struct *mm, pgtable_t ptep)
+ {
+-	pagetable_dtor(virt_to_ptdesc(ptep));
+ 	padre_free_nocache_page(ptep);
+ }
+ 
+@@ -481,7 +488,7 @@
+ void mmu_info(struct seq_file *m)
+ {
+ 	seq_printf(m, "MMU type\t: %s\n"
+-		      "pagetables\t: %u/%u pages\n",
++		      "pagetables\t: %u/%u blocks of 4 KB\n",
+ 		   srmmu_name, padre_pt_used, PADRE_PT_PAGES);
+ }
+ 

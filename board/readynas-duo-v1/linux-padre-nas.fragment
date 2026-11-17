@@ -68,7 +68,6 @@ CONFIG_CRYPTO_MANAGER_DISABLE_TESTS=y
 # (rootfs-overlay/usr/sbin/padre-fan)
 CONFIG_HWMON=y
 CONFIG_SENSORS_DRIVETEMP=y
-# X-RAID ext3 with 16 KiB blocks (RAIDiator/DIET): unreadable by ext4 with
-# 4 KiB pages; accessed through fuse2fs (userspace); LVM of /c through dm
-CONFIG_FUSE_FS=y
+# X-RAID ext3 with 16 KiB blocks (RAIDiator/DIET): mounted by ext4 thanks
+# to the 16 KiB pages (patch linux/0003); LVM of /c through dm
 CONFIG_BLK_DEV_DM=y

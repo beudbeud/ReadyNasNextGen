@@ -1,7 +1,7 @@
 #!/bin/sh
 # xraid-compat tests on a PC, without the NAS nor root: fake X-RAID disk
 # images (sparse files, make-images.py), xraid-info built for the host,
-# nas-raid with simulated dmsetup/mdadm/lvm/fuse2fs/mount (they record their
+# nas-raid with simulated dmsetup/mdadm/lvm/mount (they record their
 # arguments in cmd.log). No dm or loop device is created.
 #   sh package/xraid-compat/tests/test.sh   (dash; the host busybox prefers
 # its own applets, mount for instance, to the simulated commands)
@@ -24,8 +24,7 @@ for s in clean big dirty degraded sync different md reinstall counters torn sbw;
 done
 
 # ---------- image ----------
-# /c must be empty in the image: a file there makes fuse2fs refuse the mount
-# ("fuse: if you are sure this is safe, use the 'nonempty' mount option")
+# /c must be empty in the image: a file there would be hidden by the mount
 check "overlay: nothing inside /c" "[ ! -e '$HERE/../../../board/readynas-duo-v1/rootfs-overlay/c' ] || [ -z \"\$(ls -A '$HERE/../../../board/readynas-duo-v1/rootfs-overlay/c')\" ]"
 
 # ---------- xraid-info ----------
@@ -86,7 +85,7 @@ check "smart: clean refusal on an image (no SG_IO)" "! '$R/bin/xraid-info' smart
 
 # ---------- nas-raid with simulated commands ----------
 stub() { printf '#!/bin/sh\necho "%s $*" >> "%s/cmd.log"\n%s\n' "$1" "$T" "${2:-}" > "$R/bin/$1"; chmod 755 "$R/bin/$1"; }
-for c in dmsetup lvm fuse2fs umount logger; do stub $c; done
+for c in dmsetup lvm umount logger; do stub $c; done
 stub mdadm
 stub mount 'echo "/dev/x $3 ext4 rw 0 0" >> "'"$R"'/proc/mounts"'
 : > "$R/proc/mounts"
@@ -120,10 +119,10 @@ check "rw mount: superblock on the disks is dirty (unclean, sections not in sync
 check "mount: mdadm --build RAID 1 without superblock, base first" "grep -q 'mdadm --build /dev/md11 --level=1 --raid-devices=2 --assume-clean /dev/mapper/xr-a-s1 /dev/mapper/xr-b-s1' '$T/cmd.log'"
 check "mount: p5 mapped onto md11 at 512008" "grep -q \"dmsetup create xr-p5 --table 0 1460504296 linear /dev/md11 512008\" '$T/cmd.log'"
 check "mount: no table beyond V" "within_v 1465128688"
-check "mount: LVM metadata read-only, fuse2fs rw" "grep -q 'metadata_read_only = 1' '$T/cmd.log' && grep -q 'fuse2fs -o allow_other /dev/mapper/c-c /c' '$T/cmd.log'"
+check "mount: LVM metadata read-only, kernel ext4 rw" "grep -q 'metadata_read_only = 1' '$T/cmd.log' && grep -q 'mount -t ext4 -o noatime /dev/mapper/c-c /c' '$T/cmd.log' && ! grep -q fuse2fs '$T/cmd.log'"
 check "mount: xraid-dirty mark set" "[ -e '$R/var/lib/nas-raid/xraid-dirty' ]"
 check "mount: never a direct write (dd)" "! grep -q '^dd' '$T/cmd.log'"
-echo "/dev/mapper/c-c /c fuse rw 0 0" > "$R/proc/mounts"
+echo "/dev/mapper/c-c /c ext4 rw 0 0" > "$R/proc/mounts"
 nr unmount 2>/dev/null >/dev/null
 check "clean unmount: md stopped, THEN superblock clean, mark removed" "grep -n 'mdadm --stop /dev/md11\|xraid-sb clean' '$T/cmd.log' | head -n 1 | grep -q 'mdadm --stop' && grep -q 'xraid-sb clean' '$T/cmd.log' && [ -z \"\$(reasons big)\" ] && [ ! -e '$R/var/lib/nas-raid/xraid-dirty' ]"
 # a repair still running at unmount: superblock left dirty
@@ -133,7 +132,7 @@ check "unmount with a resync running: superblock and mark stay dirty" "! grep -q
 # power loss under Linux: superblock dirty and mark: ro, then verify puts it back clean
 : > "$T/cmd.log"; nr mount 2>/dev/null >/dev/null
 check "after power loss: read-only (superblock unclean, sections not in sync)" "grep -qx 'xraid-ro unclean_shutdown sync_in_progress sync_in_progress' '$R/var/run/nas-raid.mode' && ! grep -q 'xraid-sb\|mdadm' '$T/cmd.log'"
-check "read-only: dm --readonly on the base, LVM read_only_volume_list, fuse2fs ro" "grep -q 'dmsetup create xr-p5 --readonly --table 0 1460504296 linear .*big/sdb.img 4608040' '$T/cmd.log' && grep -q 'read_only_volume_list' '$T/cmd.log' && grep -q 'fuse2fs -o ro,allow_other' '$T/cmd.log'"
+check "read-only: dm --readonly on the base, LVM read_only_volume_list, ext4 ro" "grep -q 'dmsetup create xr-p5 --readonly --table 0 1460504296 linear .*big/sdb.img 4608040' '$T/cmd.log' && grep -q 'read_only_volume_list' '$T/cmd.log' && grep -q 'mount -t ext4 -o ro,noatime /dev/mapper/c-c /c' '$T/cmd.log' && ! grep -q 'noload' '$T/cmd.log'"
 nr unmount 2>/dev/null >/dev/null
 # same on small images (a full verify of the 750 GB ones would take too long)
 DISKS="$T/clean/sda.img $T/clean/sdb.img"; nr mount 2>/dev/null >/dev/null

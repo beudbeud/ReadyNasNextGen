@@ -72,7 +72,7 @@ At boot, `S35storage` runs `nas-raid mount` (before NFS and SMB):
         mirror disk   ──dm-linear [start, start+len)──┘        = /dev/md10 (section 0), /dev/md11 (section 1)
         base disk partitions ── dm-linear on md1x ── /dev/mapper/xr-p1, xr-p2, xr-p5
         xr-p5 ── LVM (vgchange -ay c, read-only metadata) ── /dev/mapper/c-c
-        /dev/mapper/c-c ── fuse2fs (ext3 with 16 KiB blocks) ── /c
+        /dev/mapper/c-c ── kernel ext4 driver (ext3 with 16 KiB blocks) ── /c
 
    Each write therefore goes to both disks at the same LBAs, exactly
    as RAIDiator did, and only **inside the sections bounded to V**.
@@ -85,7 +85,8 @@ At boot, `S35storage` runs `nas-raid mount` (before NFS and SMB):
 3. **Read-only** (a safeguard refuses writing): no md; the
    partitions are mapped directly onto a single disk (the base if it is
    "online", otherwise the mirror) with `dmsetup --readonly`, LVM with
-   `read_only_volume_list`, and `fuse2fs -o ro`.
+   `read_only_volume_list`, and `mount -t ext4 -o ro` (`ro,noload` if a
+   journal is left to replay: it cannot be replayed on a read-only device).
 4. If a disk carries an md superblock (made by an earlier version), the md is
    mounted on `/c` (`mdadm --assemble --scan`, VG `donnees`, ext4).
 
@@ -112,7 +113,7 @@ safeguards. Used after a change of `XRAID_RW`.
 
 Measured on the NAS: `xraid-info --samples 256` on both disks takes 34.8 s
 cold (20 s warm), `--samples 32` 5.8 s, without samples 0.1–1.2 s; dmsetup,
-LVM and fuse2fs about 2 s. The comparison only protects **writing** (two
+LVM and the mount about 2 s. The comparison only protects **writing** (two
 disks that differ would be written as a mirror): read-only reads the base
 disk alone and a difference cannot damage anything. So `nas-raid mount` (and
 `remount`) first runs `xraid-info` without samples, decides with all the
@@ -123,7 +124,7 @@ about 2–3 s instead of ~37 s; a rw boot keeps the full comparison.
 comparison, not recommended for rw).
 
 The swap (`p2`) and the RAIDiator root (`p1`) are not used (the RAIDiator
-swap has 16 KiB pages).
+swap has 16 KiB pages; so does Linux 6.18 now, but nothing needs it).
 
 ### 2.2 A leg that fails while writing
 
@@ -181,8 +182,14 @@ Only one `nas-raid` action at a time (lock).
   experiments that validate them on the NAS).
 - Disk replacement and vertical expansion are left to RAIDiator (§6).
 - Do not reassemble the md by hand with `--assume-clean`.
-- `fuse2fs` in user space on a ~200 MHz SPARC: slow. An ext3 journal
-  to replay can prevent a read-write mount (run fsck on a PC first).
+- The ext3 with 16 KiB blocks is mounted by the kernel's ext4 driver: this
+  needs pages at least as large as the blocks, hence the 16 KiB pages of the
+  Padre kernel (patch `linux/0003`, like the stock 2.6.17 kernel). Before,
+  fuse2fs (user space) read 3.3 MiB/s and wrote ~110 KB/s; the kernel reads
+  11.8 MiB/s (200 MiB, cold cache, disks in PIO). ext4 does not add any
+  ext4 feature to an ext3 it mounts: RAIDiator can still read it. A journal
+  to replay still prevents a read-write mount if it fails (run fsck on a PC
+  first).
 - LVM: if group `c` contains RAIDiator snapshots, it needs
   `CONFIG_DM_SNAPSHOT` (not in the kernel); to be checked with the readings.
 - SMART is read through ATA PASS-THROUGH (`xraid-info smart`), not through smartctl
@@ -256,7 +263,7 @@ against the RAIDiator superblock: only the expected fields change, the four
 copies stay identical; idempotence; refusals of torn or inconsistent
 superblocks), the sequences "in use" → clean, power loss → verify → clean,
 leg failure → `fail` on the survivor → read-only, missing disk → nothing
-written, the refusal of the md commands, and the DIET API. dmsetup, mdadm, lvm, fuse2fs and mount are simulated: no
+written, the refusal of the md commands, and the DIET API. dmsetup, mdadm, lvm and mount are simulated: no
 dm or loop device is created (that would need root).
 
 ## 9. Readings to take on the NAS (read-only)
@@ -319,5 +326,5 @@ after each one, read the four copies back with `dd` as above and compare with
 | `package/xraid-compat/src/nas-raid` | mount, unmount, watch, check, repair |
 | `package/xraid-compat/src/S35storage` | boot, shutdown, watch every 30 s |
 | `package/xraid-compat/tests/` | fake images and tests |
-| `/etc/nas-raid.conf` (on the NAS, optional) | `XRAID_RW`, `SAMPLES`, `FUSE2FS_OPTS`… (variables at the top of `nas-raid`) |
+| `/etc/nas-raid.conf` (on the NAS, optional) | `XRAID_RW`, `SAMPLES`, `EXT4_OPTS`… (variables at the top of `nas-raid`) |
 | `/var/lib/nas-raid/` (on the NAS) | markers, check, log (`log`) |

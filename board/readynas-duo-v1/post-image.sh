@@ -60,6 +60,10 @@ for fn in fpd_trap_handler do_fpd_trap do_mathemu do_one_mathemu \
 	echo "   $fn: clean"
 done
 # The whole userspace (programs, libraries, modules)
+PT_LOAD_16K='function h(x,  i, v) { v = 0; x = tolower(substr(x, 3));
+	for (i = 1; i <= length(x); i++) v = v * 16 + index("0123456789abcdef", substr(x, i, 1)) - 1
+	return v }
+$1 == "LOAD" { if ((h($2) - h($3)) % 16384 || h($NF) < 16384) bad = 1 } END { exit bad }'
 n=0
 bad=0
 for f in $(find "$TARGET_DIR" -type f); do
@@ -67,6 +71,11 @@ for f in $(find "$TARGET_DIR" -type f); do
 	n=$((n + 1))
 	if "${X}objdump" -d "$f" 2>/dev/null | grep -qE '[[:space:]](sdiv|sdivcc|casa)[[:space:]]'; then
 		echo "ERROR: forbidden instruction in ${f#$TARGET_DIR}"
+		bad=1
+	fi
+	# 16 KiB kernel pages: every PT_LOAD congruent modulo 0x4000, aligned >= 0x4000
+	if ! "${X}readelf" -lW "$f" 2>/dev/null | awk "$PT_LOAD_16K"; then
+		echo "ERROR: PT_LOAD not aligned on 16 KiB in ${f#$TARGET_DIR}"
 		bad=1
 	fi
 done
@@ -81,7 +90,7 @@ if grep -q 'padre-initramfs.list' "$BUILD_DIR"/linux-*/.config 2>/dev/null; then
 	done
 fi
 [ "$bad" = 0 ] || exit 1
-echo "   rootfs: $n ELF files, none"
+echo "   rootfs: $n ELF files, none; PT_LOAD aligned on 16 KiB"
 
 # Encrypted copy for "tftp <MAC> <NAS-IP> <PC-IP> vmlinux.k3 0x80004000"
 # (iboot decrypts with -k3 any file received by TFTP)
