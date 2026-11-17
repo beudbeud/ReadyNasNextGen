@@ -1,0 +1,25 @@
+name: tests
+
+on: [push, pull_request]
+
+jobs:
+  pc-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # python3, gcc and dash (sh) are on the runner; busybox adds the busybox-sh variants.
+      # mdadm, lvm, dmsetup and mount are simulated by the tests themselves.
+      - run: sudo apt-get update && sudo apt-get install -y busybox
+      - name: DIET API
+        run: sh package/diet/tests/test-api.sh
+      - name: xraid-compat
+        run: sh package/xraid-compat/tests/test.sh
+      - name: relay add-ons
+        # The real padre_relay.ko needs the SPARC cross toolchain and qemu
+        # (build-module.sh); the add-on tests only copy and compare it, so a stand-in is used.
+        run: |
+          OUT=$RUNNER_TEMP/relay
+          mkdir -p "$OUT"
+          echo 'stand-in for padre_relay.ko' > "$OUT/padre_relay.ko"
+          OUT=$OUT VERSION=ci sh board/readynas-duo-v1/relay/build-addon.sh
+          sh board/readynas-duo-v1/relay/test-addon.sh "$OUT/ReadyNasNextGen_relay_ci.bin" "$OUT/ReadyNasNextGen_relay_remove_ci.bin"

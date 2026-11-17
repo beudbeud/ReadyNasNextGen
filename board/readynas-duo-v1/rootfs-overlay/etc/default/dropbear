@@ -1,0 +1,4 @@
+# Read by /etc/init.d/S50dropbear (Buildroot), which adds -R.
+# -K 30: keepalive every 30 s; no answer for 3 of them (90 s) and the session closes.
+# -I 1800: close a session with no data either way for 30 min (keepalives do not count).
+DROPBEAR_ARGS="-K 30 -I 1800"

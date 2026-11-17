@@ -4,11 +4,14 @@
 # refuse; curl can still be told to use it for this one connection.
 #
 #   sh tools/frontview-upload.sh <nas-address> <addon.bin> [admin-user]
-#   (without a terminal: FRONTVIEW_PASSWORD=... and FRONTVIEW_YES=1 to skip the questions)
+#   (without a terminal: FRONTVIEW_PASSWORD=... and FRONTVIEW_YES=1 to skip the questions;
+#    FRONTVIEW_NO_REBOOT=1 to leave the restart to you)
 #
-# Same two requests as Frontview's "System > Update > Local" page: upload and verify
-# (CheckUpdateFile), then "Perform System Update" (LocalUpdate). The NAS then reboots
-# to install the add-on.
+# Same requests as Frontview: "System > Update > Local" uploads and verifies
+# (CheckUpdateFile), then "Perform System Update" (LocalUpdate). RAIDiator does not restart
+# by itself after that: Frontview sends the user to "System > Shutdown", and so does this
+# script (reboot). RAIDiator installs the add-on during that boot, then the add-on restarts
+# the NAS once more about 2 minutes later.
 set -e
 NAS=${1:?usage: $0 <nas-address> <addon.bin> [admin-user]}
 BIN=${2:?usage: $0 <nas-address> <addon.bin> [admin-user]}
@@ -31,7 +34,7 @@ fv() {
 }
 text() { sed -e 's/<[^>]*>/ /g' -e 's/&nbsp;/ /g' | tr -s ' \t' ' ' | grep -v '^ *$' || true; }
 
-echo "1/2 upload and verify $(basename "$BIN")..."
+echo "1/3 upload and verify $(basename "$BIN")..."
 R=$(fv -F PAGE=System -F OPERATION=set -F command=CheckUpdateFile -F "update_file=@$BIN")
 echo "$R" | text | head -20
 case "$R" in
@@ -45,6 +48,22 @@ if [ "${FRONTVIEW_YES:-}" != 1 ]; then
 	[ "$ok" = y ] || { echo "not installed"; exit 0; }
 fi
 
-echo "2/2 perform system update..."
+echo "2/3 perform system update..."
 fv --data 'OPERATION=set&command=LocalUpdate&PAGE=System&OUTER_TAB=NONE&INNER_TAB=NONE' | text | head -20
-echo "done: the NAS installs the add-on while it reboots"
+
+if [ "${FRONTVIEW_NO_REBOOT:-}" = 1 ]; then
+	echo "update staged; restart the NAS to install it (Frontview: System > Shutdown, or the power button)"
+	exit 0
+fi
+echo "3/3 reboot..."
+# "System > Shutdown > Shutdown and reboot". Request as documented by RAIDiator 4.x users
+# (the shutdown page itself is not in our Frontview extract). The NAS may drop the
+# connection while it goes down: not an error.
+fv -m 30 --data 'PAGE=System&OUTER_TAB=tab_shutdown&INNER_TAB=NONE&shutdown_option2=1&command=reboot&OPERATION=set' \
+	| text | head -5 || true
+cat <<EOM
+reboot requested. Now wait, the NAS restarts twice:
+  1. RAIDiator reboots and installs the add-on (a few minutes);
+  2. about 2 minutes after it is up, the add-on restarts the NAS again by itself.
+Do not power it off in between. Install log on the NAS: /var/log/relay-install.log
+EOM
