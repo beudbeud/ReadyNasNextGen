@@ -4,7 +4,7 @@
 # the background, ready answers in /var/run/diet). Fan control is S45fan, the
 # shares S60nfs and S70ksmbd, the web interface S50lighttpd.
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
-[ -r /etc/diet-lang.sh ] && . /etc/diet-lang.sh || tx() { printf "%s" "$3"; }
+[ -r /etc/diet-lang.sh ] && . /etc/diet-lang.sh || tx() { printf "%s" "$1"; }
 LOG=/var/log/diet.log
 PID=/var/run/diet-hwmon.pid
 log() { echo "[$(date '+%F %T')] $*" >> $LOG; }
@@ -25,14 +25,14 @@ collector_stop() {
 }
 
 start() {
-	log "$(tx "==== DIET $(cat /etc/diet-version) démarre ====" "==== DIET $(cat /etc/diet-version) startet ====" "==== DIET $(cat /etc/diet-version) starting ====")"
+	log "$(tx "==== DIET $(cat /etc/diet-version) starting ====" "==== DIET $(cat /etc/diet-version) démarre ====" "==== DIET $(cat /etc/diet-version) startet ====")"
 	# button: padre_hwmon calls /sbin/hotplug (CONFIG_UEVENT_HELPER_PATH)
 	echo /sbin/hotplug > /proc/sys/kernel/hotplug 2>/dev/null
 	[ -e /proc/sys/dev/hwmon/POWER_SWITCH ] && echo 1 > /proc/sys/dev/hwmon/POWER_SWITCH
 	if [ "$SPINDOWN_MIN" -gt 0 ]; then
 		if [ $SPINDOWN_MIN -le 20 ]; then S=$((SPINDOWN_MIN * 12)); else S=$((240 + SPINDOWN_MIN / 30)); fi
 		for b in /sys/block/sd*; do [ -d "$b" ] && hdparm -S $S /dev/${b##*/} >/dev/null 2>&1; done
-		log "$(tx "Veille des disques après $SPINDOWN_MIN min" "Platten-Standby nach $SPINDOWN_MIN min" "Disk spin-down after $SPINDOWN_MIN min")"
+		log "$(tx "Disk spin-down after $SPINDOWN_MIN min" "Veille des disques après $SPINDOWN_MIN min" "Platten-Standby nach $SPINDOWN_MIN min")"
 	fi
 	# LEDs: disk present = bay LED on; power LED steady
 	for b in /sys/block/sd*; do
@@ -44,7 +44,7 @@ start() {
 	start-stop-daemon -S -b -x /usr/sbin/ntpd -- -p pool.ntp.org
 	hwmon_start
 	collector_start
-	log "$(tx "prêt" "bereit" "ready")"
+	log "$(tx "ready" "prêt" "bereit")"
 }
 
 stop() {
@@ -53,7 +53,7 @@ stop() {
 	killall ntpd 2>/dev/null
 	echo 2 > /proc/sys/dev/led/power 2>/dev/null	# blinks during shutdown
 	[ -f /var/run/poweroff ] && M=poweroff || M=reboot
-	log "$(tx "Arrêt du système ($M)" "Herunterfahren ($M)" "Shutting down ($M)")"
+	log "$(tx "Shutting down ($M)" "Arrêt du système ($M)" "Herunterfahren ($M)")"
 }
 
 case "$1" in

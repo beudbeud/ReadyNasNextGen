@@ -29,7 +29,7 @@ cp "$SRC"/etc/lighttpd/lighttpd.conf "$SRC"/etc/lighttpd/webdav.conf "$R"/etc/li
 cp "$BOARD"/etc/rsyncd.conf "$R"/etc/
 head -c 2048 /dev/zero > "$R"/var/lib/minidlna/files.db
 echo $$ > "$R"/var/run/minidlna/minidlna.pid
-echo fr > "$R"/etc/diet-lang
+echo en > "$R"/etc/diet-lang
 echo readynas > "$R"/etc/hostname
 printf 'root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/home:/bin/false\n' > "$R"/etc/passwd
 printf 'root:x:0:\nusers:x:100:\nnobody:x:65534:\n' > "$R"/etc/group
@@ -110,7 +110,7 @@ fi
 # api METHOD query [body] [X-Diet]: output without headers in $OUT, status in $ST
 api() {
 	body=${3:-}
-	raw=$(printf '%s' "$body" | REQUEST_METHOD=$1 QUERY_STRING="$2&l=fr" CONTENT_LENGTH=${#body} \
+	raw=$(printf '%s' "$body" | REQUEST_METHOD=$1 QUERY_STRING="$2&l=en" CONTENT_LENGTH=${#body} \
 		HTTP_X_DIET=${4-1} REMOTE_ADDR=10.0.0.9 $SH "$SRC/www/cgi-bin/api")
 	ST=$(printf '%s\n' "$raw" | sed -n 's/^Status: \([0-9]*\).*/\1/p' | head -n 1); ST=${ST:-200}
 	OUT=$(printf '%s\n' "$raw" | tr -d '\r' | sed '1,/^$/d')
@@ -142,7 +142,12 @@ echo "$DEGRADED" > "$R"/proc/mdstat
 api GET a=status
 check "status degraded: U_, sdb failed, resync" "json 'j[\"md\"][0][\"map\"]==\"U_\" and j[\"disks\"][1][\"faulty\"]==1 and j[\"disks\"][0][\"faulty\"]==0 and \"recovery\" in j[\"md\"][0][\"sync\"]'"
 A=$($SH "$SRC"/usr/sbin/diet-alerts)
-check "diet-alerts: degraded RAID + failed disk" 'case "$A" in *"RAID dégradé (md0)"*"disque en panne dans le RAID (sdb1)"*) true;; *) false;; esac'
+check "diet-alerts: degraded RAID + failed disk" 'case "$A" in *"RAID degraded (md0)"*"failed disk in the RAID (sdb1)"*) true;; *) false;; esac'
+echo fr > "$R"/etc/diet-lang; A=$($SH "$SRC"/usr/sbin/diet-alerts)
+check "diet-alerts in French" 'case "$A" in *"RAID dégradé (md0)"*"disque en panne dans le RAID (sdb1)"*) true;; *) false;; esac'
+echo de > "$R"/etc/diet-lang; A=$($SH "$SRC"/usr/sbin/diet-alerts)
+check "diet-alerts in German" 'case "$A" in *"RAID beeinträchtigt (md0)"*"Platte im RAID ausgefallen (sdb1)"*) true;; *) false;; esac'
+echo en > "$R"/etc/diet-lang
 echo "$HEALTHY" > "$R"/proc/mdstat
 check "diet-alerts: nothing if healthy" '[ -z "$($SH "$SRC"/usr/sbin/diet-alerts)" ]'
 
@@ -270,10 +275,14 @@ api GET a=sys
 check "sys: reads back network, DNS, Telegram" "json 'j[\"net\"]==\"static\" and j[\"ip\"]==\"10.0.0.5\" and j[\"gw\"]==\"10.0.0.1\" and j[\"dns\"]==\"10.0.0.53 10.0.0.54\" and j[\"tgset\"]==1 and j[\"tgchat\"]==\"42\"'"
 api POST a=notify_test ''
 check "notify_test: sent (simulated wget)" '[ "$ST" = 200 ] && grep -q "wget .*api.telegram.org/bot123456:ABC-test/sendMessage" "$R"/cmd.log'
-api POST a=sys_set "host=nas-test&lang=fr&tz=UTC0&net=dhcp&tgchat="
+api POST a=sys_set "host=nas-test&lang=en&tz=UTC0&net=dhcp&tgchat="
 check "sys_set: DHCP and Telegram disabled" 'grep -q "iface eth0 inet dhcp" "$R"/etc/network/interfaces && [ ! -e "$R"/etc/diet-notify.conf ]'
 api POST a=sys_set 'host=Bad_Name'
-check "sys_set: invalid name refused" '[ "$ST" = 400 ]'
+check "sys_set: invalid name refused" '[ "$ST" = 400 ] && [ "$OUT" = "Invalid NAS name: lowercase letters, digits and dashes" ]'
+api POST 'a=sys_set&l=fr' 'host=Bad_Name'
+check "API error in French (l=fr)" '[ "$ST" = 400 ] && [ "$OUT" = "Nom du NAS invalide : minuscules, chiffres et tirets" ]'
+api POST 'a=sys_set&l=de' 'host=Bad_Name'
+check "API error in German (l=de)" '[ "$ST" = 400 ] && [ "$OUT" = "Ungültiger NAS-Name: Kleinbuchstaben, Ziffern und Bindestriche" ]'
 
 # ---------- services : MiniDLNA, Avahi, rsync, WebDAV ----------
 api GET a=services
@@ -497,7 +506,7 @@ TG_CHAT=1' > "$R"/etc/diet-notify.conf
 PATH="$R/bin:$PATH" DIET_ONCE=1 $SH "$SRC"/usr/sbin/diet-hwmon
 sleep 1
 check "diet-hwmon: history written" 'grep -q " 45 1800 120$" "$R"/var/run/hwmon.hist'
-check "diet-hwmon: alert logged and sent" 'grep -q "RAID dégradé" "$R"/var/run/alert.last && grep -q "ALERTE" "$R"/var/log/diet.log && grep -q "wget .*sendMessage" "$R"/cmd.log'
+check "diet-hwmon: alert logged and sent" 'grep -q "RAID degraded" "$R"/var/run/alert.last && grep -q "ALERT" "$R"/var/log/diet.log && grep -q "wget .*sendMessage" "$R"/cmd.log'
 
 check "all JSON answers of the API are valid ($NJSON)" '[ -z "$JSONKO" ] || { echo "  invalid:$JSONKO"; false; }'
 echo "$((N - FAILS))/$N tests passed (root: $R)"

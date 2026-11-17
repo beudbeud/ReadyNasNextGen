@@ -5,9 +5,9 @@
 # ponytail: busybox TLS wget does not check the certificate; real checking would need curl + CA certificates.
 R=${DIET_ROOT:-}
 CONF=$R/etc/diet-notify.conf
-[ -r $R/etc/diet-lang.sh ] && . $R/etc/diet-lang.sh || tx() { printf "%s" "$3"; }
+[ -r $R/etc/diet-lang.sh ] && . $R/etc/diet-lang.sh || tx() { printf "%s" "$1"; }
 [ -r "$CONF" ] && . "$CONF"
-[ -n "$TG_TOKEN" ] && [ -n "$TG_CHAT" ] || { echo "$(tx "Telegram non configuré" "Telegram nicht eingerichtet" "Telegram not set up")"; exit 2; }
+[ -n "$TG_TOKEN" ] && [ -n "$TG_CHAT" ] || { echo "$(tx "Telegram not set up" "Telegram non configuré" "Telegram nicht eingerichtet")"; exit 2; }
 enc=$(printf '%s' "$(hostname) : $1" | od -An -tx1 | tr -d ' \n' | sed 's/\(..\)/%\1/g')
 out=$(wget -T 20 -q -O - --post-data "chat_id=$TG_CHAT&text=$enc" "https://api.telegram.org/bot$TG_TOKEN/sendMessage" 2>&1)
 case "$out" in *'"ok":true'*) exit 0 ;; esac

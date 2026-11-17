@@ -5,7 +5,7 @@
 # (/etc/fan.conf), whose /var/run/fan.state is read here.
 # DIET_ROOT and DIET_ONCE=1 are only for tests on a PC.
 R=${DIET_ROOT:-}
-[ -r $R/etc/diet-lang.sh ] && . $R/etc/diet-lang.sh || tx() { printf "%s" "$3"; }
+[ -r $R/etc/diet-lang.sh ] && . $R/etc/diet-lang.sh || tx() { printf "%s" "$1"; }
 RUN=$R/var/run
 LOG=$R/var/log/diet.log
 log() { echo "[$(date '+%F %T')] hwmon: $*" >> $LOG; }
@@ -32,10 +32,10 @@ while true; do
 	[ $((N % 60)) -eq 59 ] && tail -n 720 $RUN/hwmon.hist > $RUN/hwmon.hist.tmp && mv $RUN/hwmon.hist.tmp $RUN/hwmon.hist
 	# alerts: notification only when the line changes
 	AL=$(diet-alerts 2>/dev/null)
-	[ -n "$fan" ] && [ "${pwm:-0}" -gt 0 ] && [ "$fan" -lt 300 ] && AL="${AL:+$AL ; }$(tx "ventilateur à ${fan} tr/min" "Lüfter bei ${fan} U/min" "fan at ${fan} rpm")"
+	[ -n "$fan" ] && [ "${pwm:-0}" -gt 0 ] && [ "$fan" -lt 300 ] && AL="${AL:+$AL ; }$(tx "fan at ${fan} rpm" "ventilateur à ${fan} tr/min" "Lüfter bei ${fan} U/min")"
 	if [ "$AL" != "$(cat $RUN/alert.last 2>/dev/null)" ]; then
 		echo "$AL" > $RUN/alert.last
-		if [ -n "$AL" ]; then M="$(tx "ALERTE : $AL" "ALARM: $AL" "ALERT: $AL")"; else M="$(tx "Retour à la normale" "Wieder normal" "Back to normal")"; fi
+		if [ -n "$AL" ]; then M="$(tx "ALERT: $AL" "ALERTE : $AL" "ALARM: $AL")"; else M="$(tx "Back to normal" "Retour à la normale" "Wieder normal")"; fi
 		log "$M"; diet-notify "$M" >/dev/null 2>&1 &
 	fi
 	[ -n "$DIET_ONCE" ] && break

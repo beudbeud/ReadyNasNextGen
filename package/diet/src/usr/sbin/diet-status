@@ -1,9 +1,9 @@
 #!/bin/sh
 # Console summary (SSH): fan, disks, RAID, /c, memory, services.
-[ -r /etc/diet-lang.sh ] && . /etc/diet-lang.sh || tx() { printf "%s" "$3"; }
+[ -r /etc/diet-lang.sh ] && . /etc/diet-lang.sh || tx() { printf "%s" "$1"; }
 temp=; disks=; fan=; pwm=
 for kv in $(cat /var/run/fan.state 2>/dev/null); do case "$kv" in temp=*|disks=*|fan=*|pwm=*) eval "$kv";; esac; done
-echo "$(tx "Température : ${temp}C (disques ${disks}C)   Ventilateur : ${fan} tr/min (consigne ${pwm})" "Temperatur: ${temp}C (Platten ${disks}C)   Lüfter: ${fan} U/min (Stufe ${pwm})" "Temperature: ${temp}C (disks ${disks}C)   Fan: ${fan} rpm (level ${pwm})")"
+echo "$(tx "Temperature: ${temp}C (disks ${disks}C)   Fan: ${fan} rpm (level ${pwm})" "Température : ${temp}C (disques ${disks}C)   Ventilateur : ${fan} tr/min (consigne ${pwm})" "Temperatur: ${temp}C (Platten ${disks}C)   Lüfter: ${fan} U/min (Stufe ${pwm})")"
 for b in /sys/block/sd*; do
 	[ -d "$b" ] || continue
 	t=$(cat $b/device/hwmon/hwmon*/temp1_input 2>/dev/null | head -n 1)
@@ -12,6 +12,6 @@ done
 grep -A2 '^md' /proc/mdstat 2>/dev/null
 df -h /c 2>/dev/null | tail -n 1
 free | sed -n 2p
-echo "$(tx "Services :" "Dienste:" "Services:") $(for p in dropbear ksmbd.mountd lighttpd ntpd rpc.mountd; do pidof $p >/dev/null && printf "$p "; done)"
-A=$(diet-alerts); [ -n "$A" ] && echo "$(tx "ALERTE :" "ALARM:" "ALERT:") $A"
+echo "$(tx "Services:" "Services :" "Dienste:") $(for p in dropbear ksmbd.mountd lighttpd ntpd rpc.mountd; do pidof $p >/dev/null && printf "$p "; done)"
+A=$(diet-alerts); [ -n "$A" ] && echo "$(tx "ALERT:" "ALERTE :" "ALARM:") $A"
 exit 0

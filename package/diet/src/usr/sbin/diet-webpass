@@ -3,13 +3,13 @@
 # (SHA-512 crypt, read by mod_authn_file). Without this file the interface
 # denies all access. The file is never in the image.
 U=${1:-admin}
-[ -r /etc/diet-lang.sh ] && . /etc/diet-lang.sh || tx() { printf "%s" "$3"; }
-case "$U" in *[!a-zA-Z0-9_-]*|"") echo "$(tx "Nom d’utilisateur invalide" "Ungültiger Benutzername" "Invalid user name")"; exit 1;; esac
-printf "$(tx "Nouveau mot de passe web pour %s : " "Neues Web-Passwort für %s: " "New web password for %s: ")" "$U"; stty -echo; read -r P; stty echo; echo
-printf "$(tx "Encore une fois : " "Nochmal: " "Again: ")"; stty -echo; read -r P2; stty echo; echo
-[ ${#P} -ge 6 ] || { echo "$(tx "Abandon : 6 caractères minimum" "Abbruch: mindestens 6 Zeichen" "Aborted: 6 characters minimum")"; exit 1; }
-[ "$P" = "$P2" ] || { echo "$(tx "Abandon : les deux saisies diffèrent" "Abbruch: Eingaben ungleich" "Aborted: the two entries differ")"; exit 1; }
+[ -r /etc/diet-lang.sh ] && . /etc/diet-lang.sh || tx() { printf "%s" "$1"; }
+case "$U" in *[!a-zA-Z0-9_-]*|"") echo "$(tx "Invalid user name" "Nom d’utilisateur invalide" "Ungültiger Benutzername")"; exit 1;; esac
+printf "$(tx "New web password for %s: " "Nouveau mot de passe web pour %s : " "Neues Web-Passwort für %s: ")" "$U"; stty -echo; read -r P; stty echo; echo
+printf "$(tx "Again: " "Encore une fois : " "Nochmal: ")"; stty -echo; read -r P2; stty echo; echo
+[ ${#P} -ge 6 ] || { echo "$(tx "Aborted: 6 characters minimum" "Abandon : 6 caractères minimum" "Abbruch: mindestens 6 Zeichen")"; exit 1; }
+[ "$P" = "$P2" ] || { echo "$(tx "Aborted: the two entries differ" "Abandon : les deux saisies diffèrent" "Abbruch: Eingaben ungleich")"; exit 1; }
 H=$(printf '%s\n' "$P" | mkpasswd -m sha512 -S "$(head -c 12 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 16)" -P 0) || exit 1
 umask 077
 echo "$U:$H" > /etc/lighttpd/htpasswd.new && mv /etc/lighttpd/htpasswd.new /etc/lighttpd/htpasswd
-echo "$(tx "Mot de passe enregistré." "Passwort gespeichert." "Password saved.")"
+echo "$(tx "Password saved." "Mot de passe enregistré." "Passwort gespeichert.")"

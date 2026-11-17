@@ -60,7 +60,7 @@ qp() {
   case $QP in *[!A-Za-z0-9_]*) QP=;; esac
 }
 qp l; case $QP in fr) L=fr;; de) L=de;; *) L=en;; esac
-tx() { case $L in fr) printf '%s' "$1";; de) printf '%s' "$2";; *) printf '%s' "$3";; esac; }
+tx() { case $L in fr) printf '%s' "$2";; de) printf '%s' "$3";; *) printf '%s' "$1";; esac; }
 esc() { sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\000-\037'; }
 # jstr text: text ready for a JSON string in $J (sed only if there is " \ or a control character)
 jstr() { case $1 in *[\"\\]*|*[[:cntrl:]]*) J=$(printf '%s' "$1" | esc);; *) J=$1;; esac; }
@@ -240,18 +240,18 @@ config_set() {
   for kv in $(echo "$BODY" | tr '&' ' '); do
     k=${kv%%=*}; v=${kv#*=}
     case " $KEYS " in *" $k "*) ;; *) continue;; esac
-    case "$v" in ''|*[!0-9]*) fail "400 Bad Request" "$(tx "$k : pas un nombre entier" "$k: keine ganze Zahl" "$k: not a whole number")";; esac
-    [ ${#v} -le 5 ] || fail "400 Bad Request" "$(tx "$k : trop grand" "$k: zu groß" "$k: too large")"
+    case "$v" in ''|*[!0-9]*) fail "400 Bad Request" "$(tx "$k: not a whole number" "$k : pas un nombre entier" "$k: keine ganze Zahl")";; esac
+    [ ${#v} -le 5 ] || fail "400 Bad Request" "$(tx "$k: too large" "$k : trop grand" "$k: zu groß")"
     eval "$k=\$v"; GOT=$((GOT + 1))
   done
-  [ $GOT -gt 0 ] || fail "400 Bad Request" "$(tx "aucune valeur reçue" "keine Werte erhalten" "no values received")"
-  [ "$FAN_PWM_MIN" -le "$FAN_PWM_MAX" ] && [ "$FAN_PWM_MAX" -le 255 ] || fail "400 Bad Request" "$(tx "Ventilateur : 0 <= min <= max <= 255" "Lüfter: 0 <= Min <= Max <= 255" "Fan: 0 <= min <= max <= 255")"
-  [ "$FAN_PWM_MIN" -ge 20 ] || fail "400 Bad Request" "$(tx "Un minimum de ventilateur sous 20 est trop risqué" "Lüfter-Minimum unter 20 ist zu riskant" "A fan minimum below 20 is too risky")"
-  [ "$TEMP_LOW" -ge 20 ] && [ "$TEMP_LOW" -lt "$TEMP_HIGH" ] && [ "$TEMP_HIGH" -le 70 ] || fail "400 Bad Request" "$(tx "Température : 20 <= minimal < pleine vitesse <= 70" "Temperatur: 20 <= Ruhig < Voll <= 70" "Temperature: 20 <= minimum < full speed <= 70")"
-  [ "$DISK_HIGH" -ge 30 ] && [ "$DISK_HIGH" -lt "$DISK_CRIT" ] && [ "$DISK_CRIT" -le 70 ] || fail "400 Bad Request" "$(tx "Disques : 30 <= pleine vitesse < arrêt d’urgence <= 70" "Platten: 30 <= Voll < Notaus <= 70" "Disks: 30 <= full speed < emergency shutdown <= 70")"
+  [ $GOT -gt 0 ] || fail "400 Bad Request" "$(tx "no values received" "aucune valeur reçue" "keine Werte erhalten")"
+  [ "$FAN_PWM_MIN" -le "$FAN_PWM_MAX" ] && [ "$FAN_PWM_MAX" -le 255 ] || fail "400 Bad Request" "$(tx "Fan: 0 <= min <= max <= 255" "Ventilateur : 0 <= min <= max <= 255" "Lüfter: 0 <= Min <= Max <= 255")"
+  [ "$FAN_PWM_MIN" -ge 20 ] || fail "400 Bad Request" "$(tx "A fan minimum below 20 is too risky" "Un minimum de ventilateur sous 20 est trop risqué" "Lüfter-Minimum unter 20 ist zu riskant")"
+  [ "$TEMP_LOW" -ge 20 ] && [ "$TEMP_LOW" -lt "$TEMP_HIGH" ] && [ "$TEMP_HIGH" -le 70 ] || fail "400 Bad Request" "$(tx "Temperature: 20 <= minimum < full speed <= 70" "Température : 20 <= minimal < pleine vitesse <= 70" "Temperatur: 20 <= Ruhig < Voll <= 70")"
+  [ "$DISK_HIGH" -ge 30 ] && [ "$DISK_HIGH" -lt "$DISK_CRIT" ] && [ "$DISK_CRIT" -le 70 ] || fail "400 Bad Request" "$(tx "Disks: 30 <= full speed < emergency shutdown <= 70" "Disques : 30 <= pleine vitesse < arrêt d’urgence <= 70" "Platten: 30 <= Voll < Notaus <= 70")"
   # padre_hwmon goes back to full speed without a setpoint for 5 min
-  [ "$PERIOD" -ge 10 ] && [ "$PERIOD" -le 240 ] || fail "400 Bad Request" "$(tx "Période : 10..240 secondes" "Intervall: 10..240 Sekunden" "Period: 10..240 seconds")"
-  [ "$SPINDOWN_MIN" -le 330 ] || fail "400 Bad Request" "$(tx "Veille : 0..330 minutes" "Standby: 0..330 Minuten" "Spin-down: 0..330 minutes")"
+  [ "$PERIOD" -ge 10 ] && [ "$PERIOD" -le 240 ] || fail "400 Bad Request" "$(tx "Period: 10..240 seconds" "Période : 10..240 secondes" "Intervall: 10..240 Sekunden")"
+  [ "$SPINDOWN_MIN" -le 330 ] || fail "400 Bad Request" "$(tx "Spin-down: 0..330 minutes" "Veille : 0..330 minutes" "Standby: 0..330 Minuten")"
   [ -f "$CONF" ] || : > "$CONF"
   for k in $VKEYS; do eval "setkey \"\$VCONF\" $k \$$k"; done
   setkey "$CONF" SPINDOWN_MIN "$SPINDOWN_MIN"
@@ -260,7 +260,7 @@ config_set() {
   for d in $(disks); do hdparm -S $S /dev/$d >/dev/null 2>&1; done
   "$INITD/S45fan" restart >/dev/null 2>&1
   note "Hardware settings changed from the web interface"
-  ok "$(tx "Enregistré et appliqué" "Gespeichert und angewendet" "Saved and applied")"
+  ok "$(tx "Saved and applied" "Enregistré et appliqué" "Gespeichert und angewendet")"
 }
 
 # --- SMB shares (ksmbd.conf, same syntax as smb.conf) --------------------------
@@ -308,44 +308,44 @@ shares_change() {
   for kv in $(echo "$BODY" | tr '&' ' '); do
     k=${kv%%=*}; v=${kv#*=}
     case "$k" in name|ro|guest) ;; *) continue;; esac
-    case "$v" in ''|*[!A-Za-z0-9_-]*) fail "400 Bad Request" "$(tx "Valeur invalide : lettres, chiffres, - et _ uniquement" "Ungültiger Wert: nur Buchstaben, Ziffern, - und _" "Invalid value: letters, digits, - and _ only")";; esac
+    case "$v" in ''|*[!A-Za-z0-9_-]*) fail "400 Bad Request" "$(tx "Invalid value: letters, digits, - and _ only" "Valeur invalide : lettres, chiffres, - et _ uniquement" "Ungültiger Wert: nur Buchstaben, Ziffern, - und _")";; esac
     eval "$k=\$v"
   done
-  case "$name" in ''|-*) fail "400 Bad Request" "$(tx "Nom de partage invalide" "Ungültiger Freigabename" "Invalid share name")";; esac
-  [ ${#name} -le 32 ] || fail "400 Bad Request" "$(tx "Nom de partage trop long (32 caractères au plus)" "Freigabename zu lang (höchstens 32 Zeichen)" "Share name too long (32 characters max.)")"
+  case "$name" in ''|-*) fail "400 Bad Request" "$(tx "Invalid share name" "Nom de partage invalide" "Ungültiger Freigabename")";; esac
+  [ ${#name} -le 32 ] || fail "400 Bad Request" "$(tx "Share name too long (32 characters max.)" "Nom de partage trop long (32 caractères au plus)" "Freigabename zu lang (höchstens 32 Zeichen)")"
   lname=$(echo "$name" | tr 'A-Z' 'a-z')
-  case "$lname" in global|homes|printers|ipc|home|lost-found|aquota*) fail "400 Bad Request" "$(tx "Ce nom est réservé" "Dieser Name ist reserviert" "This name is reserved")";; esac
+  case "$lname" in global|homes|printers|ipc|home|lost-found|aquota*) fail "400 Bad Request" "$(tx "This name is reserved" "Ce nom est réservé" "Dieser Name ist reserviert")";; esac
   [ -f "$KCONF" ] || printf '[global]\n\tnetbios name = READYNAS\n' > "$KCONF"
   have=$(shdr "$lname")
   case "$1" in
     share_add)
-      [ -z "$have" ] || fail "409 Conflict" "$(tx "Le partage $name existe déjà" "Die Freigabe $name gibt es schon" "The share $name already exists")"
-      mounted "$DATA" || fail "500 Internal Server Error" "$(tx "Le volume de données $DATA n’est pas monté" "Das Datenvolume $DATA ist nicht eingehängt" "The data volume $DATA is not mounted")"
+      [ -z "$have" ] || fail "409 Conflict" "$(tx "The share $name already exists" "Le partage $name existe déjà" "Die Freigabe $name gibt es schon")"
+      mounted "$DATA" || fail "500 Internal Server Error" "$(tx "The data volume $DATA is not mounted" "Le volume de données $DATA n’est pas monté" "Das Datenvolume $DATA ist nicht eingehängt")"
       if [ ! -d "$R$DATA/$name" ]; then
-        mkdir "$R$DATA/$name" || fail "500 Internal Server Error" "$(tx "Impossible de créer $DATA/$name" "$DATA/$name kann nicht angelegt werden" "Cannot create $DATA/$name")"
+        mkdir "$R$DATA/$name" || fail "500 Internal Server Error" "$(tx "Cannot create $DATA/$name" "Impossible de créer $DATA/$name" "$DATA/$name kann nicht angelegt werden")"
         # shared space: users group inherited (setgid), writable for every protocol
         # (SMB guest or account, WebDAV "nas", rsync), no sticky bit
         chown root:users "$R$DATA/$name" 2>/dev/null; chmod 2777 "$R$DATA/$name"
       fi
       cp "$KCONF" "$KCONF.bak"
       printf '\n[%s]\n\tpath = %s\n\tcreate mask = 0666\n\tdirectory mask = 0777\n\tforce create mode = 0666\n\tforce directory mode = 0777\n\twriteable = yes\n\tguest ok = yes\n' "$name" "$DATA/$name" >> "$KCONF"
-      MSG="$(tx "Partage $name créé" "Freigabe $name angelegt" "Share $name created")" ;;
+      MSG="$(tx "Share $name created" "Partage $name créé" "Freigabe $name angelegt")" ;;
     share_del)
-      [ -n "$have" ] || fail "404 Not Found" "$(tx "Partage $name introuvable" "Freigabe $name nicht gefunden" "Share $name not found")"
-      awk -v n="[$lname]" '/^[ \t]*\[/ { l = tolower($0); gsub(/^[ \t]+|[ \t]+$/, "", l); skip = (l == n) } !skip' "$KCONF" > "$KCONF.tmp" || fail "500 Internal Server Error" "$(tx "Écriture impossible" "Schreiben nicht möglich" "Cannot write")"
+      [ -n "$have" ] || fail "404 Not Found" "$(tx "Share $name not found" "Partage $name introuvable" "Freigabe $name nicht gefunden")"
+      awk -v n="[$lname]" '/^[ \t]*\[/ { l = tolower($0); gsub(/^[ \t]+|[ \t]+$/, "", l); skip = (l == n) } !skip' "$KCONF" > "$KCONF.tmp" || fail "500 Internal Server Error" "$(tx "Cannot write" "Écriture impossible" "Schreiben nicht möglich")"
       cp "$KCONF" "$KCONF.bak"; mv "$KCONF.tmp" "$KCONF"
-      MSG="$(tx "Partage $name retiré (le dossier et son contenu sont conservés)" "Freigabe $name entfernt (Ordner und Inhalt bleiben erhalten)" "Share $name removed (the folder and its contents are kept)")" ;;
+      MSG="$(tx "Share $name removed (the folder and its contents are kept)" "Partage $name retiré (le dossier et son contenu sont conservés)" "Freigabe $name entfernt (Ordner und Inhalt bleiben erhalten)")" ;;
     share_set)
-      [ -n "$have" ] || fail "404 Not Found" "$(tx "Partage $name introuvable" "Freigabe $name nicht gefunden" "Share $name not found")"
-      case "$ro$guest" in 00|01|10|11) ;; *) fail "400 Bad Request" "$(tx "Réglage invalide" "Ungültige Einstellung" "Invalid setting")";; esac
+      [ -n "$have" ] || fail "404 Not Found" "$(tx "Share $name not found" "Partage $name introuvable" "Freigabe $name nicht gefunden")"
+      case "$ro$guest" in 00|01|10|11) ;; *) fail "400 Bad Request" "$(tx "Invalid setting" "Réglage invalide" "Ungültige Einstellung")";; esac
       [ "$ro" = 1 ] && w=no || w=yes; [ "$guest" = 1 ] && g=yes || g=no
       awk -v n="[$lname]" -v w="$w" -v g="$g" '
         /^[ \t]*\[/ { l = tolower($0); gsub(/^[ \t]+|[ \t]+$/, "", l); insec = (l == n); print; if (insec) { print "\twriteable = " w; print "\tguest ok = " g } next }
         insec { k = tolower(substr($0, 1, index($0, "=") - 1)); gsub(/^[ \t]+|[ \t]+$/, "", k)
                 if (k == "writeable" || k == "writable" || k == "write ok" || k == "read only" || k == "guest ok" || k == "public") next }
-        { print }' "$KCONF" > "$KCONF.tmp" || fail "500 Internal Server Error" "$(tx "Écriture impossible" "Schreiben nicht möglich" "Cannot write")"
+        { print }' "$KCONF" > "$KCONF.tmp" || fail "500 Internal Server Error" "$(tx "Cannot write" "Écriture impossible" "Schreiben nicht möglich")"
       cp "$KCONF" "$KCONF.bak"; mv "$KCONF.tmp" "$KCONF"
-      MSG="$(tx "Partage $name mis à jour" "Freigabe $name geändert" "Share $name updated")" ;;
+      MSG="$(tx "Share $name updated" "Partage $name mis à jour" "Freigabe $name geändert")" ;;
   esac
   ksmbd_reload
   accounts_update || MSG="$MSG ($(davko))"
@@ -363,7 +363,7 @@ HTUSERS=$ETC/lighttpd/htpasswd-users
 SECRETS=$ETC/rsyncd.secrets
 RSCONF=$ETC/rsyncd.conf
 DAVCONF=$ETC/lighttpd/webdav.conf
-davko() { tx "conf WebDAV refusée par lighttpd -tt, ancienne gardée" "WebDAV-Konfiguration von lighttpd -tt abgelehnt, alte bleibt" "WebDAV configuration rejected by lighttpd -tt, old one kept"; }
+davko() { tx "WebDAV configuration rejected by lighttpd -tt, old one kept" "conf WebDAV refusée par lighttpd -tt, ancienne gardée" "WebDAV-Konfiguration von lighttpd -tt abgelehnt, alte bleibt"; }
 ckey() { sed -n "s/^$1=\([0-9]*\).*/\1/p" "$CONF" 2>/dev/null | tail -n 1; }
 
 setline() {	# setline file name value mode: replaces "name:..." (empty value = remove)
@@ -473,31 +473,31 @@ users_change() {
   for kv in $(echo "$BODY" | tr '&' ' '); do
     k=${kv%%=*}; v=${kv#*=}
     case "$k" in
-      name) case "$v" in ''|-*|*[!A-Za-z0-9_-]*) fail "400 Bad Request" "$(tx "Nom d’utilisateur invalide : lettres, chiffres, - et _ uniquement" "Ungültiger Benutzername: nur Buchstaben, Ziffern, - und _" "Invalid user name: letters, digits, - and _ only")";; esac; name=$v ;;
+      name) case "$v" in ''|-*|*[!A-Za-z0-9_-]*) fail "400 Bad Request" "$(tx "Invalid user name: letters, digits, - and _ only" "Nom d’utilisateur invalide : lettres, chiffres, - et _ uniquement" "Ungültiger Benutzername: nur Buchstaben, Ziffern, - und _")";; esac; name=$v ;;
       pw)   pw=$(urldec "$v") ;;
     esac
   done
-  [ -n "$name" ] && [ ${#name} -le 31 ] || fail "400 Bad Request" "$(tx "Nom d’utilisateur invalide" "Ungültiger Benutzername" "Invalid user name")"
+  [ -n "$name" ] && [ ${#name} -le 31 ] || fail "400 Bad Request" "$(tx "Invalid user name" "Nom d’utilisateur invalide" "Ungültiger Benutzername")"
   uid=$(awk -F: -v n="$name" '$1 == n { print $3; exit }' "$PASSWD")
   case "$1" in
     user_set)
-      [ ${#pw} -ge 6 ] || fail "400 Bad Request" "$(tx "Mot de passe trop court (6 caractères au moins)" "Passwort zu kurz (mindestens 6 Zeichen)" "Password too short (6 characters min.)")"
-      [ ${#pw} -le 128 ] && [ "$(printf '%s' "$pw" | wc -l)" -eq 0 ] || fail "400 Bad Request" "$(tx "Mot de passe invalide" "Ungültiges Passwort" "Invalid password")"
+      [ ${#pw} -ge 6 ] || fail "400 Bad Request" "$(tx "Password too short (6 characters min.)" "Mot de passe trop court (6 caractères au moins)" "Passwort zu kurz (mindestens 6 Zeichen)")"
+      [ ${#pw} -le 128 ] && [ "$(printf '%s' "$pw" | wc -l)" -eq 0 ] || fail "400 Bad Request" "$(tx "Invalid password" "Mot de passe invalide" "Ungültiges Passwort")"
       NEW=""
       # personal group <name> (member: nas, for WebDAV); a name already used by a
       # system group (audio, video, users...) is not allowed
       if [ -z "$uid" ]; then
-        case "$name" in [a-z]*) ;; *) fail "400 Bad Request" "$(tx "Un nouveau nom doit commencer par une minuscule" "Ein neuer Name muss mit einem Kleinbuchstaben beginnen" "A new name must start with a lowercase letter")";; esac
-        case "$name" in *[A-Z]*) fail "400 Bad Request" "$(tx "Un nouveau nom ne doit pas contenir de majuscules" "Ein neuer Name darf keine Großbuchstaben enthalten" "A new name must not contain uppercase letters")";; esac
+        case "$name" in [a-z]*) ;; *) fail "400 Bad Request" "$(tx "A new name must start with a lowercase letter" "Un nouveau nom doit commencer par une minuscule" "Ein neuer Name muss mit einem Kleinbuchstaben beginnen")";; esac
+        case "$name" in *[A-Z]*) fail "400 Bad Request" "$(tx "A new name must not contain uppercase letters" "Un nouveau nom ne doit pas contenir de majuscules" "Ein neuer Name darf keine Großbuchstaben enthalten")";; esac
         # reserved names: rsync backup account, WebDAV account, rsync modules
-        case "$name" in sauvegarde|nas|c|home|webdav|root) fail "400 Bad Request" "$(tx "Ce nom est réservé" "Dieser Name ist reserviert" "This name is reserved")";; esac
+        case "$name" in sauvegarde|nas|c|home|webdav|root) fail "400 Bad Request" "$(tx "This name is reserved" "Ce nom est réservé" "Dieser Name ist reserviert")";; esac
         uid=$(awk -F: '$3 >= 1000 && $3 < 65534 && $3 > m { m = $3 } END { print (m ? m + 1 : 1000) }' "$PASSWD")
         NEW=1
       elif [ "$uid" -lt 1000 ] || [ "$uid" -ge 65534 ]; then
-        fail "403 Forbidden" "$(tx "$name est un compte système" "$name ist ein Systemkonto" "$name is a system account")"
+        fail "403 Forbidden" "$(tx "$name is a system account" "$name est un compte système" "$name ist ein Systemkonto")"
       fi
       pg=$(awk -F: -v n="$name" '$1 == n { print $3; exit }' "$ETC/group" 2>/dev/null)
-      [ -z "$pg" ] || [ "$pg" -ge 1000 ] || fail "409 Conflict" "$(tx "$name est déjà le nom d’un groupe système" "$name ist schon der Name einer Systemgruppe" "$name is already the name of a system group")"
+      [ -z "$pg" ] || [ "$pg" -ge 1000 ] || fail "409 Conflict" "$(tx "$name is already the name of a system group" "$name est déjà le nom d’un groupe système" "$name ist schon der Name einer Systemgruppe")"
       cp "$PASSWD" "$PASSWD.bak"; cp "$ETC/group" "$ETC/group.bak"
       if [ -z "$pg" ]; then
         pg=$uid; while awk -F: -v g="$pg" '$3 == g { f = 1 } END { exit !f }' "$ETC/group"; do pg=$((pg + 1)); done
@@ -509,25 +509,25 @@ users_change() {
       # password on standard input (twice), never on the command line
       if ! printf '%s\n%s\n' "$pw" "$pw" | ksmbd.adduser -P "$PWDDB" -C "$KCONF" "$name" >/dev/null 2>&1; then
         cp "$PASSWD.bak" "$PASSWD"; cp "$ETC/group.bak" "$ETC/group"
-        fail "500 Internal Server Error" "$(tx "ksmbd.adduser a refusé le mot de passe de $name" "ksmbd.adduser hat das Passwort von $name abgelehnt" "ksmbd.adduser refused the password of $name")"
+        fail "500 Internal Server Error" "$(tx "ksmbd.adduser refused the password of $name" "ksmbd.adduser a refusé le mot de passe de $name" "ksmbd.adduser hat das Passwort von $name abgelehnt")"
       fi
       # same password for WebDAV (SHA-512 crypt, read by lighttpd as nas) and rsync
       H=$(printf '%s\n' "$pw" | mkpasswd -m sha512 -S "$(head -c 12 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 16)" -P 0) && [ -n "$H" ] \
-        || fail "500 Internal Server Error" "$(tx "mkpasswd a échoué" "mkpasswd fehlgeschlagen" "mkpasswd failed")"
+        || fail "500 Internal Server Error" "$(tx "mkpasswd failed" "mkpasswd a échoué" "mkpasswd fehlgeschlagen")"
       setline "$HTUSERS" "$name" "$H" 640; chown root:nas "$HTUSERS" 2>/dev/null
       setline "$SECRETS" "$name" "$pw" 600
-      [ -n "$NEW" ] && MSG="$(tx "Utilisateur $name créé" "Benutzer $name angelegt" "User $name created")" || MSG="$(tx "Mot de passe de $name modifié" "Passwort von $name geändert" "Password of $name changed")" ;;
+      [ -n "$NEW" ] && MSG="$(tx "User $name created" "Utilisateur $name créé" "Benutzer $name angelegt")" || MSG="$(tx "Password of $name changed" "Mot de passe de $name modifié" "Passwort von $name geändert")" ;;
     user_del)
-      [ -n "$uid" ] || fail "404 Not Found" "$(tx "Utilisateur $name introuvable" "Benutzer $name nicht gefunden" "User $name not found")"
-      [ "$uid" -ge 1000 ] && [ "$uid" -lt 65534 ] || fail "403 Forbidden" "$(tx "$name est un compte système" "$name ist ein Systemkonto" "$name is a system account")"
+      [ -n "$uid" ] || fail "404 Not Found" "$(tx "User $name not found" "Utilisateur $name introuvable" "Benutzer $name nicht gefunden")"
+      [ "$uid" -ge 1000 ] && [ "$uid" -lt 65534 ] || fail "403 Forbidden" "$(tx "$name is a system account" "$name est un compte système" "$name ist ein Systemkonto")"
       ksmbd.adduser -P "$PWDDB" -C "$KCONF" -d "$name" >/dev/null 2>&1
-      awk -F: -v n="$name" '$1 != n' "$PASSWD" > "$PASSWD.tmp" || fail "500 Internal Server Error" "$(tx "Écriture impossible" "Schreiben nicht möglich" "Cannot write")"
+      awk -F: -v n="$name" '$1 != n' "$PASSWD" > "$PASSWD.tmp" || fail "500 Internal Server Error" "$(tx "Cannot write" "Écriture impossible" "Schreiben nicht möglich")"
       cp "$PASSWD" "$PASSWD.bak"; cat "$PASSWD.tmp" > "$PASSWD"; rm -f "$PASSWD.tmp"
       # removed everywhere: WebDAV, rsync, personal group (the folder is kept)
       setline "$HTUSERS" "$name" "" 640; chown root:nas "$HTUSERS" 2>/dev/null
       setline "$SECRETS" "$name" "" 600
       awk -F: -v n="$name" '!($1 == n && $3 >= 1000)' "$ETC/group" > "$ETC/group.tmp" && cat "$ETC/group.tmp" > "$ETC/group"; rm -f "$ETC/group.tmp"
-      MSG="$(tx "Utilisateur $name supprimé (ses fichiers sont conservés)" "Benutzer $name gelöscht (seine Dateien bleiben erhalten)" "User $name deleted (their files are kept)")" ;;
+      MSG="$(tx "User $name deleted (their files are kept)" "Utilisateur $name supprimé (ses fichiers sont conservés)" "Benutzer $name gelöscht (seine Dateien bleiben erhalten)")" ;;
   esac
   ksmbd_reload
   accounts_update || MSG="$MSG ($(davko))"
@@ -563,34 +563,34 @@ nfs_change() {
     k=${kv%%=*}; v=$(urldec "${kv#*=}")
     case "$k" in path) path=$v;; client) client=$v;; ro) ro=$v;; esac
   done
-  case "$path" in /c|/c/*) ;; *) fail "400 Bad Request" "$(tx "Dossier invalide : /c ou /c/nom" "Ungültiger Ordner: /c oder /c/name" "Invalid folder: /c or /c/name")";; esac
-  case "${path#/c}" in *[!A-Za-z0-9/_-]*|*//*|*/) fail "400 Bad Request" "$(tx "Dossier invalide : /c ou /c/nom" "Ungültiger Ordner: /c oder /c/name" "Invalid folder: /c or /c/name")";; esac
+  case "$path" in /c|/c/*) ;; *) fail "400 Bad Request" "$(tx "Invalid folder: /c or /c/name" "Dossier invalide : /c ou /c/nom" "Ungültiger Ordner: /c oder /c/name")";; esac
+  case "${path#/c}" in *[!A-Za-z0-9/_-]*|*//*|*/) fail "400 Bad Request" "$(tx "Invalid folder: /c or /c/name" "Dossier invalide : /c ou /c/nom" "Ungültiger Ordner: /c oder /c/name")";; esac
   case "$client" in
     '*') ;;
     */*) isip "${client%/*}" && case "${client#*/}" in ''|*[!0-9]*) false;; *) [ "${client#*/}" -le 32 ];; esac \
-           || fail "400 Bad Request" "$(tx "Client invalide : *, adresse IP ou réseau a.b.c.d/nn" "Ungültiger Client: *, IP-Adresse oder Netz a.b.c.d/nn" "Invalid client: *, IP address or network a.b.c.d/nn")" ;;
-    *) isip "$client" || fail "400 Bad Request" "$(tx "Client invalide : *, adresse IP ou réseau a.b.c.d/nn" "Ungültiger Client: *, IP-Adresse oder Netz a.b.c.d/nn" "Invalid client: *, IP address or network a.b.c.d/nn")" ;;
+           || fail "400 Bad Request" "$(tx "Invalid client: *, IP address or network a.b.c.d/nn" "Client invalide : *, adresse IP ou réseau a.b.c.d/nn" "Ungültiger Client: *, IP-Adresse oder Netz a.b.c.d/nn")" ;;
+    *) isip "$client" || fail "400 Bad Request" "$(tx "Invalid client: *, IP address or network a.b.c.d/nn" "Client invalide : *, adresse IP ou réseau a.b.c.d/nn" "Ungültiger Client: *, IP-Adresse oder Netz a.b.c.d/nn")" ;;
   esac
   have=$(awk -v p="$path" -v c="$client" '$1 == p { for (i = 2; i <= NF; i++) { x = $i; sub(/\(.*/, "", x); if (x == c) { print 1; exit } } }' "$EXPORTS" 2>/dev/null)
   [ -f "$EXPORTS" ] || : > "$EXPORTS"
   case "$1" in
     nfs_add)
-      [ -z "$have" ] || fail "409 Conflict" "$(tx "$path est déjà exporté vers $client" "$path ist schon für $client freigegeben" "$path is already exported to $client")"
-      [ -d "$R$path" ] || fail "404 Not Found" "$(tx "Dossier $path introuvable" "Ordner $path nicht gefunden" "Folder $path not found")"
+      [ -z "$have" ] || fail "409 Conflict" "$(tx "$path is already exported to $client" "$path est déjà exporté vers $client" "$path ist schon für $client freigegeben")"
+      [ -d "$R$path" ] || fail "404 Not Found" "$(tx "Folder $path not found" "Dossier $path introuvable" "Ordner $path nicht gefunden")"
       [ "$ro" = 1 ] && o=ro || o=rw
       cp "$EXPORTS" "$EXPORTS.bak"
       echo "$path $client($o,no_subtree_check)" >> "$EXPORTS"
-      MSG="$(tx "Export NFS de $path ajouté" "NFS-Freigabe von $path angelegt" "NFS export of $path added")" ;;
+      MSG="$(tx "NFS export of $path added" "Export NFS de $path ajouté" "NFS-Freigabe von $path angelegt")" ;;
     nfs_del)
-      [ -n "$have" ] || fail "404 Not Found" "$(tx "Export introuvable" "Freigabe nicht gefunden" "Export not found")"
+      [ -n "$have" ] || fail "404 Not Found" "$(tx "Export not found" "Export introuvable" "Freigabe nicht gefunden")"
       # removes this client from the line; the line goes away if none is left
       awk -v p="$path" -v c="$client" '$1 != p { print; next }
         { o = $1; for (i = 2; i <= NF; i++) { x = $i; sub(/\(.*/, "", x); if (x != c) o = o " " $i } if (o != $1) print o }' "$EXPORTS" > "$EXPORTS.tmp" \
-        || fail "500 Internal Server Error" "$(tx "Écriture impossible" "Schreiben nicht möglich" "Cannot write")"
+        || fail "500 Internal Server Error" "$(tx "Cannot write" "Écriture impossible" "Schreiben nicht möglich")"
       cp "$EXPORTS" "$EXPORTS.bak"; mv "$EXPORTS.tmp" "$EXPORTS"
-      MSG="$(tx "Export NFS de $path vers $client retiré" "NFS-Freigabe von $path für $client entfernt" "NFS export of $path to $client removed")" ;;
+      MSG="$(tx "NFS export of $path to $client removed" "Export NFS de $path vers $client retiré" "NFS-Freigabe von $path für $client entfernt")" ;;
   esac
-  exportfs -ra >/dev/null 2>&1 || MSG="$MSG ($(tx "exportfs a échoué, voir le journal" "exportfs fehlgeschlagen, siehe Protokoll" "exportfs failed, see the log"))"
+  exportfs -ra >/dev/null 2>&1 || MSG="$MSG ($(tx "exportfs failed, see the log" "exportfs a échoué, voir le journal" "exportfs fehlgeschlagen, siehe Protokoll"))"
   note "$MSG"; ok "$MSG"
 }
 
@@ -644,23 +644,23 @@ sys_set() {
     k=${kv%%=*}
     case "$k" in host|lang|tz|net|ip|mask|gw|dns|tgtoken|tgchat) v=$(urldec "${kv#*=}"); eval "$k=\$v";; esac
   done
-  case "$host" in ''|-*|*[!a-z0-9-]*) fail "400 Bad Request" "$(tx "Nom du NAS invalide : minuscules, chiffres et tirets" "Ungültiger NAS-Name: Kleinbuchstaben, Ziffern und Bindestriche" "Invalid NAS name: lowercase letters, digits and dashes")";; esac
-  [ ${#host} -le 15 ] || fail "400 Bad Request" "$(tx "Nom du NAS trop long (15 caractères au plus)" "NAS-Name zu lang (höchstens 15 Zeichen)" "NAS name too long (15 characters max.)")"
-  case "$lang" in ''|fr|de|en) ;; *) fail "400 Bad Request" "$(tx "Langue du système invalide" "Ungültige Systemsprache" "Invalid system language")";; esac
-  case "$tz" in ''|*[!A-Za-z0-9,./+:\<\>-]*) fail "400 Bad Request" "$(tx "Fuseau horaire invalide" "Ungültige Zeitzone" "Invalid time zone")";; esac
-  [ ${#tz} -le 60 ] || fail "400 Bad Request" "$(tx "Fuseau horaire invalide" "Ungültige Zeitzone" "Invalid time zone")"
+  case "$host" in ''|-*|*[!a-z0-9-]*) fail "400 Bad Request" "$(tx "Invalid NAS name: lowercase letters, digits and dashes" "Nom du NAS invalide : minuscules, chiffres et tirets" "Ungültiger NAS-Name: Kleinbuchstaben, Ziffern und Bindestriche")";; esac
+  [ ${#host} -le 15 ] || fail "400 Bad Request" "$(tx "NAS name too long (15 characters max.)" "Nom du NAS trop long (15 caractères au plus)" "NAS-Name zu lang (höchstens 15 Zeichen)")"
+  case "$lang" in ''|fr|de|en) ;; *) fail "400 Bad Request" "$(tx "Invalid system language" "Langue du système invalide" "Ungültige Systemsprache")";; esac
+  case "$tz" in ''|*[!A-Za-z0-9,./+:\<\>-]*) fail "400 Bad Request" "$(tx "Invalid time zone" "Fuseau horaire invalide" "Ungültige Zeitzone")";; esac
+  [ ${#tz} -le 60 ] || fail "400 Bad Request" "$(tx "Invalid time zone" "Fuseau horaire invalide" "Ungültige Zeitzone")"
   case "$net" in
     dhcp) ;;
     static)
-      isip "$ip" || fail "400 Bad Request" "$(tx "Adresse IP invalide" "Ungültige IP-Adresse" "Invalid IP address")"
-      isip "$mask" || fail "400 Bad Request" "$(tx "Masque de sous-réseau invalide" "Ungültige Netzmaske" "Invalid netmask")"
-      [ -z "$gw" ] || isip "$gw" || fail "400 Bad Request" "$(tx "Passerelle invalide" "Ungültiges Gateway" "Invalid gateway")"
-      n=0; for d in $dns; do isip "$d" || fail "400 Bad Request" "$(tx "Serveur DNS invalide : $d" "Ungültiger DNS-Server: $d" "Invalid DNS server: $d")"; n=$((n + 1)); done
-      [ $n -le 3 ] || fail "400 Bad Request" "$(tx "Trois serveurs DNS au plus" "Höchstens drei DNS-Server" "Three DNS servers max.")" ;;
-    *) fail "400 Bad Request" "$(tx "Mode réseau invalide" "Ungültiger Netzwerkmodus" "Invalid network mode")" ;;
+      isip "$ip" || fail "400 Bad Request" "$(tx "Invalid IP address" "Adresse IP invalide" "Ungültige IP-Adresse")"
+      isip "$mask" || fail "400 Bad Request" "$(tx "Invalid netmask" "Masque de sous-réseau invalide" "Ungültige Netzmaske")"
+      [ -z "$gw" ] || isip "$gw" || fail "400 Bad Request" "$(tx "Invalid gateway" "Passerelle invalide" "Ungültiges Gateway")"
+      n=0; for d in $dns; do isip "$d" || fail "400 Bad Request" "$(tx "Invalid DNS server: $d" "Serveur DNS invalide : $d" "Ungültiger DNS-Server: $d")"; n=$((n + 1)); done
+      [ $n -le 3 ] || fail "400 Bad Request" "$(tx "Three DNS servers max." "Trois serveurs DNS au plus" "Höchstens drei DNS-Server")" ;;
+    *) fail "400 Bad Request" "$(tx "Invalid network mode" "Mode réseau invalide" "Ungültiger Netzwerkmodus")" ;;
   esac
-  case "$tgtoken" in '') ;; *[!A-Za-z0-9:_-]*|*:*:*) fail "400 Bad Request" "$(tx "Jeton Telegram invalide" "Ungültiges Telegram-Token" "Invalid Telegram token")";; [0-9]*:?*) ;; *) fail "400 Bad Request" "$(tx "Jeton Telegram invalide" "Ungültiges Telegram-Token" "Invalid Telegram token")";; esac
-  case "$tgchat" in '') ;; -|-*[!0-9]*|[!0-9-]*|[0-9]*[!0-9]*) fail "400 Bad Request" "$(tx "Identifiant de discussion Telegram invalide" "Ungültige Telegram-Chat-ID" "Invalid Telegram chat ID")";; esac
+  case "$tgtoken" in '') ;; *[!A-Za-z0-9:_-]*|*:*:*) fail "400 Bad Request" "$(tx "Invalid Telegram token" "Jeton Telegram invalide" "Ungültiges Telegram-Token")";; [0-9]*:?*) ;; *) fail "400 Bad Request" "$(tx "Invalid Telegram token" "Jeton Telegram invalide" "Ungültiges Telegram-Token")";; esac
+  case "$tgchat" in '') ;; -|-*[!0-9]*|[!0-9-]*|[0-9]*[!0-9]*) fail "400 Bad Request" "$(tx "Invalid Telegram chat ID" "Identifiant de discussion Telegram invalide" "Ungültige Telegram-Chat-ID")";; esac
 
   # Telegram: empty chat ID = disabled; empty token = keep the stored one.
   # File created at run time on the NAS (never in the image), readable by root only.
@@ -668,7 +668,7 @@ sys_set() {
   else
     TG_TOKEN=""; [ -r "$ETC/diet-notify.conf" ] && . "$ETC/diet-notify.conf"
     [ -n "$tgtoken" ] && TG_TOKEN=$tgtoken
-    [ -n "$TG_TOKEN" ] || fail "400 Bad Request" "$(tx "Jeton Telegram manquant" "Telegram-Token fehlt" "Telegram token missing")"
+    [ -n "$TG_TOKEN" ] || fail "400 Bad Request" "$(tx "Telegram token missing" "Jeton Telegram manquant" "Telegram-Token fehlt")"
     ( umask 077; printf 'TG_TOKEN=%s\nTG_CHAT=%s\n' "$TG_TOKEN" "$tgchat" > "$ETC/diet-notify.conf" )
   fi
   # network: applied at the next boot (S40network, ifup -a)
@@ -699,14 +699,14 @@ sys_set() {
     svc_on AVAHI && bg "$INITD/S50avahi-daemon restart"   # avahi too (<name>.local)
   fi
   note "System settings changed"
-  ok "$(tx "Enregistré. Le nom et le fuseau horaire sont appliqués tout de suite ; le réseau au prochain redémarrage." "Gespeichert. Name und Zeitzone gelten sofort, das Netzwerk ab dem nächsten Neustart." "Saved. The name and time zone apply now; the network at the next reboot.")"
+  ok "$(tx "Saved. The name and time zone apply now; the network at the next reboot." "Enregistré. Le nom et le fuseau horaire sont appliqués tout de suite ; le réseau au prochain redémarrage." "Gespeichert. Name und Zeitzone gelten sofort, das Netzwerk ab dem nächsten Neustart.")"
 }
 
 notify_test() {
-  out=$(diet-notify "$(tx "message de test envoyé depuis l’interface web" "Testnachricht aus der Web-Oberfläche" "test message sent from the web interface")" 2>&1); rc=$?
-  [ $rc -eq 0 ] && { ok "$(tx "Notification envoyée" "Nachricht gesendet" "Notification sent")"; return; }
-  [ $rc -eq 2 ] && fail "400 Bad Request" "$(tx "Telegram n’est pas configuré : enregistrer d’abord le jeton et l’identifiant" "Telegram ist nicht eingerichtet: zuerst Token und Chat-ID speichern" "Telegram is not set up: save the token and chat ID first")"
-  fail "502 Bad Gateway" "$(tx "Échec de l’envoi" "Senden fehlgeschlagen" "Sending failed") : $(echo "$out" | tr -d '\r' | cut -c1-200)"
+  out=$(diet-notify "$(tx "test message sent from the web interface" "message de test envoyé depuis l’interface web" "Testnachricht aus der Web-Oberfläche")" 2>&1); rc=$?
+  [ $rc -eq 0 ] && { ok "$(tx "Notification sent" "Notification envoyée" "Nachricht gesendet")"; return; }
+  [ $rc -eq 2 ] && fail "400 Bad Request" "$(tx "Telegram is not set up: save the token and chat ID first" "Telegram n’est pas configuré : enregistrer d’abord le jeton et l’identifiant" "Telegram ist nicht eingerichtet: zuerst Token und Chat-ID speichern")"
+  fail "502 Bad Gateway" "$(tx "Sending failed" "Échec de l’envoi" "Senden fehlgeschlagen") : $(echo "$out" | tr -d '\r' | cut -c1-200)"
 }
 
 # --- Services: MiniDLNA, Avahi, rsync, WebDAV ------------------------------------
@@ -758,14 +758,14 @@ services_get() {
 svc_set() {
   s=""; on=""
   for kv in $(echo "$BODY" | tr '&' ' '); do case "${kv%%=*}" in s) s=${kv#*=};; on) on=${kv#*=};; esac; done
-  case "$on" in 0|1) ;; *) fail "400 Bad Request" "$(tx "Réglage invalide" "Ungültige Einstellung" "Invalid setting")";; esac
+  case "$on" in 0|1) ;; *) fail "400 Bad Request" "$(tx "Invalid setting" "Réglage invalide" "Ungültige Einstellung")";; esac
   # diet.conf key, init script, Avahi announcement of the service
   case "$s" in
     minidlna) K=MINIDLNA; INIT=S60minidlnad; ANN="" ;;
     avahi)    K=AVAHI; INIT=S50avahi-daemon; ANN="" ;;
     rsync)    K=RSYNC; INIT=S61rsyncd; ANN=rsync ;;
     webdav)   K=WEBDAV; INIT=S51webdav; ANN=webdav ;;
-    *) fail "400 Bad Request" "$(tx "service inconnu" "unbekannter Dienst" "unknown service")" ;;
+    *) fail "400 Bad Request" "$(tx "unknown service" "service inconnu" "unbekannter Dienst")" ;;
   esac
   [ -f "$CONF" ] || : > "$CONF"
   setkey "$CONF" SVC_$K "$on"
@@ -777,7 +777,7 @@ svc_set() {
     else [ -f "$AVSVC/$ANN.service" ] && mv "$AVSVC/$ANN.service" "$AVSVC/$ANN.service.off"; fi
     "$INITD/S50avahi-daemon" reload </dev/null >/dev/null 2>&1
   fi
-  [ "$on" = 1 ] && MSG="$(tx "$s activé" "$s eingeschaltet" "$s enabled")" || MSG="$(tx "$s arrêté (aussi au prochain démarrage)" "$s gestoppt (auch beim nächsten Start)" "$s stopped (also at the next boot)")"
+  [ "$on" = 1 ] && MSG="$(tx "$s enabled" "$s activé" "$s eingeschaltet")" || MSG="$(tx "$s stopped (also at the next boot)" "$s arrêté (aussi au prochain démarrage)" "$s gestoppt (auch beim nächsten Start)")"
   note "$MSG"; ok "$MSG"
 }
 
@@ -788,10 +788,10 @@ dlna_set() {
   for kv in $(echo "$BODY" | tr '&' ' '); do
     case "${kv%%=*}" in name) name=$(urldec "${kv#*=}");; dirs) dirs=$(urldec "${kv#*=}" | tr -d '\r');; esac
   done
-  case "$name" in ''|*[!A-Za-z0-9\ ._-]*) fail "400 Bad Request" "$(tx "Nom invalide : lettres, chiffres, espace, . - et _" "Ungültiger Name: Buchstaben, Ziffern, Leerzeichen, . - und _" "Invalid name: letters, digits, space, . - and _")";; esac
-  [ ${#name} -le 40 ] || fail "400 Bad Request" "$(tx "Nom trop long (40 caractères au plus)" "Name zu lang (höchstens 40 Zeichen)" "Name too long (40 characters max.)")"
+  case "$name" in ''|*[!A-Za-z0-9\ ._-]*) fail "400 Bad Request" "$(tx "Invalid name: letters, digits, space, . - and _" "Nom invalide : lettres, chiffres, espace, . - et _" "Ungültiger Name: Buchstaben, Ziffern, Leerzeichen, . - und _")";; esac
+  [ ${#name} -le 40 ] || fail "400 Bad Request" "$(tx "Name too long (40 characters max.)" "Nom trop long (40 caractères au plus)" "Name zu lang (höchstens 40 Zeichen)")"
   RC=$(readlink -f "$R$DATA"); LINES=""; n=0
-  BAD="$(tx "Dossier invalide : [A|V|P,]/c/nom, lettres, chiffres, espace, - et _" "Ungültiger Ordner: [A|V|P,]/c/name, Buchstaben, Ziffern, Leerzeichen, - und _" "Invalid folder: [A|V|P,]/c/name, letters, digits, space, - and _")"
+  BAD="$(tx "Invalid folder: [A|V|P,]/c/name, letters, digits, space, - and _" "Dossier invalide : [A|V|P,]/c/nom, lettres, chiffres, espace, - et _" "Ungültiger Ordner: [A|V|P,]/c/name, Buchstaben, Ziffern, Leerzeichen, - und _")"
   while IFS= read -r l; do
     [ -n "$l" ] || continue
     case "$l" in
@@ -801,7 +801,7 @@ dlna_set() {
     esac
     case "$p" in /c|/c/*) ;; *) fail "400 Bad Request" "$BAD";; esac
     case "${p#/c}" in *[!A-Za-z0-9\ /_-]*|*//*|*/) fail "400 Bad Request" "$BAD";; esac
-    [ -d "$R$p" ] || fail "404 Not Found" "$(tx "Dossier $p introuvable" "Ordner $p nicht gefunden" "Folder $p not found")"
+    [ -d "$R$p" ] || fail "404 Not Found" "$(tx "Folder $p not found" "Dossier $p introuvable" "Ordner $p nicht gefunden")"
     # no symbolic link leading out of /c
     case "$(readlink -f "$R$p")/" in "$RC"/*) ;; *) fail "400 Bad Request" "$BAD";; esac
     n=$((n + 1)); LINES="${LINES}media_dir=$typ$p
@@ -809,19 +809,19 @@ dlna_set() {
   done <<EOF
 $dirs
 EOF
-  [ $n -ge 1 ] && [ $n -le 10 ] || fail "400 Bad Request" "$(tx "De 1 à 10 dossiers" "1 bis 10 Ordner" "1 to 10 folders")"
+  [ $n -ge 1 ] && [ $n -le 10 ] || fail "400 Bad Request" "$(tx "1 to 10 folders" "De 1 à 10 dossiers" "1 bis 10 Ordner")"
   [ -f "$DLNACONF" ] || fail "404 Not Found" "minidlna.conf ?"
   DIRS=$LINES NAME=$name awk '
     /^media_dir=/ { if (!d++) printf "%s", ENVIRON["DIRS"]; next }
     /^friendly_name=/ { if (!f++) print "friendly_name=" ENVIRON["NAME"]; next }
     { print }
     END { if (!d) printf "%s", ENVIRON["DIRS"]; if (!f) print "friendly_name=" ENVIRON["NAME"] }' "$DLNACONF" > "$DLNACONF.tmp" \
-    || fail "500 Internal Server Error" "$(tx "Écriture impossible" "Schreiben nicht möglich" "Cannot write")"
+    || fail "500 Internal Server Error" "$(tx "Cannot write" "Écriture impossible" "Schreiben nicht möglich")"
   cp "$DLNACONF" "$DLNACONF.bak"; mv "$DLNACONF.tmp" "$DLNACONF"
   # minidlnad rereads its config at startup and rescans if it sees new folders
   svc_on MINIDLNA && "$INITD/S60minidlnad" restart </dev/null >/dev/null 2>&1
   note "MiniDLNA: name and folders changed"
-  ok "$(tx "Enregistré" "Gespeichert" "Saved")"
+  ok "$(tx "Saved" "Enregistré" "Gespeichert")"
 }
 
 # rsync: password of the administrator's "sauvegarde" account (module [c],
@@ -829,12 +829,12 @@ EOF
 rsync_pw() {
   set -f; pw=""
   for kv in $(echo "$BODY" | tr '&' ' '); do [ "${kv%%=*}" = pw ] && pw=$(urldec "${kv#*=}"); done
-  [ ${#pw} -ge 6 ] || fail "400 Bad Request" "$(tx "Mot de passe trop court (6 caractères au moins)" "Passwort zu kurz (mindestens 6 Zeichen)" "Password too short (6 characters min.)")"
+  [ ${#pw} -ge 6 ] || fail "400 Bad Request" "$(tx "Password too short (6 characters min.)" "Mot de passe trop court (6 caractères au moins)" "Passwort zu kurz (mindestens 6 Zeichen)")"
   case "$pw" in *"$(printf '\r')"*) pw="";; esac
-  [ -n "$pw" ] && [ ${#pw} -le 128 ] && [ "$(printf '%s' "$pw" | wc -l)" -eq 0 ] || fail "400 Bad Request" "$(tx "Mot de passe invalide" "Ungültiges Passwort" "Invalid password")"
-  setline "$SECRETS" sauvegarde "$pw" 600 || fail "500 Internal Server Error" "$(tx "Écriture impossible" "Schreiben nicht möglich" "Cannot write")"
+  [ -n "$pw" ] && [ ${#pw} -le 128 ] && [ "$(printf '%s' "$pw" | wc -l)" -eq 0 ] || fail "400 Bad Request" "$(tx "Invalid password" "Mot de passe invalide" "Ungültiges Passwort")"
+  setline "$SECRETS" sauvegarde "$pw" 600 || fail "500 Internal Server Error" "$(tx "Cannot write" "Écriture impossible" "Schreiben nicht möglich")"
   note "rsync: password of the sauvegarde account changed"
-  ok "$(tx "Mot de passe rsync enregistré" "rsync-Passwort gespeichert" "rsync password saved")"
+  ok "$(tx "rsync password saved" "Mot de passe rsync enregistré" "rsync-Passwort gespeichert")"
 }
 
 # --- Storage: X-RAID (compatibility) or md, through nas-raid (xraid-compat package) ---
@@ -854,22 +854,22 @@ raid_do() {
     k=${kv%%=*}; v=$(urldec "${kv#*=}")
     case "$k" in op) op=$v;; d) d=$v;; confirm) confirm=$v;; yes) yes=$v;; esac
   done
-  case "$op" in migrate|finalize|create|add|grow|repair) ;; *) fail "400 Bad Request" "$(tx "opération inconnue" "unbekannter Vorgang" "unknown operation")";; esac
+  case "$op" in migrate|finalize|create|add|grow|repair) ;; *) fail "400 Bad Request" "$(tx "unknown operation" "opération inconnue" "unbekannter Vorgang")";; esac
   ARGS=""
   for x in $(echo "$d" | tr ',' ' '); do
-    disks | grep -qx "$x" || fail "400 Bad Request" "$(tx "disque inconnu" "unbekannte Platte" "unknown disk")"
+    disks | grep -qx "$x" || fail "400 Bad Request" "$(tx "unknown disk" "disque inconnu" "unbekannte Platte")"
     ARGS="$ARGS /dev/$x"
   done
-  case "$op:$ARGS" in create:|add:|add:*\ *\ *) fail "400 Bad Request" "$(tx "choisir le(s) disque(s)" "Platte(n) wählen" "choose the disk(s)")";; esac
+  case "$op:$ARGS" in create:|add:|add:*\ *\ *) fail "400 Bad Request" "$(tx "choose the disk(s)" "choisir le(s) disque(s)" "Platte(n) wählen")";; esac
   if [ "$op" = finalize ]; then CMD="nas-raid migrate --finalize"; else CMD="nas-raid $op$ARGS"; fi
   if [ "$1" = raid_plan ]; then
     hdr 'text/plain; charset=utf-8'; $CMD --dry-run 2>&1; return
   fi
-  case "$confirm" in ''|*[!A-Za-z0-9\ ._-]*) fail "400 Bad Request" "$(tx "phrase de confirmation manquante ou invalide" "Bestätigungssatz fehlt oder ungültig" "confirmation phrase missing or invalid")";; esac
-  [ "$yes" = 1 ] || fail "400 Bad Request" "$(tx "seconde confirmation manquante" "zweite Bestätigung fehlt" "second confirmation missing")"
+  case "$confirm" in ''|*[!A-Za-z0-9\ ._-]*) fail "400 Bad Request" "$(tx "confirmation phrase missing or invalid" "phrase de confirmation manquante ou invalide" "Bestätigungssatz fehlt oder ungültig")";; esac
+  [ "$yes" = 1 ] || fail "400 Bad Request" "$(tx "second confirmation missing" "seconde confirmation manquante" "zweite Bestätigung fehlt")"
   note "Storage: nas-raid $op$ARGS started from the interface"
   bg "$CMD --confirm '$confirm' --yes"
-  ok "$(tx "Lancé : suivre l’avancement dans le journal du stockage" "Gestartet: Fortschritt im Speicherprotokoll" "Started: follow the progress in the storage log")"
+  ok "$(tx "Started: follow the progress in the storage log" "Lancé : suivre l’avancement dans le journal du stockage" "Gestartet: Fortschritt im Speicherprotokoll")"
 }
 
 # xraid_rw: "allow writing on the X-RAID" switch. on=1 needs the typed word
@@ -888,19 +888,19 @@ xraid_rw() {
     k=${kv%%=*}; v=$(urldec "${kv#*=}")
     case "$k" in on) on=$v;; confirm) confirm=$v;; yes) yes=$v;; esac
   done
-  case "$on" in 0) val=no;; 1) val=yes;; *) fail "400 Bad Request" "$(tx "Réglage invalide" "Ungültige Einstellung" "Invalid setting")";; esac
+  case "$on" in 0) val=no;; 1) val=yes;; *) fail "400 Bad Request" "$(tx "Invalid setting" "Réglage invalide" "Ungültige Einstellung")";; esac
   if [ "$on" = 1 ]; then
-    [ "$confirm" = WRITE ] || fail "400 Bad Request" "$(tx "mot de confirmation manquant ou faux (WRITE)" "Bestätigungswort fehlt oder falsch (WRITE)" "confirmation word missing or wrong (WRITE)")"
-    [ "$yes" = 1 ] || fail "400 Bad Request" "$(tx "seconde confirmation manquante" "zweite Bestätigung fehlt" "second confirmation missing")"
+    [ "$confirm" = WRITE ] || fail "400 Bad Request" "$(tx "confirmation word missing or wrong (WRITE)" "mot de confirmation manquant ou faux (WRITE)" "Bestätigungswort fehlt oder falsch (WRITE)")"
+    [ "$yes" = 1 ] || fail "400 Bad Request" "$(tx "second confirmation missing" "seconde confirmation manquante" "zweite Bestätigung fehlt")"
   fi
   command -v nas-raid >/dev/null 2>&1 || fail "404 Not Found" "nas-raid ?"
   m=; read -r m _ 2>/dev/null < "$RUN/nas-raid.mode"
-  case "$m" in xraid-rw|xraid-ro) ;; *) fail "409 Conflict" "$(tx "Seulement pour un volume X-RAID" "Nur für ein X-RAID-Volume" "Only for an X-RAID volume")";; esac
+  case "$m" in xraid-rw|xraid-ro) ;; *) fail "409 Conflict" "$(tx "Only for an X-RAID volume" "Seulement pour un volume X-RAID" "Nur für ein X-RAID-Volume")";; esac
   # new configuration: every line kept except XRAID_RW, written once
   {
     if [ -r "$NRCONF" ]; then while IFS= read -r l; do case $l in XRAID_RW=*) ;; *) printf '%s\n' "$l";; esac; done < "$NRCONF"; fi
     echo "XRAID_RW=$val"
-  } > "$NRCONF.tmp" || fail "500 Internal Server Error" "$(tx "Écriture impossible" "Schreiben nicht möglich" "Cannot write")"
+  } > "$NRCONF.tmp" || fail "500 Internal Server Error" "$(tx "Cannot write" "Écriture impossible" "Schreiben nicht möglich")"
   [ -f "$NRCONF" ] && cp "$NRCONF" "$NRCONF.bak"
   mv "$NRCONF.tmp" "$NRCONF"
   note "Storage: XRAID_RW=$val from the interface, remounting /c"
@@ -916,12 +916,12 @@ xraid_rw() {
   invalidate
   if [ $rc != 0 ]; then
     note "Storage: remount refused or failed, XRAID_RW unchanged"
-    fail "409 Conflict" "$(tx "Volume non remonté (fichiers ouverts sur /c ?), réglage inchangé" "Volume nicht neu eingehängt (offene Dateien auf /c?), Einstellung unverändert" "Volume not remounted (open files on /c?), setting unchanged") : $(printf '%s' "$OUTR" | grep 'ERROR' | tail -n 1 | cut -c1-200)"
+    fail "409 Conflict" "$(tx "Volume not remounted (open files on /c?), setting unchanged" "Volume non remonté (fichiers ouverts sur /c ?), réglage inchangé" "Volume nicht neu eingehängt (offene Dateien auf /c?), Einstellung unverändert") : $(printf '%s' "$OUTR" | grep 'ERROR' | tail -n 1 | cut -c1-200)"
   fi
   m=; r=; read -r m r 2>/dev/null < "$RUN/nas-raid.mode"
-  if [ "$on" = 0 ]; then ok "$(tx "X-RAID remonté en lecture seule" "X-RAID schreibgeschützt neu eingehängt" "X-RAID remounted read-only")"
-  elif [ "$m" = xraid-rw ]; then ok "$(tx "Écriture sur le X-RAID activée" "Schreiben auf das X-RAID eingeschaltet" "Writing on the X-RAID enabled")"
-  else ok "$(tx "XRAID_RW=yes enregistré, mais les garde-fous gardent la lecture seule" "XRAID_RW=yes gespeichert, aber die Schutzregeln lassen nur Lesen zu" "XRAID_RW=yes saved, but the safeguards keep it read-only") ($m${r:+ : $r})"
+  if [ "$on" = 0 ]; then ok "$(tx "X-RAID remounted read-only" "X-RAID remonté en lecture seule" "X-RAID schreibgeschützt neu eingehängt")"
+  elif [ "$m" = xraid-rw ]; then ok "$(tx "Writing on the X-RAID enabled" "Écriture sur le X-RAID activée" "Schreiben auf das X-RAID eingeschaltet")"
+  else ok "$(tx "XRAID_RW=yes saved, but the safeguards keep it read-only" "XRAID_RW=yes enregistré, mais les garde-fous gardent la lecture seule" "XRAID_RW=yes gespeichert, aber die Schutzregeln lassen nur Lesen zu") ($m${r:+ : $r})"
   fi
 }
 
@@ -1006,24 +1006,24 @@ invalidate() {
 qp a; A=$QP
 if [ "$REQUEST_METHOD" = "POST" ]; then
   # CSRF protection: a form from another site cannot set this header
-  [ "$HTTP_X_DIET" = "1" ] || fail "403 Forbidden" "$(tx "Action réservée à l’interface" "Aktion nur über die Oberfläche" "Action only through the web interface")"
+  [ "$HTTP_X_DIET" = "1" ] || fail "403 Forbidden" "$(tx "Action only through the web interface" "Action réservée à l’interface" "Aktion nur über die Oberfläche")"
   BODY=""; CL=${CONTENT_LENGTH:-0}
   case "$CL" in *[!0-9]*) CL=0;; esac
-  [ "$CL" -lt 4096 ] || fail "413 Request Entity Too Large" "$(tx "trop de données" "zu viele Daten" "too much data")"
+  [ "$CL" -lt 4096 ] || fail "413 Request Entity Too Large" "$(tx "too much data" "trop de données" "zu viele Daten")"
   [ "$CL" -gt 0 ] && BODY=$(head -c "$CL")
-  [ ${#BODY} -eq "$CL" ] || fail "500 Internal Server Error" "$(tx "Données reçues incomplètes, réessayez" "Daten unvollständig angekommen, bitte nochmal" "Incomplete data received, please retry")"
+  [ ${#BODY} -eq "$CL" ] || fail "500 Internal Server Error" "$(tx "Incomplete data received, please retry" "Données reçues incomplètes, réessayez" "Daten unvollständig angekommen, bitte nochmal")"
   case "$A" in
     spindown)
-      for d in $(disks); do hdparm -y /dev/$d >/dev/null 2>&1; done; ok "$(tx "Disques en veille" "Platten schlafen" "Disks spun down")" ;;
+      for d in $(disks); do hdparm -y /dev/$d >/dev/null 2>&1; done; ok "$(tx "Disks spun down" "Disques en veille" "Platten schlafen")" ;;
     ksmbd)
       "$INITD/S70ksmbd" restart >/dev/null 2>&1; sleep 1
-      pidof ksmbd.mountd >/dev/null && ok "$(tx "Partage SMB redémarré" "SMB neu gestartet" "SMB restarted")" || fail "500 Internal Server Error" "$(tx "ksmbd.mountd ne démarre pas" "ksmbd.mountd startet nicht" "ksmbd.mountd does not start")" ;;
+      pidof ksmbd.mountd >/dev/null && ok "$(tx "SMB restarted" "Partage SMB redémarré" "SMB neu gestartet")" || fail "500 Internal Server Error" "$(tx "ksmbd.mountd does not start" "ksmbd.mountd ne démarre pas" "ksmbd.mountd startet nicht")" ;;
     nfsd)
-      "$INITD/S60nfs" restart >/dev/null 2>&1; ok "$(tx "NFS redémarré" "NFS neu gestartet" "NFS restarted")" ;;
+      "$INITD/S60nfs" restart >/dev/null 2>&1; ok "$(tx "NFS restarted" "NFS redémarré" "NFS neu gestartet")" ;;
     ntp)
-      bg "ntpd -q -n -p pool.ntp.org"; ok "$(tx "Mise à l’heure demandée" "Zeitabgleich angestoßen" "Time update requested")" ;;
-    reboot)    ok "$(tx "Redémarrage" "Neustart" "Restarting")"; bg "sleep 2; reboot" ;;
-    poweroff)  ok "$(tx "Extinction" "Ausschalten" "Powering off")"; bg ": > $RUN/poweroff; sleep 2; poweroff" ;;
+      bg "ntpd -q -n -p pool.ntp.org"; ok "$(tx "Time update requested" "Mise à l’heure demandée" "Zeitabgleich angestoßen")" ;;
+    reboot)    ok "$(tx "Restarting" "Redémarrage" "Neustart")"; bg "sleep 2; reboot" ;;
+    poweroff)  ok "$(tx "Powering off" "Extinction" "Ausschalten")"; bg ": > $RUN/poweroff; sleep 2; poweroff" ;;
     config)    config_set ;;
     share_add|share_del|share_set) shares_change "$A" ;;
     user_set|user_del) users_change "$A" ;;
@@ -1033,25 +1033,25 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
     svc_set) svc_set ;;
     dlna_set) dlna_set ;;
     dlna_scan)
-      svc_on MINIDLNA || fail "409 Conflict" "$(tx "MiniDLNA est arrêté" "MiniDLNA ist gestoppt" "MiniDLNA is stopped")"
+      svc_on MINIDLNA || fail "409 Conflict" "$(tx "MiniDLNA is stopped" "MiniDLNA est arrêté" "MiniDLNA ist gestoppt")"
       "$INITD/S60minidlnad" force-reload </dev/null >/dev/null 2>&1   # minidlnad -R
       note "MiniDLNA: full rescan"
-      ok "$(tx "Réindexation complète lancée (longue sur ce processeur)" "Vollständige Neuindizierung gestartet (dauert auf diesem Prozessor)" "Full rescan started (slow on this processor)")" ;;
+      ok "$(tx "Full rescan started (slow on this processor)" "Réindexation complète lancée (longue sur ce processeur)" "Vollständige Neuindizierung gestartet (dauert auf diesem Prozessor)")" ;;
     rsync_pw) rsync_pw ;;
     rsync_c)
       on=""; for kv in $(echo "$BODY" | tr '&' ' '); do [ "${kv%%=*}" = on ] && on=${kv#*=}; done
-      case "$on" in 0|1) ;; *) fail "400 Bad Request" "$(tx "Réglage invalide" "Ungültige Einstellung" "Invalid setting")";; esac
+      case "$on" in 0|1) ;; *) fail "400 Bad Request" "$(tx "Invalid setting" "Réglage invalide" "Ungültige Einstellung")";; esac
       [ -f "$CONF" ] || : > "$CONF"; setkey "$CONF" RSYNC_C "$on"
       accounts_update || :
       note "rsync: module c (administrator backup) = $on"
-      ok "$(tx "Enregistré" "Gespeichert" "Saved")" ;;
+      ok "$(tx "Saved" "Enregistré" "Gespeichert")" ;;
     raid_verify)
       command -v nas-raid >/dev/null 2>&1 || fail "404 Not Found" "nas-raid ?"
       bg "nas-raid verify"; note "Storage: mirror check started"
-      ok "$(tx "Vérification lancée (plusieurs heures, disques en lecture seule)" "Prüfung gestartet (mehrere Stunden, nur Lesen)" "Check started (several hours, read-only)")" ;;
+      ok "$(tx "Check started (several hours, read-only)" "Vérification lancée (plusieurs heures, disques en lecture seule)" "Prüfung gestartet (mehrere Stunden, nur Lesen)")" ;;
     raid_plan|raid_run) raid_do "$A" ;;
     xraid_rw) xraid_rw ;;
-    *) fail "400 Bad Request" "$(tx "action inconnue" "unbekannte Aktion" "unknown action")" ;;
+    *) fail "400 Bad Request" "$(tx "unknown action" "action inconnue" "unbekannte Aktion")" ;;
   esac
   invalidate
   exit 0
@@ -1068,23 +1068,23 @@ case "$A" in
       messages) tail -n 300 "$R/var/log/messages" 2>/dev/null ;;
       dmesg)    dmesg | tail -n 300 ;;
       storage) tail -n 300 "$R/var/lib/nas-raid/log" 2>/dev/null ;;
-      *) tx "journal inconnu" "unbekanntes Protokoll" "unknown log"; echo ;;
+      *) tx "unknown log" "journal inconnu" "unbekanntes Protokoll"; echo ;;
     esac ;;
   smart)
     qp d; d=$QP
-    disks | grep -qx "$d" || fail "400 Bad Request" "$(tx "disque inconnu" "unbekannte Platte" "unknown disk")"
+    disks | grep -qx "$d" || fail "400 Bad Request" "$(tx "unknown disk" "disque inconnu" "unbekannte Platte")"
     hdr 'text/plain; charset=utf-8'
     if [ -x "$R/usr/sbin/smartctl" ]; then "$R/usr/sbin/smartctl" -H -i -A /dev/$d 2>&1
     else
       # no smartctl (toolchain without C++): model, drivetemp temperature and kernel messages
-      echo "$(tx "smartctl absent de ce système ; informations disponibles :" "smartctl fehlt auf diesem System; verfügbare Angaben:" "smartctl is not on this system; available information:")"
+      echo "$(tx "smartctl is not on this system; available information:" "smartctl absent de ce système ; informations disponibles :" "smartctl fehlt auf diesem System; verfügbare Angaben:")"
       echo "  /dev/$d : $(cat "$R/sys/block/$d/device/model" 2>/dev/null), $(($(cat "$R/sys/block/$d/size" 2>/dev/null || echo 0) / 1953125)) GB, $(dtemp "$d"; echo "${DT:-?}") °C (drivetemp)"
       echo; dmesg | grep -w "$d" | tail -n 50
     fi ;;
   md)
     qp d; d=$QP
-    mds | grep -qx "$d" || fail "400 Bad Request" "$(tx "volume RAID inconnu" "unbekanntes RAID-Volume" "unknown RAID volume")"
+    mds | grep -qx "$d" || fail "400 Bad Request" "$(tx "unknown RAID volume" "volume RAID inconnu" "unbekanntes RAID-Volume")"
     hdr 'text/plain; charset=utf-8'
     mdadm --detail /dev/$d 2>&1 ;;
-  *) fail "400 Bad Request" "$(tx "inconnu" "unbekannt" "unknown")" ;;
+  *) fail "400 Bad Request" "$(tx "unknown" "inconnu" "unbekannt")" ;;
 esac
