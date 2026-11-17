@@ -20,6 +20,10 @@ FAILS=0; N=0
 mkdir -p "$R"/bin "$R"/etc/init.d "$R"/etc/ksmbd "$R"/etc/network "$R"/var/run "$R"/var/log "$R"/c \
 	"$R"/proc/sys/kernel "$R"/proc/sys/dev/boot "$R"/proc/net "$R"/proc/fs/nfsd
 cp "$SRC"/etc/diet-lang.sh "$SRC"/etc/diet.conf "$BOARD"/etc/fan.conf "$BOARD"/etc/exports "$R"/etc/
+# By default only SMB, the web interface and SSH run (SVC_*=0); the tests below
+# exercise every service, so they are switched on here.
+SVC_DEFAULTS=$(grep '^SVC_' "$R"/etc/diet.conf)
+sed -i 's/^\(SVC_[A-Z]*\)=0/\1=1/' "$R"/etc/diet.conf
 cp "$BOARD"/etc/ksmbd/ksmbd.conf "$R"/etc/ksmbd/
 # services: MiniDLNA, rsync, Avahi announcements, lighttpd (WebDAV included separately)
 mkdir -p "$R"/etc/lighttpd "$R"/etc/avahi "$R"/var/run/minidlna "$R"/var/run/avahi-daemon "$R"/var/lib/minidlna
@@ -287,7 +291,8 @@ check "API error in German (l=de)" '[ "$ST" = 400 ] && [ "$OUT" = "Ungültiger N
 
 # ---------- services : MiniDLNA, Avahi, rsync, WebDAV ----------
 api GET a=services
-check "services: JSON, everything on by default" "json 'j[\"host\"]==\"nas-test\" and all(j[k][\"on\"]==1 for k in (\"minidlna\",\"avahi\",\"rsync\",\"webdav\"))'"
+check "diet.conf: NFS, MiniDLNA, Avahi, rsync, WebDAV off by default" '[ "$(echo "$SVC_DEFAULTS" | grep -c "=0$")" = 5 ] && [ "$(echo "$SVC_DEFAULTS" | grep -c .)" = 5 ]'
+check "services: JSON, everything on once enabled" "json 'j[\"host\"]==\"nas-test\" and all(j[k][\"on\"]==1 for k in (\"minidlna\",\"avahi\",\"rsync\",\"webdav\"))'"
 check "services: MiniDLNA read from minidlna.conf, files and database" "json 'j[\"minidlna\"][\"name\"]==\"ReadyNAS\" and j[\"minidlna\"][\"dirs\"]==[\"/c/media\"] and j[\"minidlna\"][\"files\"]==[12,3,40] and j[\"minidlna\"][\"db\"]==2048 and j[\"minidlna\"][\"run\"]==1'"
 check "services: rsync without password" "json 'j[\"rsync\"][\"pw\"]==0'"
 mkdir -p "$R"/c/films "$R/c/mes photos"; ln -s "$R"/etc "$R"/c/lien

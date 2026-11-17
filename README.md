@@ -10,12 +10,13 @@ touching the original firmware.
 
 ## What you get
 
-- **Network shares**: SMB 3 (Windows, macOS, Linux, through ksmbd) and NFS v3/v4.
+- **Network shares**: SMB 3 (Windows, macOS, Linux, through ksmbd), and NFS v3/v4.
 - **Web interface** over HTTPS (French, German, English), derived from
   [DIET](https://github.com/mfe-/ReadyNASDuoSparc): NAS status, disks, shares, users,
   services, logs.
-- **Services**: MiniDLNA (TVs, media players), automatic discovery on the network
-  (`<name>.local`), per-user rsync and WebDAV.
+- **Optional services**, each switched on from the web interface: NFS, MiniDLNA (TVs,
+  media players), automatic discovery on the network (`<name>.local`), per-user rsync and
+  WebDAV. Out of the box only SMB, the web interface and SSH run.
 - **Your existing X-RAID disks** are used as they are, read-only by default, and stay
   readable by RAIDiator (its superblock is kept up to date). Planned: switching to a
   standard Linux RAID1 (md), disabled for now.

@@ -75,7 +75,9 @@ State: running or stopped; for MiniDLNA, the number of indexed files
 `sqlite3` on the NAS) and the size of `files.db`.
 
 Persistence: `SVC_MINIDLNA`, `SVC_AVAHI`, `SVC_RSYNC`, `SVC_WEBDAV`, `SVC_NFS` in
-`/etc/diet.conf` (`0` = stopped, `1` or missing = running). `S50avahi-daemon`,
+`/etc/diet.conf` (`0` = stopped, `1` or missing = running). The shipped `diet.conf` sets
+all five to `0`: out of the box only SMB (ksmbd), the web interface and SSH run, and rpcbind
+(`S30rpcbind`) only starts with NFS. `S50avahi-daemon`,
 `S60minidlnad`, `S60nfs` (which replace the Buildroot ones; `S60nfs` also stops
 the nfsd kernel threads with `rpc.nfsd 0`, which the Buildroot `killall nfsd`
 could not do; rpcbind is left running), `S61rsyncd` (in
