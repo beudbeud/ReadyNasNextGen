@@ -16,8 +16,9 @@ touching the original firmware.
   services, logs.
 - **Services**: MiniDLNA (TVs, media players), automatic discovery on the network
   (`<name>.local`), per-user rsync and WebDAV.
-- **Your existing X-RAID disks** are used as they are, read-only by default; a new RAID can be
-  created as a standard Linux RAID1 (md).
+- **Your existing X-RAID disks** are used as they are, read-only by default, and stay
+  readable by RAIDiator (its superblock is kept up to date). Planned: switching to a
+  standard Linux RAID1 (md), disabled for now.
 - **Temperature-controlled fan**: the NAS stays quiet when idle.
 - **Hardware clock** read at boot, then kept accurate over the network (NTP).
 - The **original firmware stays intact**: without the USB stick, the NAS starts RAIDiator
@@ -67,13 +68,25 @@ if 6.18 failed to boot last time, RAIDiator starts as usual.
    To update, extract into a new empty `rootfs-6.18` rather than over the previous system,
    and copy the new `vmlinux.bin` (and its `.md5`).
 
-3. **Install the relay add-on** from RAIDiator's web interface (Frontview): **System →
-   Update → Local**, select `ReadyNasNextGen_relay_<version>.bin`, **Upload and verify image**
-   (RAIDiator warns that the add-on is not signed by NETGEAR: expected), then **Perform System
-   Update**. The NAS reboots, RAIDiator installs the add-on during that boot and restarts by
-   itself about 2 minutes later. Install log on the NAS: `/var/log/relay-install.log`.
-   (With DIET installed, start RAIDiator once from DIET to reach Frontview; the relay then
-   starts before DIET's own boot switch.)
+3. **Install the relay add-on** `ReadyNasNextGen_relay_<version>.bin`, in either of two ways:
+
+   - **From RAIDiator's web interface (Frontview)**: **System → Update → Local**, select the
+     `.bin`, **Upload and verify image** (RAIDiator warns that the add-on is not signed by
+     NETGEAR: expected), then **Perform System Update**, and restart the NAS when asked.
+     Frontview only speaks TLS 1.0 with an old cipher: recent browsers refuse to connect, so
+     you may need an old browser, or the script below.
+   - **From the PC with the script** (no browser needed):
+     ```sh
+     sh tools/frontview-upload.sh <NAS-IP> ReadyNasNextGen_relay_<version>.bin
+     ```
+     It asks for the Frontview `admin` password, uploads and verifies the add-on, then asks
+     before performing the update. Without a terminal, set `FRONTVIEW_PASSWORD=…` and
+     `FRONTVIEW_YES=1`. Then restart the NAS (power button, or Frontview).
+
+   On the next boot RAIDiator installs the add-on, then restarts by itself about 2 minutes
+   later. Install log on the NAS: `/var/log/relay-install.log`. (With DIET installed, start
+   RAIDiator once from DIET to reach Frontview; the relay then starts before DIET's own boot
+   switch.)
 
 4. **Plug the stick into the NAS and restart it.** The original kernel starts, then Linux 6.18
    from the stick. Without the stick, RAIDiator (or DIET) starts as before.
@@ -100,9 +113,9 @@ Disks formatted by the original firmware (X-RAID) are detected and mounted on `/
 checks the mirror state (failed disk, unclean shutdown, mismatched superblocks, unfinished
 synchronisation) and refuses when in doubt.
 
-Writing to an X-RAID volume (a switch in the Storage card of the web interface) and migrating
-to a standard Linux RAID1 are possible; they are described, with their precautions, in
-[docs/XRAID.md](docs/XRAID.md).
+Writing to an X-RAID volume (a switch in the Storage card of the web interface) is possible;
+it is described, with its precautions, in [docs/XRAID.md](docs/XRAID.md). Migrating to a
+standard Linux RAID1 is disabled for now ([docs/XRAID-MIGRATION.md](docs/XRAID-MIGRATION.md)).
 
 ## Current limitations
 
