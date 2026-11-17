@@ -273,6 +273,27 @@ disabled for now: `POST ?a=raid_plan|raid_run` answer 409
 - The remount is done during the request (reading the samples of both
   disks, mounting): a few tens of seconds on the NAS.
 
+### Checking the mirror after a crash
+
+- **Check the mirror** (`POST ?a=raid_verify`): full comparison, 10–12 h.
+- **Quick check** (`POST ?a=raid_quick`, background `nas-raid quick-verify`,
+  1 to 3 minutes, docs/XRAID.md §5.1): compares the ext3 journals, the file
+  system and LVM metadata, the partition table and random samples. The
+  confirmation before starting says what it guarantees (structure and journal
+  identical) and what it does not (file data written at the time of the cut,
+  outside the compared areas). The card shows progress (`quick.progress`,
+  refreshed every 5 s while it runs), then the result: identical, differences
+  (with their category: repair needed), incomplete, or "no difference, unclean
+  superblock: confirmation needed". With a clean superblock and only the
+  Linux `xraid-dirty` marker, the marker is lifted automatically.
+- **Accept the quick check…** (only when `quick.accept` = 1: unclean
+  superblock, no difference, same boot, nothing remounted since): dialog
+  describing the residual risk, checkbox **and** the word `ACCEPT`;
+  `POST ?a=raid_quick_accept` with `confirm=ACCEPT&yes=1` runs `nas-raid
+  quick-accept --confirm ACCEPT --yes` (what a successful full check does:
+  marker removed, superblock clean). Refused (400) without the word or the
+  box, 409 if nas-raid refuses.
+
 ## Speed: collector and cache
 
 Starting a program costs ~60 ms on this SPARC and floating point is emulated by
@@ -281,7 +302,7 @@ the kernel. So:
 - **Collector**: `S95diet` starts the API itself in the background
   (`DIET_COLLECT=1 /www/cgi-bin/api`, pid in `/var/run/diet/pid`). It writes
   ready JSON responses to `/var/run/diet/<key>.json` (temporary file
-  then `mv`): `status` every 5 s and the rest (`storage services shares nfs
+  then `mv`): `status` every 15 s and the rest (`storage services shares nfs
   sys users config`) every 60 s when the interface is open (request seen
   less than 2 min ago); otherwise 60 s and 5 min. `all.json` = status + storage +
   history, read in one request when the page loads.
@@ -302,7 +323,119 @@ the kernel. So:
   `printf`, `test`…) without creating a process. A program with the same name as an
   applet is only started through its full path.
 
+- **Static answers, no CGI**: lighttpd serves the collector files as static
+  files under `/cache/<key>.json` (`alias.url` to `/var/run/diet/`, only
+  `^/cache/[a-z]+\.json$`: never the FIFO, the pid, `seen`/`active` or the
+  temporary files; same Basic authentication as the page;
+  `Cache-Control: no-store`, `application/json`). Each CGI request starts
+  `/bin/sh api` (~60 ms of process creation plus reading the script): with the
+  tab open, lighttpd took ~45 % of the CPU when the page asked the API every 5 s.
+- **Page refresh** (`poll()` in `index.html`): only while the tab is visible
+  (`visibilitychange`: stopped when hidden, immediate refresh when shown again);
+  every **15 s** the status from `/cache/status.json`; every 4th time (1 min)
+  `?a=status` through the API instead, which writes `seen` and so keeps the
+  collector in its fast pace (it slows down after 2 min without a request);
+  every 8th time (2 min) `?a=all` (status + storage + history) through the API.
+  Shares, users, services, settings and logs are only loaded when their page
+  is opened (logs: on demand). After an action the cache is emptied (POST):
+  the next reads fall back to the API, so the refresh shown right after an
+  action is up to date.
+- **Staleness rule**: a static answer is used only if
+  `Date − Last-Modified` (both from the server clock, so no clock skew with
+  the browser) is at most **45 s** (3 collector periods); older (collector
+  slowed down or stopped) or missing (404: cache emptied by a POST, collector
+  not running): the page asks the API, which also wakes the collector.
+- **Connections**: `server.max-keep-alive-idle = 120` (> 15 s refresh + margin:
+  one TLS handshake per visit, not per request), HTTP/2 (`server.h2proto`,
+  default of lighttpd 1.4.84, written explicitly), TLS session tickets
+  (`Options` … `SessionTicket`, default of mod_mbedtls, mbedTLS 3.6 built with
+  `MBEDTLS_SSL_SESSION_TICKETS`): a connection reopened after the idle limit
+  resumes the session instead of a full ECDHE + ECDSA handshake. Checked with
+  a host build of lighttpd 1.4.84 + mbedTLS 3.6.7 and this configuration
+  (`LIGHTTPD=… sh package/diet/tests/test-api.sh`, `tests/tls-reuse.py`): 10
+  requests 15 s apart = 1 handshake; a new connection is resumed (TLS 1.3).
+- **Expected load with the tab open** (per minute; before → after): HTTPS
+  requests 12 → 4; CGI processes (`sh api`) 12 → 1; collector `status`
+  computations 12 → 4; TLS handshakes unchanged (keep-alive) or resumed.
+  The CGI starts were the main cost: lighttpd + CGI should go from ~45 % to
+  roughly 5–10 % of the CPU with the tab visible, and ~0 when the tab is
+  hidden (estimate, to be measured with `top` on the NAS).
+
 `/etc/init.d/S95diet restart-collector` restarts the collector.
+
+## Prometheus
+
+`node_exporter` (Go) does not run on sparc32. Instead the collector writes
+`/var/run/diet/metrics.prom` in the Prometheus text format (0.0.4) and
+lighttpd serves it as `https://<nas>/metrics`. No Grafana or exporter on the
+NAS: Prometheus (and Grafana) run elsewhere and scrape it.
+
+**Setting** (Settings → Prometheus metrics, `METRICS` in `/etc/diet.conf`):
+
+| | `/metrics` |
+|---|---|
+| off (default, `METRICS=0`) | 403; the collector writes nothing |
+| with authentication (`1`, recommended) | `Authorization: Bearer <token>`: a read-only token from Settings → API access tokens (docs/API.md). lighttpd rewrites `/metrics` to the API (`/cgi-bin/v1?a=metrics`), which checks the token and sends the file with `exec cat` (one CGI start and one `sha256sum` per scrape) |
+| without authentication (`2`, explicit box) | the file served as a **static file** by lighttpd, no CGI; any device of the local network can read it (the private networks rule still applies) |
+
+The rule is written by `S50lighttpd metricsconf` (`include_shell` in
+`lighttpd.conf`) when lighttpd starts; the API restarts lighttpd when the
+setting changes.
+
+**Collector**: one more file per `status` round, written atomically
+(temporary file then `mv`), only when the setting is on: every 15 s while the
+interface is open, otherwise every 60 s (a scrape does not speed it up).
+`readynas_time_seconds` tells when it was written. Stopping the collector
+removes the file: the open mode then answers 404 (`up` goes to 0), the token
+mode computes the metrics at each scrape (slower, still correct).
+The values are those `status` already reads, plus `/proc/stat`,
+`/proc/net/dev`, `/proc/diskstats`, `nas-raid.mode`, `xraid.json` (written by
+nas-raid) and the check states: shell only, integer arithmetic (CPU seconds
+from jiffies printed as `N.NN`, no awk, no `printf %f`).
+
+Metrics (prefix `readynas_`, base units):
+
+| Metric | Type | Labels |
+|---|---|---|
+| `info` (version and model, 1) | gauge | `version`, `model` |
+| `time_seconds`, `uptime_seconds`, `load1`, `load5`, `load15` | gauge | |
+| `cpu_seconds_total` | counter | `mode` (user, nice, system, idle, iowait, irq, softirq) |
+| `memory_{total,free,available,buffers,cached}_bytes`, `swap_used_bytes` | gauge | |
+| `temperature_celsius` | gauge | `sensor` (board, sda, sdb) |
+| `fan_pwm` (setpoint 0-255), `fan_speed_rpm` | gauge | |
+| `network_{receive,transmit}_{bytes,packets,errors}_total` | counter | `device` (eth0) |
+| `disk_{read,written}_bytes_total`, `disk_{reads,writes}_completed_total` | counter | `device` |
+| `filesystem_size_bytes`, `filesystem_free_bytes` | gauge | `mountpoint` (/c) |
+| `disk_smart_passed`, `disk_{reallocated,pending,offline_uncorrectable}_sectors`, `disk_power_on_seconds` (if smartctl is on the system and diet-hwmon read them) | gauge | `device` |
+| `service_up` | gauge | `service` (ksmbd, web, ssh, ntpd, fan, hwmon, nfs) |
+| `storage_mode_info` (1) | gauge | `mode` (xraid-rw, xraid-ro, md…), `reasons` |
+| `xraid_writable`, `xraid_superblock_clean`, `xraid_disks_online`, `xraid_disks_failed`, `xraid_sections`, `xraid_sections_synced` | gauge | |
+| `xraid_check_result` (1), `xraid_check_timestamp_seconds` | gauge | `check` (full, quick), `result` (ok, differences, errors, incomplete, confirm, accepted, running) |
+
+`scrape_config` (the NAS certificate is self-signed: copy
+`/etc/lighttpd/ssl/server.pem` next to Prometheus, or use
+`insecure_skip_verify: true`):
+
+```yaml
+scrape_configs:
+  - job_name: readynas
+    scheme: https
+    scrape_interval: 60s          # the collector refreshes every 60 s when the interface is closed
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/readynas.token   # a read-only token
+    tls_config:
+      ca_file: /etc/prometheus/readynas.pem
+      # the certificate names the NAS by its host name and eth0 address
+    static_configs:
+      - targets: ['nas.local:443']
+```
+
+Without authentication, drop the `authorization` block. Alert examples:
+`readynas_xraid_disks_failed > 0`, `readynas_xraid_writable == 0`,
+`time() - readynas_xraid_check_timestamp_seconds{check="full"} > 90*86400`,
+`readynas_temperature_celsius{sensor=~"sd.*"} > 50`,
+`time() - readynas_time_seconds > 300` (collector stopped).
 
 ## Packages and applets used
 
@@ -327,6 +460,14 @@ of the fake root, three concurrent requests (one winner) repeated six times.
 System updates run against a folder standing for the USB stick (`DIET_STICK`); the
 boot side of the slots (relay-switch, initramfs) is checked by
 `board/readynas-duo-v1/relay/test-slots.sh`.
+Metrics: `tests/promcheck.py` checks the exposition format of the file
+(HELP/TYPE, contiguous families, counters `_total`, no NaN, no duplicate
+series; `promtool check metrics` too when installed) and the values are
+compared with the simulated `/proc`. Tokens: hashed storage, read-only refusing
+POST, revocation, no value in any log. With `LIGHTTPD=/path/to/lighttpd` (a host
+build of lighttpd with mod_mbedtls and mod_cgi) the real `lighttpd.conf` is
+also checked with the API as CGI: Basic for the interface, Bearer for
+`/api/v1/` and `/metrics`, and the three `/metrics` modes.
 `--serve` starts the interface on http://127.0.0.1:8080/ with this data
 (busybox httpd of the host).
 
@@ -334,6 +475,11 @@ boot side of the slots (relay-switch, initramfs) is checked by
 
 - The API runs as root (like the old DIET): protected by the
   password, the private network filter and the `X-Diet` header against CSRF.
+- API tokens (docs/API.md): a full-access token can do everything the
+  interface does; tokens have no expiry date (revoke them). `/metrics` and
+  `/api/v1/` cost one CGI start and one `sha256sum` per request (lighttpd
+  cannot check a hashed Bearer token by itself); the open `/metrics` mode is a
+  static file but readable by the whole local network.
 - First setup: until the administrator password is chosen, anyone on the
   local (private) network who opens the interface first can choose it. Set it
   up right after the first boot.

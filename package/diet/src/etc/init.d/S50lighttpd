@@ -60,5 +60,14 @@ case "$1" in
 	firstconf)
 		[ -e /etc/lighttpd/htpasswd ] ||
 			printf '$HTTP["url"] =~ "^/(index\\.html)?$" {\n\turl.redirect-code = 302\n\turl.redirect = ( "" => "/cgi-bin/setup" )\n}\n' ;;
-	*) echo "Usage: $0 {start|stop|restart|newcert|firstconf}"; exit 1 ;;
+	# lighttpd.conf (include_shell): /metrics according to METRICS of diet.conf
+	# (Settings): 1 = token checked by the API, 2 = static file, otherwise refused
+	metricsconf)
+		METRICS=0; [ -r /etc/diet.conf ] && . /etc/diet.conf
+		case $METRICS in
+		1) printf '$HTTP["url"] == "/metrics" {\n\turl.rewrite-once = ( "" => "/cgi-bin/v1?a=metrics" )\n}\n' ;;
+		2) printf '$HTTP["url"] == "/metrics" {\n\talias.url = ( "/metrics" => "/var/run/diet/metrics.prom" )\n\tsetenv.set-response-header = ( "Cache-Control" => "no-store" )\n}\n' ;;
+		*) printf '$HTTP["url"] == "/metrics" {\n\turl.access-deny = ( "" )\n}\n' ;;
+		esac ;;
+	*) echo "Usage: $0 {start|stop|restart|newcert|firstconf|metricsconf}"; exit 1 ;;
 esac

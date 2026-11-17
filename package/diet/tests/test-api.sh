@@ -194,7 +194,7 @@ done
 cp "$R"/htp.before "$HTP"
 # lighttpd: exception limited to /cgi-bin/setup, redirection only without an account
 LC=$SRC/etc/lighttpd/lighttpd.conf
-check "lighttpd.conf: authentication everywhere but /webdav and exactly /cgi-bin/setup" 'grep -qxF "\$HTTP[\"url\"] !~ \"^/(webdav(/|\$)|cgi-bin/setup\$)\" {" "$LC" && [ "$(grep -c "auth.require" "$LC")" = 1 ]'
+check "lighttpd.conf: authentication everywhere but /webdav, exactly /cgi-bin/setup and the token paths" 'grep -qxF "\$HTTP[\"url\"] !~ \"^/(webdav(/|\$)|cgi-bin/(setup|v1)\$|api/v1/|metrics\$)\" {" "$LC" && [ "$(grep -c "auth.require" "$LC")" = 1 ]'
 check "lighttpd.conf: mod_redirect before mod_auth (port 80 and setup redirections without a password)" '[ "$(grep -n "\"mod_redirect\"" "$LC" | cut -d: -f1)" -lt "$(grep -n "\"mod_auth\"" "$LC" | cut -d: -f1)" ]'
 FC=$(sed "s#/etc/lighttpd/htpasswd#$R/nohtp#g" "$SRC"/etc/init.d/S50lighttpd | sh -s firstconf)
 check "S50lighttpd firstconf, no account: / redirected to /cgi-bin/setup (302)" 'case "$FC" in *"\"^/(index\\.html)?\$\""*"redirect-code = 302"*"\"/cgi-bin/setup\""*) true;; *) false;; esac'
@@ -585,6 +585,29 @@ check "xraid_rw: refused on an md volume (409)" '[ "$ST" = 409 ] && grep -qx "XR
 api POST a=xraid_rw 'on=2'
 check "xraid_rw: invalid value refused" '[ "$ST" = 400 ]'
 echo 'xraid-rw' > "$R"/var/run/nas-raid.mode; rm -f "$R"/etc/nas-raid.conf "$R"/etc/nas-raid.conf.bak "$R"/var/lib/nas-raid/xraid-dirty
+# quick check: unclean superblock (real crash), no difference -> acceptance with ACCEPT + box only
+python3 "$XC"/tests/make-images.py "$R/img/fsdirty" fsdirty > /dev/null
+export NAS_RAID_DISKS="$(ls "$R/img/fsdirty"/*.img | tr '\n' ' ')"; rm -f "$R"/var/run/xraid.json
+echo 'xraid-ro unclean_shutdown unclean_shutdown_linux' > "$R"/var/run/nas-raid.mode; date +%s > "$R"/var/lib/nas-raid/xraid-dirty
+api POST a=raid_quick ''
+check "raid_quick: started" '[ "$ST" = 200 ] && json "\"Quick check started\" in j[\"msg\"]"'
+i=0; while [ $i -lt 30 ] && { [ ! -s "$R"/var/lib/nas-raid/quick.state ] || grep -qs '^running' "$R"/var/lib/nas-raid/quick.state; }; do sleep 1; i=$((i + 1)); done
+api GET a=storage
+check "storage: quick check done, no difference, confirmation offered (valid JSON)" "json 'j[\"quick\"][\"state\"]==\"confirm\" and j[\"quick\"][\"accept\"]==1 and j[\"quick\"][\"result\"][\"differences\"]==0 and j[\"quick\"][\"result\"][\"complete\"]==1'"
+for b in 'confirm=ACCEPT' 'yes=1' 'confirm=accept&yes=1'; do
+	api POST a=raid_quick_accept "$b"
+	check "raid_quick_accept refused ($b): 400, mark kept" '[ "$ST" = 400 ] && [ -e "$R"/var/lib/nas-raid/xraid-dirty ]'
+done
+api POST a=raid_quick_accept 'confirm=ACCEPT&yes=1'
+check "raid_quick_accept (ACCEPT + box): mark removed, state accepted" '[ "$ST" = 200 ] && [ ! -e "$R"/var/lib/nas-raid/xraid-dirty ] && grep -q "^accepted " "$R"/var/lib/nas-raid/quick.state'
+api POST a=raid_quick_accept 'confirm=ACCEPT&yes=1'
+check "raid_quick_accept again: refused by nas-raid (409, nothing to accept)" '[ "$ST" = 409 ]'
+api GET a=storage
+check "storage after acceptance: valid JSON, accept no longer offered" "json 'j[\"quick\"][\"state\"]==\"accepted\" and j[\"quick\"][\"accept\"]==0'"
+tr_ok=1; for k in 'Quick check' 'Accept the quick check…' 'Accept the quick check' 'Accept' 'I accept this residual risk.' 'no difference, unclean superblock: confirmation needed' '{0} differences ({1}): repair needed' 'incomplete: file system not located' 'accepted on {0}' '{0} compared'; do
+	grep -qF "  \"$k\": [\"" "$SRC"/www/index.html || { tr_ok=; echo "  untranslated: $k"; }; done
+check "index.html: quick check strings translated (fr, de)" '[ -n "$tr_ok" ]'
+echo 'xraid-rw' > "$R"/var/run/nas-raid.mode; rm -f "$R"/var/run/xraid.json
 echo "$MDSTAT_SAVE" > "$R"/proc/mdstat; rm -rf "$R"/sys/block/md10 "$R"/sys/block/md11
 unset NAS_RAID_DISKS
 
@@ -634,6 +657,140 @@ if command -v busybox >/dev/null 2>&1; then
 	check "collector (loop): clean stop (TERM), cache removed" '! kill -0 $CP 2>/dev/null && [ ! -e "$C"/pid ] && ! ls "$C"/*.json >/dev/null 2>&1'
 fi
 
+# ---------- Prometheus metrics (collector, METRICS of diet.conf, docs/DIET.md) ----------
+C=$R/var/run/diet
+DIET_COLLECT=once $SH "$SRC"/www/cgi-bin/api
+check "metrics: off by default (no METRICS): no metrics.prom" '! grep -q "^METRICS=" "$R"/etc/diet.conf && [ ! -e "$C"/metrics.prom ]'
+api GET a=sys
+check "sys: metrics setting 0" "json 'j[\"metrics\"]==0'"
+api POST a=metrics_set 'on=2'
+check "metrics_set: invalid value refused" '[ "$ST" = 400 ] && ! grep -q "^METRICS=" "$R"/etc/diet.conf'
+: > "$R"/cmd.log
+api POST a=metrics_set 'on=1'
+i=0; while [ $i -lt 30 ] && ! grep -q "S50lighttpd restart" "$R"/cmd.log; do sleep 0.2; i=$((i + 1)); done
+check "metrics_set on (token): METRICS=1, lighttpd restarted for its /metrics rule" '[ "$ST" = 200 ] && grep -qx "METRICS=1" "$R"/etc/diet.conf && grep -q "S50lighttpd restart" "$R"/cmd.log'
+api GET a=sys
+check "sys: metrics setting 1" "json 'j[\"metrics\"]==1'"
+# what the collector finds on a running NAS: SMART read by diet-hwmon, X-RAID
+# superblock (xraid.json of nas-raid), last checks
+echo 'health=PASSED realloc=3 pending=0 uncorr=0 hours=1000' > "$R"/var/run/smart.sda
+"$R"/bin/xraid-info --json "$R"/img/clean/*.img > "$R"/var/run/xraid.json
+echo 'xraid-rw' > "$R"/var/run/nas-raid.mode
+echo 'ok 1700000000' > "$R"/var/lib/nas-raid/verify.state; echo 'accepted 1700000500' > "$R"/var/lib/nas-raid/quick.state
+DIET_COLLECT=once $SH "$SRC"/www/cgi-bin/api
+check "metrics: collector writes metrics.prom (atomic: no temporary file left)" '[ -s "$C"/metrics.prom ] && [ ! -e "$C"/.metrics.tmp ]'
+check "metrics: valid exposition format (HELP/TYPE, contiguous families, counters _total, no NaN, readynas_ prefix)" 'python3 "$HERE"/promcheck.py "$C"/metrics.prom'
+if command -v promtool >/dev/null; then
+	check "metrics: promtool check metrics" 'promtool check metrics < "$C"/metrics.prom'
+fi
+# expected values, from the simulated /proc, /sys and /var/run (base units)
+check "metrics: values in base units (seconds, bytes, Celsius) and states" 'python3 - "$C"/metrics.prom <<"PYEOF"
+import sys
+m = {}
+for l in open(sys.argv[1]):
+    if not l.startswith("#"):
+        k, v = l.rsplit(" ", 1); m[k] = v.strip()
+want = {
+ "readynas_cpu_seconds_total{mode=\"user\"}": "1.00", "readynas_cpu_seconds_total{mode=\"system\"}": "0.50",
+ "readynas_cpu_seconds_total{mode=\"idle\"}": "10.00", "readynas_cpu_seconds_total{mode=\"softirq\"}": "0.05",
+ "readynas_load1": "0.10", "readynas_uptime_seconds": "12345",
+ "readynas_memory_total_bytes": str(255000 * 1024), "readynas_memory_available_bytes": str(180000 * 1024),
+ "readynas_temperature_celsius{sensor=\"board\"}": "45", "readynas_temperature_celsius{sensor=\"sda\"}": "38",
+ "readynas_temperature_celsius{sensor=\"sdb\"}": "41", "readynas_fan_speed_rpm": "1800", "readynas_fan_pwm": "120",
+ "readynas_network_receive_bytes_total{device=\"eth0\"}": "1000", "readynas_network_transmit_bytes_total{device=\"eth0\"}": "2000",
+ "readynas_network_receive_packets_total{device=\"eth0\"}": "10", "readynas_network_transmit_packets_total{device=\"eth0\"}": "20",
+ "readynas_network_receive_errors_total{device=\"eth0\"}": "0",
+ "readynas_disk_read_bytes_total{device=\"sda\"}": str(800 * 512), "readynas_disk_written_bytes_total{device=\"sdb\"}": str(400 * 512),
+ "readynas_disk_reads_completed_total{device=\"sda\"}": "10", "readynas_disk_writes_completed_total{device=\"sda\"}": "5",
+ "readynas_filesystem_size_bytes{mountpoint=\"/c\"}": str(1922000000 * 1024), "readynas_filesystem_free_bytes{mountpoint=\"/c\"}": str(1000000000 * 1024),
+ "readynas_storage_mode_info{mode=\"xraid-rw\",reasons=\"\"}": "1", "readynas_xraid_writable": "1",
+ "readynas_xraid_superblock_clean": "1", "readynas_xraid_disks_online": "2", "readynas_xraid_disks_failed": "0",
+ "readynas_xraid_sections": "2", "readynas_xraid_sections_synced": "2",
+ "readynas_xraid_check_result{check=\"full\",result=\"ok\"}": "1", "readynas_xraid_check_timestamp_seconds{check=\"full\"}": "1700000000",
+ "readynas_xraid_check_result{check=\"quick\",result=\"accepted\"}": "1",
+ "readynas_disk_smart_passed{device=\"sda\"}": "1", "readynas_disk_reallocated_sectors{device=\"sda\"}": "3",
+ "readynas_disk_power_on_seconds{device=\"sda\"}": "3600000",
+ "readynas_service_up{service=\"ksmbd\"}": "1", "readynas_service_up{service=\"ntpd\"}": "0",
+}
+bad = [(k, v, m.get(k)) for k, v in want.items() if m.get(k) != v]
+bad += [(k, "1", None) for k in m if k.startswith("readynas_info{version=") and m[k] != "1"]
+if bad or not any(k.startswith("readynas_info{version=") for k in m) or "readynas_disk_smart_passed{device=\"sdb\"}" in m:
+    print("  ", bad); sys.exit(1)
+PYEOF'
+check "metrics: computed by the shell, no awk (floating point emulated on the NAS)" '! sed -n "/^metrics() {/,/^}/p" "$SRC"/www/cgi-bin/api | grep -qw awk'
+api POST a=metrics_set 'on=0'
+DIET_COLLECT=once $SH "$SRC"/www/cgi-bin/api
+check "metrics_set off: METRICS=0, metrics.prom removed by the collector" '[ "$ST" = 200 ] && grep -qx "METRICS=0" "$R"/etc/diet.conf && [ ! -e "$C"/metrics.prom ]'
+MC() { sed "s#/etc/diet.conf#$R/etc/diet.conf#g; s#/var/run/diet/#${1:-/var/run/diet/}#g" "$SRC"/etc/init.d/S50lighttpd | sh -s metricsconf; }
+check "S50lighttpd metricsconf, off: /metrics refused" 'case "$(MC)" in *"\"/metrics\""*"url.access-deny"*) true;; *) false;; esac'
+
+# ---------- API access tokens (Settings; /api/v1 = the API under its "v1" name) ----------
+# v1 METHOD query token [body] [X-Diet]: like api, through /cgi-bin/v1 with "Authorization: Bearer token"
+v1() {
+	body=${4:-}
+	raw=$(printf '%s' "$body" | SCRIPT_NAME=/cgi-bin/v1 HTTP_AUTHORIZATION="$3" REQUEST_METHOD=$1 QUERY_STRING="$2&l=en" CONTENT_LENGTH=${#body} \
+		HTTP_X_DIET=${5-1} REMOTE_ADDR=10.0.0.9 $SH "$SRC/www/cgi-bin/v1")
+	ST=$(printf '%s\n' "$raw" | sed -n 's/^Status: \([0-9]*\).*/\1/p' | head -n 1); ST=${ST:-200}
+	HDR=$(printf '%s\n' "$raw" | tr -d '\r' | sed '/^$/q')
+	OUT=$(printf '%s\n' "$raw" | tr -d '\r' | sed '1,/^$/d')
+}
+check "tokens: the API has a \"v1\" name (link)" '[ -L "$SRC"/www/cgi-bin/v1 ] && [ "$(readlink "$SRC"/www/cgi-bin/v1)" = api ]'
+api POST a=token_add 'name=prometheus&perm=ro'
+TRO=$(printf '%s' "$OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'); IRO=${TRO%%.*}
+check "token_add read-only: token shown once (id.secret, 8 + 32 characters)" '[ "$ST" = 200 ] && printf "%s" "$TRO" | grep -qxE "[A-Za-z0-9]{8}\.[A-Za-z0-9]{32}"'
+api POST a=token_add "name=$(enc 'backup script')&perm=full"
+TFU=$(printf '%s' "$OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'); IFU=${TFU%%.*}
+check "token_add full: second token" '[ "$ST" = 200 ] && [ "$IFU" != "$IRO" ]'
+api POST a=token_add 'name=x&perm=admin'
+check "token_add: invalid rights refused" '[ "$ST" = 400 ]'
+api POST a=token_add "name=$(enc 'a:b')&perm=ro"
+check "token_add: invalid name refused" '[ "$ST" = 400 ]'
+check "tokens: stored hashed (salted SHA-256, file 600), secret in no file" 'S1=${TRO#*.}; L1=$(grep "^$IRO:" "$E"/diet-tokens); [ "$(stat -c %a "$E"/diet-tokens)" = 600 ] && [ "$(echo "$L1" | cut -d: -f2,3)" = prometheus:ro ] && [ "$(printf "%s" "$(echo "$L1" | cut -d: -f4)$S1" | sha256sum | cut -d" " -f1)" = "$(echo "$L1" | cut -d: -f5)" ] && ! grep -rqF "$S1" "$R"/etc "$R"/var "$R"/cmd.log && ! grep -rqF "${TFU#*.}" "$R"/etc "$R"/var "$R"/cmd.log'
+api GET a=tokens
+check "tokens: list (id, name, rights, date), never the hash" "json '[(t[\"name\"], t[\"perm\"]) for t in j]==[(\"prometheus\",\"ro\"),(\"backup script\",\"full\")] and all(set(t)=={\"id\",\"name\",\"perm\",\"created\"} for t in j)'"
+v1 GET a=status ''
+check "v1 without token: 401, WWW-Authenticate Bearer" '[ "$ST" = 401 ] && case "$HDR" in *"WWW-Authenticate: Bearer"*) true;; *) false;; esac'
+v1 GET a=status "Basic $(printf admin:x | base64)"
+check "v1 with Basic credentials: 401" '[ "$ST" = 401 ]'
+v1 GET a=status "Bearer $IRO.wrongsecretwrongsecretwrongsecre"
+check "v1 with a wrong secret: 401" '[ "$ST" = 401 ]'
+v1 GET a=status "Bearer $TRO"
+check "v1 read-only token: GET status answered (JSON)" '[ "$ST" = 200 ] && json "\"host\" in j"'
+v1 GET 'a=log&f=diet' "Bearer $TRO"
+check "v1 read-only token: GET log" '[ "$ST" = 200 ]'
+: > "$R"/cmd.log
+v1 POST a=ntp "Bearer $TRO"
+check "v1 read-only token: POST refused (403), nothing done" '[ "$ST" = 403 ] && [ ! -s "$R"/cmd.log ]'
+v1 POST a=ntp "Bearer $TFU" '' ''
+check "v1 full token: POST without X-Diet refused (403)" '[ "$ST" = 403 ]'
+v1 POST a=share_add "Bearer $TFU" 'name=viatoken'
+check "v1 full token: POST with X-Diet done, journal names the token (not its value)" '[ "$ST" = 200 ] && grep -q "Share viatoken created (10.0.0.9, token backup script)" "$R"/var/log/diet.log'
+v1 POST a=share_del "Bearer $TFU" 'name=viatoken'
+v1 GET a=tokens "Bearer $TFU"
+check "v1: tokens not listed through a token (403)" '[ "$ST" = 403 ]'
+v1 POST a=token_add "Bearer $TFU" 'name=more&perm=full'
+check "v1: no token created through a token (403)" '[ "$ST" = 403 ] && [ "$(grep -c . "$E"/diet-tokens)" = 2 ]'
+v1 GET a=metrics "Bearer $TRO"
+check "v1 metrics while METRICS=0: refused (403)" '[ "$ST" = 403 ]'
+api POST a=metrics_set 'on=1'
+v1 GET a=metrics "Bearer $TRO"
+check "v1 metrics (METRICS=1), no collector file: computed, text format 0.0.4, valid" '[ "$ST" = 200 ] && case "$HDR" in *"Content-Type: text/plain; version=0.0.4"*) true;; *) false;; esac && printf "%s\n" "$OUT" > "$R"/m.prom && python3 "$HERE"/promcheck.py "$R"/m.prom'
+DIET_COLLECT=once $SH "$SRC"/www/cgi-bin/api
+echo '# from the collector file' >> "$C"/metrics.prom
+v1 GET a=metrics "Bearer $TRO"
+check "v1 metrics: the collector file is sent as is" 'case "$OUT" in *"# from the collector file"*) true;; *) false;; esac'
+TRV=$TRO
+api POST a=token_del "id=$IRO"
+check "token_del: revoked" '[ "$ST" = 200 ] && ! grep -q "^$IRO:" "$E"/diet-tokens && grep -q "^$IFU:" "$E"/diet-tokens'
+v1 GET a=status "Bearer $TRV"
+check "v1 revoked token: 401" '[ "$ST" = 401 ]'
+api POST a=token_del "id=$IRO"
+check "token_del unknown: 404" '[ "$ST" = 404 ]'
+tr_ok=1; for k in 'API access tokens' 'Read-only token' 'Full-access token' 'Revoke' 'Prometheus metrics' 'Serve the metrics on /metrics' 'Without authentication (any device of the local network)' 'created {0}' 'No tokens.'; do
+	grep -qF "  \"$k\": [\"" "$SRC"/www/index.html || { tr_ok=; echo "  untranslated: $k"; }; done
+check "index.html: token and metrics strings translated (fr, de), settings wired" '[ -n "$tr_ok" ] && grep -q "post(.token_add." "$SRC"/www/index.html && grep -q "post(.metrics_set." "$SRC"/www/index.html && grep -q "get(.tokens.)" "$SRC"/www/index.html'
+check "tokens: no token value in the logs" '! grep -rqF "${TRV#*.}" "$R"/var/log "$R"/cmd.log && ! grep -rqF "${TFU#*.}" "$R"/var/log "$R"/cmd.log'
+
 # ---------- misc ----------
 api POST a=reboot '' ''
 check "POST without X-Diet refused (403)" '[ "$ST" = 403 ]'
@@ -666,6 +823,7 @@ mkdir -p "$R/root/.ssh" "$R/etc/dropbear" "$R/etc/lighttpd/ssl" "$R/var/lib/nas-
 echo "ssh-ed25519 AAAA test" > "$R/root/.ssh/authorized_keys"; echo hostkey > "$R/etc/dropbear/dropbear_ed25519_host_key"
 echo "admin:\$6\$x" > "$R/etc/lighttpd/htpasswd"; echo key > "$R/etc/lighttpd/ssl/server.key"
 echo state > "$R/var/lib/nas-raid/mark"; echo "XRAID_RW=no" > "$R/etc/nas-raid.conf"
+echo 1 > "$R/var/lib/nas-raid/xraid-dirty"	# /c mounted read-write while the update is installed
 printf 'root:$6$runninghash:19000:0:99999:7:::\n' > "$R/etc/shadow"
 grep -q '^nas:' "$R/etc/passwd" || echo "nas:x:105:105:DIET WebDAV:/:/bin/false" >> "$R/etc/passwd"
 grep -q '^zoe:' "$R/etc/passwd" || { echo "zoe:x:1007:1007::/c/home/zoe:/bin/false" >> "$R/etc/passwd"; echo "zoe:x:1007:nas" >> "$R/etc/group"; }
@@ -717,7 +875,9 @@ api GET a=update
 check "update: installed in rootfs-b but relay too old: no trial scheduled" "json 'j[\"job\"][\"state\"]==\"done\" and \"too old\" in j[\"job\"][\"msg\"] and j[\"try\"]==\"\" and j[\"slots\"][1][\"ok\"]==1 and j[\"slots\"][1][\"ver\"]==\"2.0\"'"
 B=$K/rootfs-b
 check "update: system extracted, kernel and its md5 in the slot, package removed" '[ "$(cat "$B/sbin/init")" = new-init ] && [ -f "$B/bin/newtool" ] && cmp -s "$B/boot/vmlinux.bin" "$IMG/vmlinux.bin" && (cd "$B/boot" && md5sum -c vmlinux.bin.md5 >/dev/null) && [ ! -e "$B/.incomplete" ] && [ ! -e "$K/update/package.tar" ] && [ "$(cat "$K/boot/vmlinux.bin")" = old-kernel ]'
-check "update: settings copied (diet.conf, ksmbd, nas-raid, SSH keys, host keys, web password, certificate)" 'cmp -s "$R/etc/diet.conf" "$B/etc/diet.conf" && cmp -s "$R/etc/ksmbd/ksmbd.conf" "$B/etc/ksmbd/ksmbd.conf" && cmp -s "$R/etc/nas-raid.conf" "$B/etc/nas-raid.conf" && cmp -s "$R/root/.ssh/authorized_keys" "$B/root/.ssh/authorized_keys" && cmp -s "$R/etc/dropbear/dropbear_ed25519_host_key" "$B/etc/dropbear/dropbear_ed25519_host_key" && cmp -s "$R/etc/lighttpd/htpasswd" "$B/etc/lighttpd/htpasswd" && [ -f "$B/etc/lighttpd/ssl/server.key" ] && [ -f "$B/var/lib/nas-raid/mark" ] && cmp -s "$R/etc/hostname" "$B/etc/hostname"'
+check "update: settings copied (diet.conf, ksmbd, nas-raid, SSH keys, host keys, web password, API tokens, certificate)" 'cmp -s "$R/etc/diet.conf" "$B/etc/diet.conf" && cmp -s "$R/etc/ksmbd/ksmbd.conf" "$B/etc/ksmbd/ksmbd.conf" && cmp -s "$R/etc/nas-raid.conf" "$B/etc/nas-raid.conf" && cmp -s "$R/root/.ssh/authorized_keys" "$B/root/.ssh/authorized_keys" && cmp -s "$R/etc/dropbear/dropbear_ed25519_host_key" "$B/etc/dropbear/dropbear_ed25519_host_key" && cmp -s "$R/etc/lighttpd/htpasswd" "$B/etc/lighttpd/htpasswd" && cmp -s "$R/etc/diet-tokens" "$B/etc/diet-tokens" && [ -f "$B/etc/lighttpd/ssl/server.key" ] && [ -f "$B/var/lib/nas-raid/mark" ] && cmp -s "$R/etc/hostname" "$B/etc/hostname"'
+check "update: the X-RAID read-write mark (xraid-dirty) is not carried into the new slot" '[ ! -e "$B/var/lib/nas-raid/xraid-dirty" ]'
+rm -f "$R/var/lib/nas-raid/xraid-dirty"
 check "update: accounts merged (users and uids of this NAS, root password, new system account kept)" 'grep -q "^zoe:x:1007:" "$B/etc/passwd" && grep -q "^nas:x:105:" "$B/etc/passwd" && grep -q "^newsys:x:103:" "$B/etc/passwd" && grep -q "^zoe:x:1007:nas" "$B/etc/group" && grep -q "^newsys:" "$B/etc/group" && grep -q "^root:\$6\$runninghash:" "$B/etc/shadow" && grep -q "^newsys:" "$B/etc/shadow" && [ $(grep -c "^root:" "$B/etc/passwd") = 1 ]'
 check "update: Avahi announcement of a stopped service stays off" '[ -f "$B/etc/avahi/services/rsync.service.off" ] && [ ! -f "$B/etc/avahi/services/rsync.service" ] && [ -f "$B/etc/avahi/services/ssh.service" ]'
 # relay add-on 1.1: the other version can be tried
@@ -785,6 +945,84 @@ PATH="$R/bin:$PATH" DIET_ONCE=1 $SH "$SRC"/usr/sbin/diet-hwmon
 sleep 1
 check "diet-hwmon: history written" 'grep -q " 45 1800 120$" "$R"/var/run/hwmon.hist'
 check "diet-hwmon: alert logged and sent" 'grep -q "RAID degraded" "$R"/var/run/alert.last && grep -q "ALERT" "$R"/var/log/diet.log && grep -q "wget .*sendMessage" "$R"/cmd.log'
+
+# ---------- real lighttpd (host build: LIGHTTPD=/path/to/lighttpd, otherwise lighttpd from PATH; skipped if absent) ----------
+# lighttpd.conf of the NAS with only paths, port and the :80 redirect changed:
+# collector answers served as static files under /cache/, with the interface
+# authentication, nothing else of /var/run/diet; HTTP/2; keep-alive; TLS tickets.
+LT=${LIGHTTPD:-$(command -v lighttpd)}
+if [ -x "$LT" ] && command -v curl >/dev/null && command -v openssl >/dev/null; then
+	LTD=$R/lt; LTP=$((20000 + $$ % 20000)); mkdir -p "$LTD/diet" "$LTD/www"
+	openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=t -days 2 -keyout "$LTD/key" -out "$LTD/pem" 2>/dev/null
+	echo "admin:$(openssl passwd -6 secret1)" > "$LTD/htpasswd"
+	echo '{"host":"readynas"}' > "$LTD/diet/status.json"; echo 1 > "$LTD/diet/pid"; echo x > "$LTD/diet/.status.tmp"; mkfifo "$LTD/diet/wake"; echo '"x"' > "$LTD/diet/hist.frag"
+	python3 - "$SRC/etc/lighttpd/lighttpd.conf" "$LTD" "$LTP" "$R" > "$LTD/lighttpd.conf" <<'PYEOF'
+import sys
+c, L, P = open(sys.argv[1]).read(), sys.argv[2], sys.argv[3]
+c = c[:c.index('$SERVER["socket"] == ":80"')]
+for a, b in (('server.port = 443', 'server.port = %s\nserver.bind = "127.0.0.1"' % P), ('"/www"', '"%s/www"' % L),
+             ('"/var/run/lighttpd.pid"', '"%s/pid"' % L), ('server.errorlog-use-syslog = "enable"', 'server.errorlog = "%s/error.log"' % L),
+             ('"/etc/lighttpd/ssl/server.pem"', '"%s/pem"' % L), ('"/etc/lighttpd/ssl/server.key"', '"%s/key"' % L),
+             ('"/etc/lighttpd/htpasswd"', '"%s/htpasswd"' % L), ('"/var/run/diet/"', '"%s/diet/"' % L),
+             ('include_shell "/etc/init.d/S50lighttpd firstconf"', ''),
+             ('include_shell "/etc/init.d/S50lighttpd metricsconf"', 'include "%s/metrics.conf"\nsetenv.add-environment = ( "DIET_ROOT" => "%s" )' % (L, sys.argv[4]))):
+    assert a in c, a
+    c = c.replace(a, b)
+print(c)
+PYEOF
+	echo '<html></html>' > "$LTD/www/index.html"; ln -s "$SRC/www/cgi-bin" "$LTD/www/cgi-bin"
+	sed -i 's/^METRICS=.*/METRICS=0/' "$R"/etc/diet.conf; MC "$LTD/diet/" > "$LTD/metrics.conf"
+	check "lighttpd (host): configuration accepted (-tt)" '"$LT" -tt -f "$LTD/lighttpd.conf" 2>/dev/null'
+	"$LT" -D -f "$LTD/lighttpd.conf" 2>/dev/null & LTPID=$!
+	i=0; while [ $i -lt 50 ] && ! curl -sk -o /dev/null "https://127.0.0.1:$LTP/" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
+	cu() { curl -sk -o "$LTD/out" -D "$LTD/hdr" -w '%{http_code}' "$@"; }
+	check "lighttpd: /cache/status.json without password -> 401" '[ "$(cu "https://127.0.0.1:$LTP/cache/status.json")" = 401 ]'
+	check "lighttpd: /cache/status.json with the interface account -> 200, the file, JSON, no-store, Last-Modified" '[ "$(cu -u admin:secret1 "https://127.0.0.1:$LTP/cache/status.json")" = 200 ] && grep -q readynas "$LTD/out" && grep -qi "^content-type: application/json" "$LTD/hdr" && grep -qi "^cache-control: no-store" "$LTD/hdr" && grep -qi "^last-modified:" "$LTD/hdr"'
+	check "lighttpd: missing cache file -> 404 (the page falls back to the API)" '[ "$(cu -u admin:secret1 "https://127.0.0.1:$LTP/cache/storage.json")" = 404 ]'
+	ko=; for f in pid wake .status.tmp hist.frag "" ../diet/pid; do c=$(cu -u admin:secret1 "https://127.0.0.1:$LTP/cache/$f"); [ "$c" = 403 ] || [ "$c" = 404 ] || ko="$ko $f:$c"; done
+	check "lighttpd: nothing else of /var/run/diet (pid, FIFO, temporary files, listing)" '[ -z "$ko" ] || { echo "  served:$ko"; false; }'
+	check "lighttpd: HTTP/2" '[ "$(curl -sk -u admin:secret1 --http2 -o /dev/null -w "%{http_version}" "https://127.0.0.1:$LTP/cache/status.json")" = 2 ]'
+	# one TLS handshake for several requests spaced out (keep-alive), then a new
+	# connection resumes the session with a ticket (no full handshake)
+	check "lighttpd: keep-alive (3 requests 2 s apart: 1 handshake) and TLS session resumption" 'python3 "$HERE"/tls-reuse.py 127.0.0.1 "$LTP" admin:secret1 3 2'
+	# token API and /metrics through lighttpd: the real API as CGI (DIET_ROOT
+	# passed by setenv), Basic for the interface, Bearer for /api/v1 and /metrics
+	cu() { curl -sk -o "$LTD/out" -D "$LTD/hdr" -w '%{http_code}' "$@"; }
+	U=https://127.0.0.1:$LTP
+	api POST a=token_add 'name=lt-ro&perm=ro'; LRO=$(printf '%s' "$OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+	api POST a=token_add 'name=lt-full&perm=full'; LFU=$(printf '%s' "$OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+	check "lighttpd: interface API with Basic -> 200 JSON" '[ "$(cu -u admin:secret1 "$U/cgi-bin/api?a=status")" = 200 ] && jsonok < "$LTD/out"'
+	check "lighttpd: interface API without password or with a token -> 401" '[ "$(cu "$U/cgi-bin/api?a=status")" = 401 ] && [ "$(cu -H "Authorization: Bearer $LRO" "$U/cgi-bin/api?a=status")" = 401 ]'
+	check "lighttpd: /api/v1/status without token -> 401 (WWW-Authenticate Bearer), with Basic -> 401" '[ "$(cu "$U/api/v1/status")" = 401 ] && grep -qi "^www-authenticate: bearer" "$LTD/hdr" && [ "$(cu -u admin:secret1 "$U/api/v1/status")" = 401 ]'
+	check "lighttpd: /api/v1/status with a read-only token -> 200 JSON" '[ "$(cu -H "Authorization: Bearer $LRO" "$U/api/v1/status")" = 200 ] && jsonok < "$LTD/out" && grep -q "\"host\"" "$LTD/out"'
+	check "lighttpd: /api/v1/log?f=diet (parameters kept) -> 200" '[ "$(cu -H "Authorization: Bearer $LRO" "$U/api/v1/log?f=diet")" = 200 ] && grep -q "token" "$LTD/out"'
+	check "lighttpd: /api/v1/ with a path that is not an action -> 404" '[ "$(cu -H "Authorization: Bearer $LRO" "$U/api/v1/status/x")" = 404 ]'
+	check "lighttpd: /cgi-bin/v1 needs the token too" '[ "$(cu -u admin:secret1 "$U/cgi-bin/v1?a=status")" = 401 ]'
+	check "lighttpd: POST /api/v1/ntp with a read-only token -> 403" '[ "$(cu -X POST -H "X-Diet: 1" -H "Authorization: Bearer $LRO" "$U/api/v1/ntp")" = 403 ]'
+	check "lighttpd: POST /api/v1/ntp with a full token: 403 without X-Diet, 200 with it" '[ "$(cu -X POST -H "Authorization: Bearer $LFU" "$U/api/v1/ntp")" = 403 ] && [ "$(cu -X POST -H "X-Diet: 1" -H "Authorization: Bearer $LFU" "$U/api/v1/ntp")" = 200 ] && jsonok < "$LTD/out"'
+	check "lighttpd: /metrics while off -> 403 (even with a token)" '[ "$(cu "$U/metrics")" = 403 ] && [ "$(cu -H "Authorization: Bearer $LRO" "$U/metrics")" = 403 ]'
+	ltrestart() {	# ltrestart METRICS: diet.conf, /metrics rule (S50lighttpd metricsconf), lighttpd restarted
+		sed -i '/^METRICS=/d' "$R"/etc/diet.conf; echo "METRICS=$1" >> "$R"/etc/diet.conf; MC "$LTD/diet/" > "$LTD/metrics.conf"
+		kill $LTPID 2>/dev/null; wait $LTPID 2>/dev/null
+		"$LT" -D -f "$LTD/lighttpd.conf" 2>>"$LTD/stderr" & LTPID=$!
+		i=0; while [ $i -lt 50 ] && ! curl -sk -o /dev/null "$U/" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
+	}
+	ltrestart 1
+	check "lighttpd: /metrics with token mode: 401 without token or with Basic" '[ "$(cu "$U/metrics")" = 401 ] && [ "$(cu -u admin:secret1 "$U/metrics")" = 401 ]'
+	check "lighttpd: /metrics with a read-only token -> 200, text format 0.0.4, valid" '[ "$(cu -H "Authorization: Bearer $LRO" "$U/metrics")" = 200 ] && grep -qi "^content-type: text/plain; version=0.0.4" "$LTD/hdr" && python3 "$HERE"/promcheck.py "$LTD/out"'
+	api POST a=token_del "id=${LRO%%.*}"
+	check "lighttpd: revoked token refused at once (/api/v1 and /metrics -> 401)" '[ "$(cu -H "Authorization: Bearer $LRO" "$U/api/v1/status")" = 401 ] && [ "$(cu -H "Authorization: Bearer $LRO" "$U/metrics")" = 401 ]'
+	ltrestart 2
+	check "lighttpd: /metrics open, file not written yet (collector stopped) -> 404" '[ "$(cu "$U/metrics")" = 404 ]'
+	cp "$C"/metrics.prom "$LTD/diet/metrics.prom"
+	check "lighttpd: /metrics open (local network): static file, no authentication, no CGI" '[ "$(cu "$U/metrics")" = 200 ] && cmp -s "$LTD/out" "$LTD/diet/metrics.prom" && grep -qi "^last-modified:" "$LTD/hdr" && grep -qi "^content-type: text/plain; version=0.0.4" "$LTD/hdr" && grep -qi "^cache-control: no-store" "$LTD/hdr"'
+	ltrestart 0
+	check "lighttpd: /metrics off again -> 403" '[ "$(cu "$U/metrics")" = 403 ]'
+	check "lighttpd: no token value in the server logs" '! grep -qF "${LRO#*.}" "$LTD/error.log" "$LTD/stderr" 2>/dev/null && ! grep -qF "${LFU#*.}" "$LTD/error.log" "$LTD/stderr" 2>/dev/null'
+	kill $LTPID 2>/dev/null; wait $LTPID 2>/dev/null
+else
+	echo "skip lighttpd (host) tests: no lighttpd (LIGHTTPD=...)"
+fi
 
 check "all JSON answers of the API are valid ($NJSON)" '[ -z "$JSONKO" ] || { echo "  invalid:$JSONKO"; false; }'
 echo "$((N - FAILS))/$N tests passed (root: $R)"

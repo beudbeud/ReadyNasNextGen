@@ -47,7 +47,7 @@ fail() { echo "$1"; log "refused: $1"; exit 1; }
 KEEP_FILES="etc/diet.conf etc/fan.conf etc/exports etc/rsyncd.conf etc/rsyncd.secrets
  etc/minidlna.conf etc/nas-raid.conf etc/hostname etc/TZ etc/diet-lang etc/diet-notify.conf
  etc/network/interfaces etc/ksmbd/ksmbd.conf etc/ksmbd/ksmbdpwd.db etc/lighttpd/htpasswd
- etc/lighttpd/htpasswd-users etc/lighttpd/webdav.conf"
+ etc/lighttpd/htpasswd-users etc/lighttpd/webdav.conf etc/diet-tokens"
 KEEP_DIRS="etc/dropbear etc/lighttpd/ssl root/.ssh var/lib/nas-raid var/lib/nas-update"
 MERGE="etc/passwd etc/group etc/shadow"
 
@@ -120,6 +120,13 @@ keep() {
 		[ -d "$R/$d" ] && [ ! -L "$R/$d" ] || continue
 		rm -rf "${D:?}/$d" && mkdir -p "$D/${d%/*}" && cp -a "$R/$d" "$D/$d" || return 1
 	done
+	# Runtime marks of the X-RAID stay with the running system: copied while /c is
+	# mounted read-write, xraid-dirty would make the other slot believe in a Linux
+	# crash after a clean shutdown (S35storage stop removes it only here, after
+	# S99relay-confirm has already synced). The superblock on the disks carries the
+	# real clean/dirty state; an interrupted check (verify.*) is not carried either.
+	rm -f "$D/var/lib/nas-raid/xraid-dirty" "$D/var/lib/nas-raid/verify.state" \
+		"$D/var/lib/nas-raid/verify.progress"
 	# accounts: union by name, the line of this system wins (uids, passwords), the
 	# system accounts that only the new image has are added
 	for f in $MERGE; do

@@ -5,12 +5,16 @@
 #   POST ?a=spindown|ksmbd|nfsd|ntp|reboot|poweroff|config|share_add|share_del|share_set
 #        |user_set|user_del|nfs_add|nfs_del|sys_set|notify_test
 #        |svc_set|dlna_set|dlna_scan|rsync_pw|rsync_c
-#        |raid_verify|xraid_rw
+#        |raid_verify|raid_quick|raid_quick_accept|xraid_rw
 #        |update_upload (body: the package) |update_url|update_switch|update_cancel
-#        |ssh_set|smb_enc
+#        |ssh_set|smb_enc|metrics_set|token_add|token_del
 #        (X-Diet: 1 header required)
+#   GET  ?a=tokens (access tokens, interface only)   ?a=metrics (Prometheus, /api/v1 only)
 # /cgi-bin/setup (symbolic link to this script): first setup, without
 # authentication, only while no web administrator account exists (see first_setup).
+# /cgi-bin/v1 (symbolic link, lighttpd rewrites /api/v1/<action> to it): the same
+# API for scripts, authenticated by "Authorization: Bearer <token>" (see tokauth,
+# docs/API.md) instead of the Basic account of the interface.
 # Message language: &l=fr|de|en.
 # Testing on a PC: DIET_ROOT=/path/to/fake-root prefixes every file read or
 # written (/proc, /sys, /etc, /var) and puts $DIET_ROOT/bin first in PATH
@@ -23,7 +27,42 @@ export PATH=${R:+$R/bin:}/bin:/sbin:/usr/bin:/usr/sbin
 # Fast path here, before ash has to read the rest of the script: shell builtins
 # only (and cat, a busybox "nofork" applet), no process.
 C=$R/var/run/diet
-case ${SCRIPT_NAME:-} in */setup) SETUP=1 ;; *) SETUP= ;; esac
+TOKENS=$R/etc/diet-tokens
+SETUP=; V1=; TOKN=; TOKP=
+case ${SCRIPT_NAME:-} in */setup) SETUP=1 ;; */v1) V1=1 ;; esac
+# tokauth: "Authorization: Bearer <id>.<secret>" checked against $TOKENS, one line
+# per token "id:name:ro|full:salt:sha256(salt secret):creation date" (600, no
+# token in clear anywhere); name in $TOKN, rights in $TOKP. One process (sha256sum).
+tokauth() {
+  T=${HTTP_AUTHORIZATION#Bearer }
+  case $T in "${HTTP_AUTHORIZATION:-}"|*[!A-Za-z0-9.]*|*.*.*|.*|*.) return 1;; esac
+  case $T in *.*) ;; *) return 1;; esac
+  [ -r "$TOKENS" ] || return 1
+  while IFS=: read -r ti tn tp ts th _; do
+    [ "$ti" = "${T%%.*}" ] || continue
+    set -- $(printf '%s' "$ts${T#*.}" | sha256sum)
+    [ "$1" = "$th" ] || return 1
+    TOKN=$tn; TOKP=$tp; return 0
+  done < "$TOKENS"
+  return 1
+}
+# metrics_mode: METRICS of diet.conf in $M: 0 off (default), 1 token, 2 open (local network)
+metrics_mode() {
+  M=0; [ -r "$R/etc/diet.conf" ] && while IFS= read -r l; do case $l in METRICS=[0-2]*) M=${l#METRICS=}; M=${M%"${M#?}"};; esac; done < "$R/etc/diet.conf"
+}
+v1fail() { printf 'Status: %s\r\n%sContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\n\r\n%s\n' "$1" "$2" "$3"; exit 0; }
+if [ -n "$V1" ]; then
+  tokauth || v1fail "401 Unauthorized" 'WWW-Authenticate: Bearer realm="DIET"\r\n' "invalid or missing token"
+  case $REQUEST_METHOD in GET|HEAD) ;; *) [ "$TOKP" = full ] || v1fail "403 Forbidden" "" "read-only token" ;; esac
+  case "&$QUERY_STRING&" in *"&a=metrics&"*)
+    # Prometheus (docs/DIET.md "Prometheus"): the collector file, if /metrics is on
+    metrics_mode; [ "$M" != 0 ] || v1fail "403 Forbidden" "" "metrics disabled (Settings)"
+    if [ -r "$C/metrics.prom" ]; then
+      printf 'Content-Type: text/plain; version=0.0.4; charset=utf-8\r\nCache-Control: no-store\r\n\r\n'
+      exec cat "$C/metrics.prom"
+    fi ;;
+  esac
+fi
 if [ "$REQUEST_METHOD" = GET ] && [ -z "${DIET_COLLECT:-}" ] && [ -z "$SETUP" ]; then
   q="&$QUERY_STRING&"; A=${q#*&a=}; [ "$A" = "$q" ] && A= || A=${A%%&*}; A=${A:-status}
   case $A in status|all|services|shares|nfs|sys|users|config|storage)
@@ -73,7 +112,7 @@ jstr() { case $1 in *[\"\\]*|*[[:cntrl:]]*) J=$(printf '%s' "$1" | esc);; *) J=$
 # int0 VAR...: resets to 0 a variable that is not a positive integer (JSON always valid)
 int0() { for v; do eval "case \${$v} in ''|*[!0-9]*) $v=0;; esac"; done; }
 bg() { setsid sh -c "$1" </dev/null >/dev/null 2>&1 & }
-note() { echo "[$(date '+%F %T')] $1 (${REMOTE_ADDR:-?})" >> "$LOG" 2>/dev/null; }
+note() { echo "[$(date '+%F %T')] $1 (${REMOTE_ADDR:-?}${TOKN:+, token $TOKN})" >> "$LOG" 2>/dev/null; }
 # application/x-www-form-urlencoded decoding (bytes, without relying on httpd -d).
 # Pure shell, no awk: the NAS awk computes in floating point (emulated by the kernel).
 # Each byte becomes an octal escape \NNN for a single final printf.
@@ -680,9 +719,10 @@ EOF
   # SSH: root password set (a hash in shadow), number of authorized keys
   RPW=0; [ -r "$ETC/shadow" ] && while IFS=: read -r u h _; do [ "$u" = root ] && { case $h in \$*) RPW=1;; esac; break; }; done < "$ETC/shadow"
   NK=0; [ -r "$SSHDIR/authorized_keys" ] && while read -r l; do case $l in ssh-*|ecdsa-*) NK=$((NK + 1));; esac; done < "$SSHDIR/authorized_keys"
-  printf '{"host":"%s","lang":"%s","tz":"%s","net":"%s","ip":"%s","mask":"%s","gw":"%s","dns":"%s","tgset":%d,"tgchat":"%s","rootpw":%d,"keys":%d,"smbenc":"%s"}\n' \
+  metrics_mode
+  printf '{"host":"%s","lang":"%s","tz":"%s","net":"%s","ip":"%s","mask":"%s","gw":"%s","dns":"%s","tgset":%d,"tgchat":"%s","rootpw":%d,"keys":%d,"smbenc":"%s","metrics":%d}\n' \
     "$HN" "$SL" "$TZV" "$NET" "${IPADDR:-$CIP}" "${NETMASK:-$CMASK}" \
-    "${GATEWAY:-$CGW}" "${DNS:-$CDNS}" "$tg" "$TGC" "$RPW" "$NK" "$SMBENC"
+    "${GATEWAY:-$CGW}" "${DNS:-$CDNS}" "$tg" "$TGC" "$RPW" "$NK" "$SMBENC" "$M"
 }
 
 host_ok() {
@@ -1113,6 +1153,177 @@ xraid_rw() {
   fi
 }
 
+# --- Prometheus metrics (docs/DIET.md "Prometheus") ---------------------------------
+# Text exposition format 0.0.4, written by the collector to $C/metrics.prom when
+# METRICS is not 0 (Settings). Called right after status(), in the same shell: it
+# reuses the values status() read (load, memory, fan, services, /c). Shell only,
+# integer arithmetic (no awk, no printf %f): CPU seconds from jiffies (USER_HZ 100)
+# printed as N.NN, kB and sectors converted to bytes.
+mh() { printf '# HELP readynas_%s %s\n# TYPE readynas_%s %s\n' "$1" "$3" "$1" "$2"; }
+# mf name type help lines: one family, only if it has samples
+mf() { [ -n "$4" ] && { mh "$1" "$2" "$3"; printf '%s' "$4"; }; }
+metrics() {
+  mh info gauge "DIET version and NAS model (always 1)."
+  printf 'readynas_info{version="%s",model="%s"} 1\n' "$VER" "$MODEL"
+  mh time_seconds gauge "When the collector wrote these values (Unix time)."
+  echo "readynas_time_seconds $now"
+  mh uptime_seconds gauge "Time since boot."
+  echo "readynas_uptime_seconds $up"
+  mh load1 gauge "Load average over 1 minute."; echo "readynas_load1 ${L1:-0}"
+  mh load5 gauge "Load average over 5 minutes."; echo "readynas_load5 ${L5:-0}"
+  mh load15 gauge "Load average over 15 minutes."; echo "readynas_load15 ${L15:-0}"
+  mh cpu_seconds_total counter "CPU time spent in each mode."
+  while read -r k a1 a2 a3 a4 a5 a6 a7 _; do [ "$k" = cpu ] && break; done < "$R/proc/stat"
+  int0 a1 a2 a3 a4 a5 a6 a7; set -- $a1 $a2 $a3 $a4 $a5 $a6 $a7
+  for m in user nice system idle iowait irq softirq; do
+    printf 'readynas_cpu_seconds_total{mode="%s"} %d.%d%d\n' "$m" $(($1 / 100)) $(($1 % 100 / 10)) $(($1 % 10)); shift
+  done
+  mh memory_total_bytes gauge "Total memory."; echo "readynas_memory_total_bytes $((mt * 1024))"
+  mh memory_free_bytes gauge "Unused memory."; echo "readynas_memory_free_bytes $((mf * 1024))"
+  mh memory_available_bytes gauge "Memory available without swapping (MemAvailable)."; echo "readynas_memory_available_bytes $((ma * 1024))"
+  mh memory_buffers_bytes gauge "Block device buffers."; echo "readynas_memory_buffers_bytes $((mb * 1024))"
+  mh memory_cached_bytes gauge "Page cache."; echo "readynas_memory_cached_bytes $((mc * 1024))"
+  mh swap_used_bytes gauge "Swap in use."; echo "readynas_swap_used_bytes $(((swt - swf) * 1024))"
+  # disks: temperature (drivetemp), I/O (/proc/diskstats), SMART if diet-hwmon read it
+  T=; [ -n "$temp" ] && T="readynas_temperature_celsius{sensor=\"board\"} $temp$NL"
+  IORB=; IOWB=; IORO=; IOWO=; SP=; SR=; SPE=; SU=; SH=
+  while read -r _ _ dv rc _ rs _ wc _ ws _; do
+    case $dv in sd[a-z]|sd[a-z][a-z]) ;; *) continue;; esac
+    int0 rc rs wc ws; l="{device=\"$dv\"}"
+    IORB="${IORB}readynas_disk_read_bytes_total$l $((rs * 512))$NL"; IOWB="${IOWB}readynas_disk_written_bytes_total$l $((ws * 512))$NL"
+    IORO="${IORO}readynas_disk_reads_completed_total$l $rc$NL"; IOWO="${IOWO}readynas_disk_writes_completed_total$l $wc$NL"
+  done < "$R/proc/diskstats"
+  for d in $(disks); do
+    l="{device=\"$d\"}"
+    dtemp "$d"; [ -n "$DT" ] && T="${T}readynas_temperature_celsius{sensor=\"$d\"} $DT$NL"
+    if [ -r "$RUN/smart.$d" ]; then
+      health=""; realloc=0; pending=0; uncorr=0; hours=0; . "$RUN/smart.$d"; int0 realloc pending uncorr hours
+      case $health in '') ;; PASSED) SP="${SP}readynas_disk_smart_passed$l 1$NL";; *) SP="${SP}readynas_disk_smart_passed$l 0$NL";; esac
+      SR="${SR}readynas_disk_reallocated_sectors$l $realloc$NL"; SPE="${SPE}readynas_disk_pending_sectors$l $pending$NL"
+      SU="${SU}readynas_disk_offline_uncorrectable_sectors$l $uncorr$NL"; SH="${SH}readynas_disk_power_on_seconds$l $((hours * 3600))$NL"
+    fi
+  done
+  mf temperature_celsius gauge "Temperature: board (fan controller) and disks (drivetemp)." "$T"
+  mf disk_read_bytes_total counter "Bytes read from the disk." "$IORB"
+  mf disk_written_bytes_total counter "Bytes written to the disk." "$IOWB"
+  mf disk_reads_completed_total counter "Read operations completed." "$IORO"
+  mf disk_writes_completed_total counter "Write operations completed." "$IOWO"
+  mf disk_smart_passed gauge "SMART overall health self-assessment passed (1) or not (0)." "$SP"
+  mf disk_reallocated_sectors gauge "SMART reallocated sectors (attribute 5)." "$SR"
+  mf disk_pending_sectors gauge "SMART current pending sectors (attribute 197)." "$SPE"
+  mf disk_offline_uncorrectable_sectors gauge "SMART offline uncorrectable sectors (attribute 198)." "$SU"
+  mf disk_power_on_seconds gauge "SMART power-on time (attribute 9)." "$SH"
+  mf fan_pwm gauge "Fan setpoint (PWM, 0-255)." "${pwm:+readynas_fan_pwm $pwm$NL}"
+  mf fan_speed_rpm gauge "Fan speed (revolutions per minute)." "${fan:+readynas_fan_speed_rpm $fan$NL}"
+  # network eth0: bytes, packets, errors
+  set --; while read -r l; do case $l in eth0:*) set -- ${l#eth0:}; break;; esac; done < "$R/proc/net/dev"
+  if [ $# -ge 11 ]; then
+    for kv in receive_bytes:1 receive_packets:2 receive_errors:3 transmit_bytes:9 transmit_packets:10 transmit_errors:11; do
+      eval "nv=\${${kv#*:}}"; int0 nv; k=${kv%:*}
+      mh "network_${k}_total" counter "eth0 ${k%_*} ${k#*_}."
+      printf 'readynas_network_%s_total{device="eth0"} %s\n' "$k" "$nv"
+    done
+  fi
+  # data volume /c (size and free space for the shares, from status)
+  if [ "$cs" != 0 ]; then
+    mh filesystem_size_bytes gauge "Size of the data volume."; echo "readynas_filesystem_size_bytes{mountpoint=\"$DATA\"} $((cs * 1024))"
+    mh filesystem_free_bytes gauge "Free space of the data volume (available to the shares)."; echo "readynas_filesystem_free_bytes{mountpoint=\"$DATA\"} $((cf * 1024))"
+  fi
+  # services: the "svc" object of status, "name":0|1
+  mh service_up gauge "Service running (1) or not (0)."
+  s=$SVC,; while [ -n "${s#,}" ]; do kv=${s%%,*}; s=${s#*,}; k=${kv#\"}; printf 'readynas_service_up{service="%s"} %s\n' "${k%%\"*}" "${kv##*:}"; done
+  # storage: nas-raid mode, X-RAID superblock (xraid.json written by nas-raid), checks
+  m=; rs=; read -r m rs 2>/dev/null < "$RUN/nas-raid.mode"
+  case $m in ''|*[!a-z0-9-]*) return 0;; esac
+  case $rs in *[!a-z0-9_\ ]*) rs=;; esac
+  mh storage_mode_info gauge "Storage mode of the data volume (nas-raid) and the reasons for read-only (always 1)."
+  printf 'readynas_storage_mode_info{mode="%s",reasons="%s"} 1\n' "$m" "$rs"
+  case $m in xraid-*) ;; *) return 0;; esac
+  [ "$m" = xraid-rw ] && v=1 || v=0
+  mh xraid_writable gauge "X-RAID mounted read-write (1) or read-only (0)."; echo "readynas_xraid_writable $v"
+  XJ=; read -r XJ 2>/dev/null < "$RUN/xraid.json"
+  case $XJ in '{'*'"clean":'*) 
+    x=${XJ#*\"clean\":}; x=${x%%[!0-9]*}; int0 x
+    mh xraid_superblock_clean gauge "X-RAID superblock marked clean (1) or dirty (0)."; echo "readynas_xraid_superblock_clean $x"
+    x=${XJ#*\"failed_disks\":}; x=${x%%[!0-9]*}; int0 x
+    mh xraid_disks_failed gauge "Failed disks counted by the X-RAID superblock."; echo "readynas_xraid_disks_failed $x"
+    n=0; s=$XJ; while :; do case $s in *'"state":"online"'*) s=${s#*\"state\":\"online\"}; n=$((n + 1));; *) break;; esac; done
+    mh xraid_disks_online gauge "X-RAID disks present and online."; echo "readynas_xraid_disks_online $n"
+    n=0; y=0; s=$XJ; while :; do case $s in *'"init":'*) s=${s#*\"init\":}; n=$((n + 1)); case $s in 1[!0-9]*) y=$((y + 1));; esac;; *) break;; esac; done
+    mh xraid_sections gauge "X-RAID sections."; echo "readynas_xraid_sections $n"
+    mh xraid_sections_synced gauge "X-RAID sections whose mirror is synchronised (initialised)."; echo "readynas_xraid_sections_synced $y" ;;
+  esac
+  CT=; CR=
+  for k in full:verify quick:quick; do
+    x=; d=; read -r x d 2>/dev/null < "$R/var/lib/nas-raid/${k#*:}.state" || continue
+    case $x in ''|*[!a-z]*) continue;; esac; int0 d
+    CR="${CR}readynas_xraid_check_result{check=\"${k%:*}\",result=\"$x\"} 1$NL"; CT="${CT}readynas_xraid_check_timestamp_seconds{check=\"${k%:*}\"} $d$NL"
+  done
+  mf xraid_check_result gauge "Last mirror check (full: nas-raid verify, quick: quick-verify) and its result: ok, differences, errors, incomplete, confirm, accepted or running (always 1)." "$CR"
+  mf xraid_check_timestamp_seconds gauge "End of the last mirror check (start while running), Unix time." "$CT"
+}
+write_metrics() {
+  metrics_mode
+  if [ "$M" = 0 ]; then rm -f "$C/metrics.prom"; return 0; fi
+  if metrics > "$C/.metrics.tmp" 2>/dev/null; then mv -f "$C/.metrics.tmp" "$C/metrics.prom"; else rm -f "$C/.metrics.tmp"; fi
+}
+metrics_set() {
+  on=; open=
+  for kv in $(echo "$BODY" | tr '&' ' '); do case "${kv%%=*}" in on) on=${kv#*=};; open) open=${kv#*=};; esac; done
+  case "$on:$open" in 0:|0:0|0:1) v=0;; 1:|1:0) v=1;; 1:1) v=2;; *) fail "400 Bad Request" "$(tx "Invalid setting" "Réglage invalide" "Ungültige Einstellung")";; esac
+  metrics_mode; old=$M
+  [ -f "$CONF" ] || : > "$CONF"
+  setkey "$CONF" METRICS "$v"
+  [ "$v" = 0 ] && rm -f "$C/metrics.prom"
+  # the /metrics rule of lighttpd.conf (S50lighttpd metricsconf) is read at start
+  [ "$v" = "$old" ] || bg "sleep 2; $INITD/S50lighttpd restart"
+  note "Prometheus metrics: METRICS=$v"
+  case $v in
+    0) ok "$(tx "Metrics off" "Métriques désactivées" "Metriken aus")" ;;
+    1) ok "$(tx "Metrics on /metrics, with an access token" "Métriques sur /metrics, avec un jeton d’accès" "Metriken unter /metrics, mit Zugriffstoken")" ;;
+    2) ok "$(tx "Metrics on /metrics, without authentication (local network)" "Métriques sur /metrics, sans authentification (réseau local)" "Metriken unter /metrics, ohne Anmeldung (lokales Netz)")" ;;
+  esac
+}
+
+# --- API access tokens (Settings, docs/API.md) -------------------------------------
+# Created here (interface only), shown once, stored hashed in $TOKENS (tokauth).
+tokens_get() {
+  O=; set -f
+  [ -r "$TOKENS" ] && while IFS=: read -r i n p _ _ c; do
+    int0 c; jstr "$n"; O="$O${O:+,}{\"id\":\"$i\",\"name\":\"$J\",\"perm\":\"$p\",\"created\":$c}"
+  done < "$TOKENS"
+  set +f; printf '[%s]\n' "$O"
+}
+rnd() { head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c "$1"; }
+token_add() {
+  set -f; name=; perm=
+  for kv in $(echo "$BODY" | tr '&' ' '); do case "${kv%%=*}" in name) name=$(urldec "${kv#*=}");; perm) perm=${kv#*=};; esac; done
+  case "$name" in ''|*[!A-Za-z0-9\ ._-]*) fail "400 Bad Request" "$(tx "Invalid name: letters, digits, space, . - and _" "Nom invalide : lettres, chiffres, espace, . - et _" "Ungültiger Name: Buchstaben, Ziffern, Leerzeichen, . - und _")";; esac
+  [ ${#name} -le 40 ] || fail "400 Bad Request" "$(tx "Name too long (40 characters max.)" "Nom trop long (40 caractères au plus)" "Name zu lang (höchstens 40 Zeichen)")"
+  case "$perm" in ro|full) ;; *) fail "400 Bad Request" "$(tx "Invalid setting" "Réglage invalide" "Ungültige Einstellung")";; esac
+  n=0; [ -r "$TOKENS" ] && while read -r _; do n=$((n + 1)); done < "$TOKENS"
+  [ $n -lt 20 ] || fail "409 Conflict" "$(tx "20 tokens at most: revoke one first" "20 jetons au plus : en révoquer un d’abord" "Höchstens 20 Token: zuerst eines widerrufen")"
+  id=$(rnd 8); salt=$(rnd 16); sec=$(rnd 32)
+  [ ${#id} = 8 ] && [ ${#salt} = 16 ] && [ ${#sec} = 32 ] && ! grep -q "^$id:" "$TOKENS" 2>/dev/null \
+    || fail "500 Internal Server Error" "$(tx "Cannot create the token, please retry" "Création du jeton impossible, réessayez" "Token kann nicht erstellt werden, bitte nochmal")"
+  set -- $(printf '%s' "$salt$sec" | sha256sum)
+  ( umask 077; { [ -r "$TOKENS" ] && cat "$TOKENS"; echo "$id:$name:$perm:$salt:$1:$(date +%s)"; } > "$TOKENS.tmp" ) && mv "$TOKENS.tmp" "$TOKENS" \
+    || fail "500 Internal Server Error" "$(tx "Cannot write" "Écriture impossible" "Schreiben nicht möglich")"
+  note "API token \"$name\" ($perm) created"
+  jstr "$(tx "Token created: copy it now, it is not shown again" "Jeton créé : copiez-le maintenant, il ne sera plus affiché" "Token erstellt: jetzt kopieren, es wird nicht mehr angezeigt")"
+  hdr application/json; printf '{"ok":true,"msg":"%s","id":"%s","token":"%s.%s"}\n' "$J" "$id" "$id" "$sec"
+}
+token_del() {
+  id=; for kv in $(echo "$BODY" | tr '&' ' '); do [ "${kv%%=*}" = id ] && id=${kv#*=}; done
+  case "$id" in ''|*[!A-Za-z0-9]*) fail "400 Bad Request" "$(tx "Invalid token" "Jeton invalide" "Ungültiges Token")";; esac
+  name=; [ -r "$TOKENS" ] && while IFS=: read -r i n _; do [ "$i" = "$id" ] && name=$n; done < "$TOKENS"
+  [ -n "$name" ] || fail "404 Not Found" "$(tx "Token not found" "Jeton introuvable" "Token nicht gefunden")"
+  ( umask 077; while IFS= read -r l; do case $l in "$id":*) ;; *) printf '%s\n' "$l";; esac; done < "$TOKENS" > "$TOKENS.tmp" ) && mv "$TOKENS.tmp" "$TOKENS" \
+    || fail "500 Internal Server Error" "$(tx "Cannot write" "Écriture impossible" "Schreiben nicht möglich")"
+  note "API token \"$name\" revoked"
+  ok "$(tx "Token revoked" "Jeton révoqué" "Token widerrufen")"
+}
+
 # --- Read answers and collector -------------------------------------------------
 hist_json() { [ -r "$RUN/hwmon.hist" ] && awk '{ printf "%s\\n", $0 }' "$RUN/hwmon.hist"; }
 calc() {	# calc key: JSON body of the GET answer (without header)
@@ -1125,7 +1336,7 @@ calc() {	# calc key: JSON body of the GET answer (without header)
 }
 
 # Collector (DIET_COLLECT=1, started by S95diet): recomputes the answers in $C,
-# temporary file then mv. Pace: status every 5 s and the rest every 60 s while
+# temporary file then mv. Pace: status every 15 s (the page reads it every 15 s, as a static file: /cache/) and the rest every 60 s while
 # the interface is open (request seen less than 2 min ago, "seen" file written by
 # the fast path); otherwise 60 s and 5 min. Immediate wake-up through a line in
 # the "wake" FIFO: "seen" (interface reopened) or "all" (POST: settings changed)
@@ -1148,7 +1359,7 @@ collect() {
   [ -p "$C/wake" ] || { rm -f "$C/wake"; mkfifo -m 600 "$C/wake"; } || exit 1
   exec 3<> "$C/wake"
   echo $$ > "$C/pid"
-  trap 'rm -f "$C"/*.json "$C"/.*.tmp "$C/pid" "$C/active"; exit 0' TERM INT HUP
+  trap 'rm -f "$C"/*.json "$C"/.*.tmp "$C/metrics.prom" "$C/pid" "$C/active"; exit 0' TERM INT HUP
   _ct=1; _cl=0; _cs=0; _ca=
   while :; do
     read -r UP _ < "$R/proc/uptime"; _cn=${UP%.*}
@@ -1158,16 +1369,16 @@ collect() {
     elif [ -n "$_ca" ]; then rm -f "$C/active"; _ca=; fi
     if [ -n "$_ct" ] || [ "$_cn" -ge "$_cl" ]; then
       rm -f "$C/invalid"
-      write_cache status
+      write_cache status; write_metrics
       hist_json > "$C/.hist.tmp" && mv -f "$C/.hist.tmp" "$C/hist.frag"
       for _ck in $SLOW; do write_cache "$_ck"; done
       [ -n "$_ca" ] && _cl=$((_cn + 60)) || _cl=$((_cn + 300))
       _cs=$_cn
     elif [ "$_cn" -ge "$_cs" ]; then
-      write_cache status
+      write_cache status; write_metrics
     fi
     [ -r "$C/status.json" ] && assemble
-    [ -n "$_ca" ] && _cs=$((_cn + 5)) || _cs=$((_cn + 60))
+    [ -n "$_ca" ] && _cs=$((_cn + 15)) || _cs=$((_cn + 60))
     _ct=; _cw=$((_cs < _cl ? _cs - _cn : _cl - _cn)); [ "$_cw" -ge 1 ] || _cw=1
     # wait without a process: FIFO read with a timeout (ash read -t)
     if read -t "$_cw" -r _cm <&3; then
@@ -1178,7 +1389,7 @@ collect() {
 # DIET_COLLECT=once: a single full round (tests on a PC, no FIFO, no wait)
 if [ -n "${DIET_COLLECT:-}" ]; then
   if [ "$DIET_COLLECT" = once ]; then
-    mkdir -p "$C"; rm -f "$C/invalid"; write_cache status; hist_json > "$C/hist.frag"
+    mkdir -p "$C"; rm -f "$C/invalid"; write_cache status; write_metrics; hist_json > "$C/hist.frag"
     for _ck in $SLOW; do write_cache "$_ck"; done; assemble; exit 0
   fi
   collect
@@ -1214,6 +1425,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
     exit 0
   fi
   read_body
+  case "$V1:$A" in 1:token_*) fail "403 Forbidden" "$(tx "Tokens are managed in the web interface only" "Les jetons se gèrent dans l’interface seulement" "Token werden nur in der Oberfläche verwaltet")";; esac
   case "$A" in
     spindown)
       for d in $(disks); do hdparm -y /dev/$d >/dev/null 2>&1; done; ok "$(tx "Disks spun down" "Disques en veille" "Platten schlafen")" ;;
@@ -1235,6 +1447,9 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
     notify_test) notify_test ;;
     ssh_set) ssh_set ;;
     smb_enc) smb_enc ;;
+    metrics_set) metrics_set ;;
+    token_add) token_add ;;
+    token_del) token_del ;;
     svc_set) svc_set ;;
     dlna_set) dlna_set ;;
     dlna_scan)
@@ -1254,6 +1469,22 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
       command -v nas-raid >/dev/null 2>&1 || fail "404 Not Found" "nas-raid ?"
       bg "nas-raid verify"; note "Storage: mirror check started"
       ok "$(tx "Check started (several hours, read-only)" "Vérification lancée (plusieurs heures, disques en lecture seule)" "Prüfung gestartet (mehrere Stunden, nur Lesen)")" ;;
+    raid_quick)	# quick check (nas-raid quick-verify, docs/XRAID.md "Quick check")
+      command -v nas-raid >/dev/null 2>&1 || fail "404 Not Found" "nas-raid ?"
+      bg "nas-raid quick-verify"; note "Storage: quick mirror check started"
+      ok "$(tx "Quick check started (1 to 3 minutes, read-only)" "Vérification rapide lancée (1 à 3 minutes, lecture seule)" "Schnellprüfung gestartet (1 bis 3 Minuten, nur Lesen)")" ;;
+    raid_quick_accept)	# unclean superblock, no difference: typed word ACCEPT AND ticked box (yes=1)
+      confirm=""; yes=""
+      for kv in $(echo "$BODY" | tr '&' ' '); do case "${kv%%=*}" in confirm) confirm=$(urldec "${kv#*=}");; yes) yes=${kv#*=};; esac; done
+      [ "$confirm" = ACCEPT ] || fail "400 Bad Request" "$(tx "confirmation word missing or wrong (ACCEPT)" "mot de confirmation manquant ou faux (ACCEPT)" "Bestätigungswort fehlt oder falsch (ACCEPT)")"
+      [ "$yes" = 1 ] || fail "400 Bad Request" "$(tx "second confirmation missing" "seconde confirmation manquante" "zweite Bestätigung fehlt")"
+      command -v nas-raid >/dev/null 2>&1 || fail "404 Not Found" "nas-raid ?"
+      if OUTR=$(nas-raid quick-accept --confirm ACCEPT --yes 2>&1); then
+        note "Storage: quick check accepted (residual risk)"
+        ok "$(tx "Quick check accepted: writing allowed at the next mount" "Vérification rapide acceptée : écriture permise au prochain montage" "Schnellprüfung akzeptiert: Schreiben beim nächsten Einhängen erlaubt")"
+      else
+        fail "409 Conflict" "$(tx "Refused" "Refusé" "Abgelehnt") : $(printf '%s' "$OUTR" | grep 'ERROR' | tail -n 1 | cut -c1-200)"
+      fi ;;
     raid_plan|raid_run)	# md wizards (migrate, create...): disabled for now, docs/XRAID-MIGRATION.md
       fail "409 Conflict" "$(tx "md support is disabled for now: X-RAID only" "md désactivé pour l’instant : X-RAID seulement" "md vorerst deaktiviert: nur X-RAID")" ;;
     xraid_rw) xraid_rw ;;
@@ -1273,6 +1504,11 @@ case "$A" in
   ""|status|all|config|shares|users|nfs|sys|storage|services) hdr application/json; calc "${A:-status}" ;;
   hist) hdr 'text/plain; charset=utf-8'; cat "$RUN/hwmon.hist" 2>/dev/null ;;
   update) hdr application/json; L=$L nas-update status ;;
+  tokens)
+    [ -z "$V1" ] || fail "403 Forbidden" "$(tx "Tokens are managed in the web interface only" "Les jetons se gèrent dans l’interface seulement" "Token werden nur in der Oberfläche verwaltet")"
+    hdr application/json; tokens_get ;;
+  metrics)	# no collector file: computed now
+    hdr 'text/plain; version=0.0.4; charset=utf-8'; status > /dev/null; metrics ;;
   log)
     hdr 'text/plain; charset=utf-8'
     qp f; case $QP in
