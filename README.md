@@ -1,111 +1,115 @@
 # ReadyNasNextGen
 
-Un système récent pour redonner vie au **NETGEAR ReadyNAS Duo v1** : Linux 6.18, partage
-de fichiers Windows/macOS (SMB) et Linux (NFS), interface web d'administration, sans toucher
-au firmware d'origine.
+A modern system to bring the **NETGEAR ReadyNAS Duo v1** back to life: Linux 6.18, file
+sharing for Windows/macOS (SMB) and Linux (NFS), and a web administration interface, without
+touching the original firmware.
 
-> **Projet expérimental.** Il démarre et sert des fichiers, mais il se lance encore depuis un
-> PC à chaque démarrage (voir [Limites](#limites-actuelles)). Gardez une sauvegarde de vos
-> données.
+> **Experimental project.** It boots and serves files, but it is still started from a PC at
+> every boot (see [Current limitations](#current-limitations)). Keep a backup of your data.
 
-## Ce que vous obtenez
+## What you get
 
-- **Partages réseau** : SMB 3 (Windows, macOS, Linux, via ksmbd) et NFS v3/v4.
-- **Interface web** en HTTPS (français, allemand, anglais), dérivée de
-  [DIET](https://github.com/mfe-/ReadyNASDuoSparc) : état du NAS, disques, partages,
-  utilisateurs, services, journaux.
-- **Services** : MiniDLNA (télévisions, lecteurs multimédia), découverte automatique sur le
-  réseau (`<nom>.local`), rsync et WebDAV par utilisateur.
-- **Vos disques X-RAID existants** sont repris tels quels, en lecture seule par défaut ; un
-  nouveau RAID peut être créé en RAID1 Linux standard (md).
-- **Ventilateur régulé** selon la température : le NAS reste silencieux au repos.
-- Le **firmware d'origine reste intact** : un redémarrage normal relance RAIDiator ou DIET.
+- **Network shares**: SMB 3 (Windows, macOS, Linux, through ksmbd) and NFS v3/v4.
+- **Web interface** over HTTPS (French, German, English), derived from
+  [DIET](https://github.com/mfe-/ReadyNASDuoSparc): NAS status, disks, shares, users,
+  services, logs.
+- **Services**: MiniDLNA (TVs, media players), automatic discovery on the network
+  (`<name>.local`), per-user rsync and WebDAV.
+- **Your existing X-RAID disks** are used as they are, read-only by default; a new RAID can be
+  created as a standard Linux RAID1 (md).
+- **Temperature-controlled fan**: the NAS stays quiet when idle.
+- **Hardware clock** read at boot, then kept accurate over the network (NTP).
+- The **original firmware stays intact**: a normal reboot starts RAIDiator or DIET again.
 
-## Matériel nécessaire
+## Required hardware
 
-- Un **ReadyNAS Duo v1** (processeur SPARC Infrant ; le Duo v2 est un autre matériel).
-- Une **clé USB** d'au moins 1 Go, branchée sur le NAS.
-- Un **adaptateur USB-série 3,3 V** relié au connecteur série interne du NAS (9600 bauds).
-- Un **PC Linux** sur le même réseau, avec Docker (serveur TFTP) et de quoi construire le
-  système (voir [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#construire), ~15 Go libres).
+- A **ReadyNAS Duo v1** (Infrant SPARC processor; the Duo v2 is different hardware).
+- A **USB stick** of at least 1 GB, plugged into the NAS.
+- A **3.3 V USB-to-serial adapter** connected to the NAS internal serial header (9600 baud).
+- A **Linux PC** on the same network, with Docker (TFTP server) and what is needed to build
+  the system (see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#construire), ~15 GB free).
 
 ## Installation
 
-1. **Construire le système** sur le PC :
+1. **Build the system** on the PC:
    ```sh
    git clone --recursive https://github.com/beudbeud/ReadyNasNextGen.git
    cd ReadyNasNextGen
-   make rapide        # télécharge la chaîne de compilation précompilée, puis construit
+   make rapide        # downloads the prebuilt toolchain, then builds
    ```
-   Résultat dans `output-rapide/images/` : `vmlinux.k3` (le noyau) et `rootfs.tar` (le système).
+   Output in `output-rapide/images/`: `vmlinux.k3` (the kernel) and `rootfs.tar` (the system).
 
-2. **Préparer la clé USB** : une partition ext4 (ou ext3), puis, en root, extraire le
-   système dans un dossier `rootfs-6.18` à sa racine :
+2. **Prepare the USB stick**: one ext4 (or ext3) partition, then, as root, extract the system
+   into an **empty** `rootfs-6.18` directory at its root:
    ```sh
    mount /dev/sdX1 /mnt
    mkdir /mnt/rootfs-6.18
    tar -xpf output-rapide/images/rootfs.tar -C /mnt/rootfs-6.18
    umount /mnt
    ```
-   Branchez la clé sur le NAS.
+   Plug the stick into the NAS. To update, extract into a new empty directory rather than over
+   the previous system.
 
-3. **Démarrer le NAS sur le nouveau système** : lancez le serveur TFTP
-   (`tools/tftp-server.sh output-rapide/images`), ouvrez la console série, allumez le NAS et
-   interrompez `iboot` au démarrage. À l'invite `iboot>` :
+3. **Boot the NAS on the new system**: start the TFTP server
+   (`tools/tftp-server.sh output-rapide/images`), open the serial console, power on the NAS and
+   interrupt `iboot` during boot. At the `iboot>` prompt:
    ```
-   tftp <MAC-du-NAS> <IP-du-NAS> <IP-du-PC> vmlinux.k3 0x80004000
+   tftp <NAS-MAC> <NAS-IP> <PC-IP> vmlinux.k3 0x80004000
    go 0x80004000
    ```
-   `tools/iboot-cmd.py` fait ces étapes automatiquement. Le système démarre en quelques
-   secondes sur la clé.
+   `tools/iboot-cmd.py` does these steps automatically. The system boots from the stick in a
+   few seconds.
 
-4. **Premier accès** : connectez-vous en SSH (`ssh root@<IP-du-NAS>`), choisissez le mot de
-   passe de l'interface avec `diet-webpass`, puis ouvrez `https://<IP-du-NAS>/` (utilisateur
-   `admin` ; acceptez le certificat auto-signé).
+4. **First access**: log in over SSH (`ssh root@<NAS-IP>`), set the web interface password with
+   `diet-webpass`, then open `https://<NAS-IP>/` (user `admin`; accept the self-signed
+   certificate).
 
-## Vos données (X-RAID)
+## Your data (X-RAID)
 
-Les disques formatés par le firmware d'origine (X-RAID) sont reconnus et montés dans `/c`
-**en lecture seule** par défaut : rien n'est écrit sur vos données. Avant tout montage, le
-système vérifie l'état du miroir (disque en panne, arrêt brutal, superblocs différents,
-synchronisation inachevée) et refuse en cas de doute.
+Disks formatted by the original firmware (X-RAID) are detected and mounted on `/c`
+**read-only** by default: nothing is written to your data. Before any mount, the system
+checks the mirror state (failed disk, unclean shutdown, mismatched superblocks, unfinished
+synchronisation) and refuses when in doubt.
 
-L'écriture sur un volume X-RAID et la migration vers un RAID1 Linux standard sont possibles ;
-elles sont décrites, avec leurs précautions, dans [docs/XRAID.md](docs/XRAID.md).
+Writing to an X-RAID volume (a switch in the Storage card of the web interface) and migrating
+to a standard Linux RAID1 are possible; they are described, with their precautions, in
+[docs/XRAID.md](docs/XRAID.md).
 
-## Limites actuelles
+## Current limitations
 
-- **Démarrage depuis le PC** : à chaque démarrage, il faut l'adaptateur série et le serveur
-  TFTP. Le démarrage autonome (sans PC) est à l'étude.
-- **Écriture sur un volume X-RAID** : la lecture est validée ; l'écriture (interrupteur de la
-  carte Stockage) n'a encore été essayée qu'en simulation.
+- **Booting from the PC**: every boot needs the serial adapter and the TFTP server.
+  Standalone boot (without a PC) is being studied.
+- **Writing to an X-RAID volume**: reading is validated; writing (Storage card switch) has
+  only been tried in simulation so far.
 
-## Revenir au système d'origine
+## Going back to the original system
 
-Il suffit de redémarrer le NAS normalement : le firmware d'origine démarre depuis sa mémoire
-flash, que ce projet ne modifie jamais.
+Just reboot the NAS normally: the original firmware boots from its flash memory, which this
+project never modifies.
 
-**Ne jamais écrire dans la flash** (commandes d'écriture NAND d'`iboot`, `/dev/mtd*`) : une
-flash corrompue rend le NAS inutilisable sans matériel de récupération.
+**Never write to the flash** (`iboot` NAND write commands, `/dev/mtd*`): a corrupted flash
+makes the NAS unusable without recovery hardware.
 
-## Pour aller plus loin
+## Further reading
 
-- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) : construction, chaîne de compilation, état
-  détaillé du portage, paramètres du noyau, arborescence.
-- [docs/DIET.md](docs/DIET.md) : l'interface web et ses différences avec DIET.
-- [docs/XRAID.md](docs/XRAID.md) : reprise des disques X-RAID, écriture, migration vers md.
-- [FEASIBILITY.md](FEASIBILITY.md) : étude de départ.
+The detailed documentation is in French:
 
-## Crédits et licences
+- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md): build, toolchain, detailed porting status,
+  kernel parameters, source tree.
+- [docs/DIET.md](docs/DIET.md): the web interface and its differences from DIET.
+- [docs/XRAID.md](docs/XRAID.md): using X-RAID disks, writing, migrating to md.
+- [FEASIBILITY.md](FEASIBILITY.md): initial study.
 
-- Noyau, pilotes et scripts : **GPL-2.0** (voir `LICENSE`), écrits d'après les sources GPL du
-  noyau 2.6.17 publiées par NETGEAR ; le micrologiciel du coprocesseur LP
-  (`arch/sparc/kernel/padre_lpram.c`) provient de ces mêmes sources GPL.
-- Interface web : dérivée de [DIET](https://github.com/mfe-/ReadyNASDuoSparc) de davemmi
-  (support du Duo v1 : [mfe-/ReadyNASDuoSparc#16](https://github.com/mfe-/ReadyNASDuoSparc/pull/16)).
-  Le dépôt d'origine ne déclare aucune licence : ce code n'est donc **pas** sous la GPL-2.0 de
-  ce dépôt (voir [docs/DIET.md](docs/DIET.md#origine-et-licence)).
-- `readynas_crypto` : GPL-2.0+ (Henrik Nordström) ; `des.c` : LGPL-2.1 (Christophe Devine).
-- Buildroot, Linux et les paquets construits gardent leurs propres licences.
+## Credits and licences
 
-Aucun binaire ni code propriétaire Infrant/NETGEAR n'est inclus.
+- Kernel, drivers and scripts: **GPL-2.0** (see `LICENSE`), written from the GPL sources of
+  the 2.6.17 kernel published by NETGEAR; the LP coprocessor firmware
+  (`arch/sparc/kernel/padre_lpram.c`) comes from the same GPL sources.
+- Web interface: derived from [DIET](https://github.com/mfe-/ReadyNASDuoSparc) by davemmi
+  (Duo v1 support: [mfe-/ReadyNASDuoSparc#16](https://github.com/mfe-/ReadyNASDuoSparc/pull/16)).
+  The original repository declares no licence, so this code is **not** under this repository's
+  GPL-2.0 (see [docs/DIET.md](docs/DIET.md#origine-et-licence)).
+- `readynas_crypto`: GPL-2.0+ (Henrik Nordström); `des.c`: LGPL-2.1 (Christophe Devine).
+- Buildroot, Linux and the built packages keep their own licences.
+
+No proprietary Infrant/NETGEAR binary or code is included.
