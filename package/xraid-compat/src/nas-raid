@@ -43,7 +43,7 @@ XRAID_VG=c				# LVM group created by RAIDiator, LV "c"
 XRAID_LV=c
 FUSE2FS_OPTS=allow_other
 XRAID_RW=no				# "yes": X-RAID writable if all safeguards pass
-SAMPLES=256				# 64 KiB blocks compared per section at mount time
+SAMPLES=256				# 64 KiB blocks compared per section before a rw mount (0 = none)
 VERIFY_MAX_DAYS=7			# maximum age of a verification before migrating
 VERIFY_RSYNC=-c				# copy check by checksums (empty = size+date)
 [ -r "$R/etc/nas-raid.conf" ] && . "$R/etc/nas-raid.conf"
@@ -226,8 +226,12 @@ mount_md() {	# $1 = mount point
 current_mode() { read -r CURRENT_MODE _ 2>/dev/null < "$RUN/nas-raid.mode" || CURRENT_MODE=none; }
 step() { cat "$STATE/migration" 2>/dev/null | sed -n 's/^step=//p'; }
 
+# Mount time: comparing SAMPLES blocks of the two disks takes ~35 s on the NAS
+# (cold). It only matters for WRITING (read-only reads the base disk alone and
+# cannot harm anything): first a fast analysis without samples; the comparison
+# runs only if rw is still possible (all other safeguards passed, XRAID_RW=yes).
 do_mount() {
-	SMP=$SAMPLES; analyse
+	SMP=0; analyse
 	write "$RUN/xraid.json" "$(xraid-info --json $(disks) 2>/dev/null || echo null)"
 	if [ "${XR_MD:-}" = 1 ]; then
 		if [ -e "$STATE/migration" ]; then
@@ -241,6 +245,10 @@ do_mount() {
 	decide
 	if [ "$MODE" = rw ] && [ "$XRAID_RW" != yes ]; then
 		MODE=ro; WHY="${WHY:+$WHY }rw_disabled"
+	fi
+	if [ "$MODE" = rw ] && [ "$SAMPLES" -gt 0 ] 2>/dev/null; then
+		log "X-RAID: comparing $SAMPLES samples per section before allowing writes"
+		SMP=$SAMPLES; analyse; decide	# a difference gives ro, reason mirror_differs
 	fi
 	MOUNTPOINT=$DATA
 	case "$MODE" in

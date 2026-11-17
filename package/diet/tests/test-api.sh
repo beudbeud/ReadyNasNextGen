@@ -75,6 +75,7 @@ stub df 'echo "Filesystem 1024-blocks Used Available Capacity Mounted on"; echo 
 stub pidof 'case "$1" in ksmbd.mountd|dropbear|lighttpd) echo 123;; *) exit 1;; esac'
 stub ksmbd.control
 stub exportfs
+for c in rpc.statd rpc.nfsd rpc.mountd killall; do stub $c; done
 stub hdparm
 stub hostname 'echo readynas'
 stub mdadm 'echo "/dev/md0: simulated"; echo "  State : clean"'
@@ -345,7 +346,7 @@ api POST a=svc_set 's=webdav&on=1'
 check "svc_set webdav 1: instance started, announcement back" 'grep -q "S51webdav start" "$R"/cmd.log && [ -e "$R"/etc/avahi/services/webdav.service ]'
 check "lighttpd.conf: /webdav proxied to 127.0.0.1:8081, outside the interface account" 'grep -qF "\"host\" => \"127.0.0.1\", \"port\" => 8081" "$SRC"/etc/lighttpd/lighttpd.conf && grep -qF "\$HTTP[\"url\"] !~ \"^/webdav(/|\$)\" {" "$SRC"/etc/lighttpd/lighttpd.conf'
 # init scripts: a service set to 0 in diet.conf does not start
-for s in S50avahi-daemon:AVAHI S51webdav:WEBDAV S60minidlnad:MINIDLNA S61rsyncd:RSYNC; do
+for s in S50avahi-daemon:AVAHI S51webdav:WEBDAV S60minidlnad:MINIDLNA S61rsyncd:RSYNC S60nfs:NFS; do
 	f=$BOARD/etc/init.d/${s%%:*}; [ -e "$f" ] || f=$SRC/etc/init.d/${s%%:*}; : > "$R"/cmd.log
 	sed -i "s/^SVC_${s#*:}=.*/SVC_${s#*:}=0/" "$R"/etc/diet.conf
 	sed "s#/etc/#$R/etc/#g; s#/var/#$R/var/#g; s#/usr/sbin/avahi-daemon#start-stop-daemon#" "$f" | PATH="$R/bin:$PATH" sh -s start >/dev/null
@@ -354,6 +355,33 @@ for s in S50avahi-daemon:AVAHI S51webdav:WEBDAV S60minidlnad:MINIDLNA S61rsyncd:
 	sed "s#/etc/#$R/etc/#g; s#/var/#$R/var/#g; s#/usr/sbin/avahi-daemon#start-stop-daemon#" "$f" | PATH="$R/bin:$PATH" sh -s start >/dev/null
 	check "${s%%:*}: start if SVC_${s#*:}=1" '[ -s "$R"/cmd.log ]'
 done
+
+# NFS on/off (Services card): S60nfs of the overlay, exports kept and editable
+f=$BOARD/etc/init.d/S60nfs; : > "$R"/cmd.log
+sed "s#/etc/#$R/etc/#g; s#/var/#$R/var/#g" "$f" | PATH="$R/bin:$PATH" sh -s stop >/dev/null
+check "S60nfs stop: mountd and statd stopped, nfsd threads stopped by rpc.nfsd 0, exports withdrawn" 'grep -q "killall -q rpc.mountd" "$R"/cmd.log && grep -qx "rpc.nfsd 0" "$R"/cmd.log && grep -q "exportfs -au" "$R"/cmd.log && grep -q "killall -q rpc.statd" "$R"/cmd.log'
+: > "$R"/cmd.log
+api POST a=svc_set 's=nfs&on=0'
+check "svc_set nfs 0: SVC_NFS=0 in diet.conf, S60nfs stop" '[ "$ST" = 200 ] && grep -q "^SVC_NFS=0" "$R"/etc/diet.conf && grep -q "S60nfs stop" "$R"/cmd.log'
+echo 0 > "$R"/proc/fs/nfsd/threads
+api GET a=services
+check "services: nfs off and not running" "json 'j[\"nfs\"]=={\"on\":0,\"run\":0}'"
+api GET a=status
+check "status: nfs_on 0 (Restart NFS disabled)" "json 'j[\"nfs_on\"]==0'"
+api POST a=nfsd ''
+check "Restart NFS refused while NFS is stopped (409)" '[ "$ST" = 409 ] && ! grep -q "S60nfs restart" "$R"/cmd.log'
+: > "$R"/cmd.log
+api POST a=nfs_add "path=$(enc /c/films)&client=$(enc 10.2.0.0/16)"
+check "nfs_add while NFS is stopped: export written, no exportfs, message says so" '[ "$ST" = 200 ] && grep -qx "/c/films 10.2.0.0/16(rw,no_subtree_check)" "$R"/etc/exports && ! grep -q exportfs "$R"/cmd.log && json "\"stopped\" in j[\"msg\"]"'
+api POST a=nfs_del "path=$(enc /c/films)&client=$(enc 10.2.0.0/16)"
+check "nfs_del while NFS is stopped: export removed" '[ "$ST" = 200 ] && ! grep -q films "$R"/etc/exports'
+api POST a=svc_set 's=nfs&on=1'
+echo 8 > "$R"/proc/fs/nfsd/threads
+api GET a=services
+check "svc_set nfs 1: S60nfs start, nfs on and running" 'grep -q "S60nfs start" "$R"/cmd.log && grep -q "^SVC_NFS=1" "$R"/etc/diet.conf'
+check "services: nfs on and running" "json 'j[\"nfs\"]=={\"on\":1,\"run\":1}'"
+api POST a=nfsd ''
+check "Restart NFS allowed again" '[ "$ST" = 200 ] && grep -q "S60nfs restart" "$R"/cmd.log'
 
 # ---------- storage: X-RAID (compatibility) and md, through nas-raid ----------
 # real nas-raid and xraid-info built for the host, on fake X-RAID images

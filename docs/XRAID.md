@@ -56,9 +56,11 @@ At boot, `S35storage` runs `nas-raid mount` (before NFS and SMB):
    stick): the four superblock copies, choice of the reference superblock
    (identical on the disks, otherwise the most recent), role of each disk,
    sections bounded to V, partitions (MBR of the **base** disk; if missing,
-   table copied in the superblock and EBRs read on the mirror), then
-   **comparison of 256 blocks of 64 KiB per section** at the same LBAs on both
-   disks. Verdict: `rw`, `ro` or `none`, with the reasons.
+   table copied in the superblock and EBRs read on the mirror). Verdict:
+   `rw`, `ro` or `none`, with the reasons. Only if writing is still possible
+   (`rw` and `XRAID_RW=yes`): second analysis with the **comparison of
+   `SAMPLES` (256) blocks of 64 KiB per section** at the same LBAs on both
+   disks; a difference gives read-only (`mirror_differs`). See §2.1.
 2. **Read-write** (all safeguards pass and `XRAID_RW=yes`):
 
         base disk     ──dm-linear [start, start+len)──┐
@@ -86,6 +88,20 @@ removed.
 volume stays mounted as it is), otherwise `unmount` then `mount` with all the
 safeguards. Used after a change of `XRAID_RW`.
 
+### 2.1 Mount time
+
+Measured on the NAS: `xraid-info --samples 256` on both disks takes 34.8 s
+cold (20 s warm), `--samples 32` 5.8 s, without samples 0.1–1.2 s; dmsetup,
+LVM and fuse2fs about 2 s. The comparison only protects **writing** (two
+disks that differ would be written as a mirror): read-only reads the base
+disk alone and a difference cannot damage anything. So `nas-raid mount` (and
+`remount`) first runs `xraid-info` without samples, decides with all the
+other safeguards, and compares the disks only if the result is still `rw`
+with `XRAID_RW=yes`. A read-only boot (the default) therefore mounts `/c` in
+about 2–3 s instead of ~37 s; a rw boot keeps the full comparison.
+`SAMPLES` in `/etc/nas-raid.conf` changes the number of blocks (0 = no
+comparison, not recommended for rw).
+
 The swap (`p2`) and the RAIDiator root (`p1`) are not used (the RAIDiator
 swap has 16 KiB pages).
 
@@ -100,7 +116,7 @@ swap has 16 KiB pages).
 | **A disk is missing** or single-disk configuration | read-only on the present disk |
 | **Unfinished synchronisation** (resume point ≠ 0, disk rebuilding/spare) | read-only |
 | Section that is not a mirror (NV+ RAID 4) | read-only |
-| **Mismatched samples** at the same LBAs | read-only |
+| **Mismatched samples** at the same LBAs (compared only before a rw mount, §2.1) | read-only (`mirror_differs`) |
 | Partition that overflows the sections or V | read-only |
 | Crash **under Linux** (marker `/var/lib/nas-raid/xraid-dirty` left behind) | read-only, until a successful full check |
 | X-RAID md degraded at shutdown (a disk failed along the way) | the marker stays: read-only at next boot |

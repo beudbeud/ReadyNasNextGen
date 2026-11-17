@@ -68,14 +68,17 @@ Removed: everything specific to X-RAID, Samba 3.6, RAIDiator
 | Avahi | on/off; the announced name (`<name>.local`) follows the NAS name (avahi is restarted when it changes) | `/etc/avahi/services/*.service` |
 | rsync | on/off; user accounts (see below); administrator module `[c]` (all of `/c`, as root, account `sauvegarde`) **only if checked** (`RSYNC_C=1`), with its password and the command `rsync -av folder/ sauvegarde@<name>.local::c/backups/` | `/etc/rsyncd.conf` (generated), `/etc/rsyncd.secrets` (600) |
 | WebDAV | on/off of the `S51webdav` instance; addresses `https://<name>.local/webdav/<user>/` and `/webdav/<share>/` | `/etc/lighttpd/webdav.conf` (generated), `/etc/lighttpd/htpasswd-users` |
+| NFS | on/off of the kernel NFS server (`S60nfs`: statd, nfsd, mountd; running = nfsd threads in `/proc/fs/nfsd/threads`). Stopped: the "NFS exports" card says so and stays editable (`/etc/exports` written, `exportfs` not run: read again at start); "Restart NFS" of the Overview is disabled (`nfs_on` in `?a=status`, refused with 409) | `/etc/exports` |
 
 State: running or stopped; for MiniDLNA, the number of indexed files
 (audio, video, images) read from its status page `http://127.0.0.1:8200/status` (no
 `sqlite3` on the NAS) and the size of `files.db`.
 
-Persistence: `SVC_MINIDLNA`, `SVC_AVAHI`, `SVC_RSYNC`, `SVC_WEBDAV` in
+Persistence: `SVC_MINIDLNA`, `SVC_AVAHI`, `SVC_RSYNC`, `SVC_WEBDAV`, `SVC_NFS` in
 `/etc/diet.conf` (`0` = stopped, `1` or missing = running). `S50avahi-daemon`,
-`S60minidlnad` (which replace the Buildroot ones), `S61rsyncd` (in
+`S60minidlnad`, `S60nfs` (which replace the Buildroot ones; `S60nfs` also stops
+the nfsd kernel threads with `rpc.nfsd 0`, which the Buildroot `killall nfsd`
+could not do; rpcbind is left running), `S61rsyncd` (in
 `board/readynas-duo-v1/rootfs-overlay/etc/init.d/`) and `S51webdav` (diet
 package) do not start a service set to `0`. A stopped service also loses its
 Avahi announcement (`rsync.service`, `webdav.service` renamed to `.service.off`,

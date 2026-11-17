@@ -135,6 +135,8 @@ status() {
   SVC="\"ksmbd\":$ks,\"web\":$web,\"ssh\":$ssh,\"ntpd\":$ntp,"
   alive "$RUN/fan.pid" && s=1 || s=0; SVC="$SVC\"fan\":$s,"
   alive "$RUN/diet-hwmon.pid" && s=1 || s=0; SVC="$SVC\"hwmon\":$s"
+  # NFS switched off in diet.conf (Services card): nfs_on 0, "Restart NFS" disabled
+  nfson=1; [ -r "$CONF" ] && while IFS= read -r l; do case $l in SVC_NFS=0*) nfson=0;; esac; done < "$CONF"
   if [ -r "$EXPORTS" ]; then
     x=; while read -r l; do case $l in /*) x=1; break;; esac; done < "$EXPORTS"
     if [ -n "$x" ]; then
@@ -220,6 +222,7 @@ status() {
   printf '"temp":%s,"fan":%s,"pwm":%s,"svc":{%s},"disks":[%s],' "${temp:-null}" "${fan:-null}" "${pwm:-null}" "$SVC" "${DSK%,}"
   printf '"mem":{"total":%s,"free":%s,"buf":%s,"cache":%s,"avail":%s,"swap":%s},' "$mt" "$mf" "$mb" "$mc" "$ma" "$((swt - swf))"
   printf '"c":{"size":%s,"used":%s,"free":%s},' "$cs" "$cu" "$cf"
+  printf '"nfs_on":%s,' "$nfson"
   printf '"cnt":{"busy":%s,"tot":%s,"rx":%s,"tx":%s,"rd":%s,"wr":%s},' "$busy" "$tot" "$rx" "$txb" "$rd" "$wr"
   printf '"md":[%s]}\n' "$MD"
 }
@@ -590,7 +593,10 @@ nfs_change() {
       cp "$EXPORTS" "$EXPORTS.bak"; mv "$EXPORTS.tmp" "$EXPORTS"
       MSG="$(tx "NFS export of $path to $client removed" "Export NFS de $path vers $client retiré" "NFS-Freigabe von $path für $client entfernt")" ;;
   esac
-  exportfs -ra >/dev/null 2>&1 || MSG="$MSG ($(tx "exportfs failed, see the log" "exportfs a échoué, voir le journal" "exportfs fehlgeschlagen, siehe Protokoll"))"
+  # NFS stopped: the exports are only written, S60nfs reads them at start
+  if ! svc_on NFS; then MSG="$MSG ($(tx "NFS is stopped: applied when it is started" "NFS est arrêté : appliqué à son démarrage" "NFS ist gestoppt: wird beim Start angewendet"))"
+  else exportfs -ra >/dev/null 2>&1 || MSG="$MSG ($(tx "exportfs failed, see the log" "exportfs a échoué, voir le journal" "exportfs fehlgeschlagen, siehe Protokoll"))"
+  fi
   note "$MSG"; ok "$MSG"
 }
 
@@ -709,9 +715,9 @@ notify_test() {
   fail "502 Bad Gateway" "$(tx "Sending failed" "Échec de l’envoi" "Senden fehlgeschlagen") : $(echo "$out" | tr -d '\r' | cut -c1-200)"
 }
 
-# --- Services: MiniDLNA, Avahi, rsync, WebDAV ------------------------------------
+# --- Services: MiniDLNA, Avahi, rsync, WebDAV, NFS ------------------------------
 # On/off in diet.conf (SVC_<NAME>=0|1, missing = on): S50avahi-daemon, S51webdav,
-# S60minidlnad and S61rsyncd do not start a service set to 0.
+# S60minidlnad, S60nfs and S61rsyncd do not start a service set to 0.
 DLNACONF=$ETC/minidlna.conf
 AVSVC=$ETC/avahi/services
 svc_on() { ! grep -qs "^SVC_$1=0" "$CONF"; }
@@ -728,10 +734,10 @@ services_get() {
     esac
   done < "$DLNACONF"
   case "$PORT" in ''|*[!0-9]*) PORT=8200;; esac
-  om=1; oa=1; or=1; ow=1; rc=0
+  om=1; oa=1; or=1; ow=1; onf=1; rc=0
   [ -r "$CONF" ] && while IFS= read -r l; do
     case $l in
-      SVC_MINIDLNA=0*) om=0 ;; SVC_AVAHI=0*) oa=0 ;; SVC_RSYNC=0*) or=0 ;; SVC_WEBDAV=0*) ow=0 ;;
+      SVC_MINIDLNA=0*) om=0 ;; SVC_AVAHI=0*) oa=0 ;; SVC_RSYNC=0*) or=0 ;; SVC_WEBDAV=0*) ow=0 ;; SVC_NFS=0*) onf=0 ;;
       RSYNC_C=*) case ${l#RSYNC_C=} in 1|1[!0-9]*) rc=1;; *) rc=0;; esac ;;
     esac
   done < "$CONF"
@@ -749,10 +755,12 @@ services_get() {
   fi
   HN=; read -r HN 2>/dev/null < "$ETC/hostname"; jstr "$HN"; HN=$J; jstr "$DNAME"
   b alive "$RUN/avahi-daemon/pid"; ra=$B; b alive "$RUN/rsyncd.pid"; rr=$B; b alive "$RUN/lighttpd-webdav.pid"; rw=$B
+  # NFS: running = nfsd threads in the kernel
+  rn=0; read -r rn 2>/dev/null < "$R/proc/fs/nfsd/threads"; int0 rn; [ "$rn" -gt 0 ] && rn=1
   printf '{"host":"%s","minidlna":{"on":%d,"run":%d,"name":"%s","dirs":[%s],"db":%s,"files":%s},' \
     "$HN" "$om" "$RUNDLNA" "$J" "$DIRS" "$DB" "$FILES"
-  printf '"avahi":{"on":%d,"run":%d},"rsync":{"on":%d,"run":%d,"c":%d,"pw":%d},"webdav":{"on":%d,"run":%d}}\n' \
-    "$oa" "$ra" "$or" "$rr" "$rc" "$pw" "$ow" "$rw"
+  printf '"avahi":{"on":%d,"run":%d},"rsync":{"on":%d,"run":%d,"c":%d,"pw":%d},"webdav":{"on":%d,"run":%d},"nfs":{"on":%d,"run":%d}}\n' \
+    "$oa" "$ra" "$or" "$rr" "$rc" "$pw" "$ow" "$rw" "$onf" "$rn"
 }
 
 svc_set() {
@@ -765,6 +773,7 @@ svc_set() {
     avahi)    K=AVAHI; INIT=S50avahi-daemon; ANN="" ;;
     rsync)    K=RSYNC; INIT=S61rsyncd; ANN=rsync ;;
     webdav)   K=WEBDAV; INIT=S51webdav; ANN=webdav ;;
+    nfs)      K=NFS; INIT=S60nfs; ANN="" ;;
     *) fail "400 Bad Request" "$(tx "unknown service" "service inconnu" "unbekannter Dienst")" ;;
   esac
   [ -f "$CONF" ] || : > "$CONF"
@@ -1019,6 +1028,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
       "$INITD/S70ksmbd" restart >/dev/null 2>&1; sleep 1
       pidof ksmbd.mountd >/dev/null && ok "$(tx "SMB restarted" "Partage SMB redémarré" "SMB neu gestartet")" || fail "500 Internal Server Error" "$(tx "ksmbd.mountd does not start" "ksmbd.mountd ne démarre pas" "ksmbd.mountd startet nicht")" ;;
     nfsd)
+      svc_on NFS || fail "409 Conflict" "$(tx "NFS is stopped (Services card)" "NFS est arrêté (carte Services)" "NFS ist gestoppt (Karte Dienste)")"
       "$INITD/S60nfs" restart >/dev/null 2>&1; ok "$(tx "NFS restarted" "NFS redémarré" "NFS neu gestartet")" ;;
     ntp)
       bg "ntpd -q -n -p pool.ntp.org"; ok "$(tx "Time update requested" "Mise à l’heure demandée" "Zeitabgleich angestoßen")" ;;

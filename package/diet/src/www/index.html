@@ -168,6 +168,7 @@ dialog h3{margin:0 0 8px;font-size:16px}
     </div>
     <div class="card" style="max-width:760px;margin-top:12px">
       <h2>NFS exports</h2>
+      <p class="small" id="nfoff" style="color:var(--warn);margin-top:0"></p>
       <div id="nfl"></div>
       <form id="nfadd" class="btns" style="margin-top:14px;align-items:center">
         <input class="inp" name="path" value="/c/" maxlength="64" pattern="/c(/[A-Za-z0-9_-]+)*" required style="min-width:170px">
@@ -426,6 +427,8 @@ const I18N = {
   "Network shares (SMB)": ["Partages réseau (SMB)", "Netzwerkfreigaben (SMB)"],
   "no SMB password": ["pas de mot de passe SMB", "kein SMB-Passwort"],
   "NFS exports": ["Exports NFS", "NFS-Freigaben"],
+  "NFS service stopped: the exports are kept and applied when it is started again (Services card).": ["Service NFS arrêté : les exports sont conservés et appliqués à son redémarrage (carte Services).", "NFS-Dienst gestoppt: die Freigaben bleiben erhalten und gelten wieder, sobald er gestartet wird (Karte Dienste)."],
+  "Kernel NFS server (v3 and v4); the exports are edited in the “NFS exports” card, also while the service is stopped.": ["Serveur NFS du noyau (v3 et v4) ; les exports se modifient dans la carte « Exports NFS », même service arrêté.", "NFS-Server des Kernels (v3 und v4); die Freigaben werden in der Karte „NFS-Freigaben“ bearbeitet, auch bei gestopptem Dienst."],
   "client: * or a.b.c.d/nn": ["client : * ou a.b.c.d/nn", "Client: * oder a.b.c.d/nn"],
   "Export": ["Exporter", "Freigeben"],
   "The folder must exist (an SMB share creates it). Changes apply at once (exportfs -ra).": ["Le dossier doit exister (un partage SMB le crée). Les modifications sont appliquées tout de suite (exportfs -ra).", "Der Ordner muss existieren (eine SMB-Freigabe legt ihn an). Änderungen gelten sofort (exportfs -ra)."],
@@ -673,6 +676,7 @@ function render(s){
   $('#svc').innerHTML = Object.entries(s.svc).filter(([k,v])=>v||k!=='ntpd')
     .map(([k,v])=>`<span class="chip"><span class="led ${v?'on':'dn'}"></span>${names[k]||k}</span>`).join('');
   $('#upd').textContent = t('Updated {0}', new Date().toLocaleTimeString(LANG));
+  nfsState(s.nfs_on);
 
   if(!$('#smartb').children.length)
     $('#smartb').innerHTML = s.disks.map(d=>`<button class="b" data-smart="${esc(d.dev)}">${esc(d.dev)}</button>`).join('');
@@ -708,7 +712,10 @@ async function loadStk(d){
   let h = `<div class="row"><span>${t('Mode')}</span><b style="color:var(--${ok?'ok':'warn'})">${esc(t(XRM[stk.mode]||stk.mode))}</b></div>`;
   // reasons: xraid-info codes (English text, shown here in the page language), then the ones added by nas-raid
   if(stk.mode!=='md') (x.reasons||[]).forEach(r=>{ h += `<div>· ${esc(XR[r.code] ? t(XR[r.code]) : r.text)}</div>`; });
-  if(stk.mode!=='md') (stk.reasons||'').split(' ').filter(r=>NR[r]).forEach(r=>{ h += `<div>· ${esc(t(NR[r]))}</div>`; });
+  // mode reasons: those of nas-raid, and xraid-info codes not in xraid.json (the
+  // disk comparison, mirror_differs, only runs at a rw mount)
+  if(stk.mode!=='md'){ const shown = (x.reasons||[]).map(r=>r.code);
+    (stk.reasons||'').split(' ').filter(r=>NR[r] || (XR[r] && !shown.includes(r))).forEach(r=>{ h += `<div>· ${esc(t(NR[r] || XR[r]))}</div>`; }); }
   if(stk.mode!=='md') (x.sections||[]).forEach((s,i)=>{ h += `<div class="row"><span>${t('Section {0}', i)}</span><span>${kb(s.sectors/2)} · ${s.init===0 ? t('sync unfinished') : t('in sync')}</span></div>`; });
   if(x.mirror || v.state!=='never'){
     const d = v.date ? new Date(v.date*1000).toLocaleDateString(LANG) : '';
@@ -940,7 +947,11 @@ $('#usadd').onsubmit = ev=>{
   userDo('user_set', 'name='+encodeURIComponent(f.querySelector('[name=name]').value.trim())+'&pw='+encodeURIComponent(f.querySelector('[name=pw]').value)); f.reset();
 };
 
-// NFS exports
+// NFS exports; NFS switched off in the Services card: notice, "Restart NFS" disabled
+function nfsState(on){
+  $('#nfoff').textContent = on===0 ? t('NFS service stopped: the exports are kept and applied when it is started again (Services card).') : '';
+  $('[data-a=nfsd]').disabled = on===0;
+}
 async function loadNfs(){
   try{
     const l = await get('nfs');
@@ -963,10 +974,11 @@ $('#nfadd').onsubmit = ev=>{
   nfsDo('nfs_add', 'path='+encodeURIComponent(f.path.value.trim())+'&client='+encodeURIComponent(f.client.value.trim())+'&ro='+(f.ro.checked?1:0));
 };
 
-// Services: MiniDLNA, Avahi, rsync, WebDAV (on/off kept across reboots)
+// Services: MiniDLNA, Avahi, rsync, WebDAV, NFS (on/off kept across reboots)
 async function loadSvc(){
   let s; try{ s = await get('services'); }catch(e){ toast(t('Error: {0}', e.message)); return; }
   const h = esc(s.host)+'.local', d = s.minidlna, r = s.rsync;
+  if(s.nfs) nfsState(s.nfs.on);
   const row = (k, title, on, run, body) => `<div data-s="${k}" style="padding:10px 0;border-bottom:1px solid var(--line)">
     <div class="row" style="align-items:center"><b>${title}</b><span class="btns" style="align-items:center">
       <span class="chip"><span class="led ${run?'on':on?'dn':''}"></span>${run?t('running'):t('stopped')}</span>
@@ -989,7 +1001,8 @@ async function loadSvc(){
         <button class="b" data-b="rsync_pw">${t('Set the password')}</button></div>
       <div class="btns" style="margin-top:6px;align-items:center"><code>rsync -av ${esc(t('folder'))}/ sauvegarde@${h}::c/sauvegardes/</code>
         <button class="b" data-copy="rsync -av ${esc(t('folder'))}/ sauvegarde@${h}::c/sauvegardes/">${t('Copy')}</button></div>` : ''}`) +
-    row('webdav', 'WebDAV', s.webdav.on, s.webdav.run, `${t('Addresses:')} <b>https://${h}/webdav/&lt;${t('user')}&gt;/</b> ${t('(personal folder)')} · <b>https://${h}/webdav/&lt;${t('share')}&gt;/</b><br>${t('User accounts (not the one of this interface); files are created under the “nas” account.')}`);
+    row('webdav', 'WebDAV', s.webdav.on, s.webdav.run, `${t('Addresses:')} <b>https://${h}/webdav/&lt;${t('user')}&gt;/</b> ${t('(personal folder)')} · <b>https://${h}/webdav/&lt;${t('share')}&gt;/</b><br>${t('User accounts (not the one of this interface); files are created under the “nas” account.')}`) +
+    (s.nfs ? row('nfs', 'NFS', s.nfs.on, s.nfs.run, t('Kernel NFS server (v3 and v4); the exports are edited in the “NFS exports” card, also while the service is stopped.')) : '');
 }
 async function svcDo(a, body){
   try{ const r = await post(a, body); toast(r.msg || t('done')); }catch(e){ toast(t('Error: {0}', e.message)); }

@@ -1,0 +1,45 @@
+#!/bin/sh
+# Kernel NFS server (nfs-utils). Replaces the Buildroot script so that it does
+# not start when SVC_NFS=0 in /etc/diet.conf (stopped from the DIET interface),
+# and so that "stop" really stops nfsd: its threads are kernel threads, which
+# killall cannot reach; "rpc.nfsd 0" stops them. rpcbind (S30rpcbind) is left
+# running: it is small and also serves NFS clients of the NAS itself.
+# /etc/exports stays editable while NFS is stopped; it is read again at start.
+NR_THREADS=2
+[ -r /etc/default/nfsd ] && . /etc/default/nfsd
+
+start() {
+	grep -qs '^SVC_NFS=0' /etc/diet.conf && { echo "nfs: disabled (/etc/diet.conf)"; return 0; }
+	mkdir -p /var/lock/subsys /var/run/nfs/sm /var/run/nfs/sm.bak
+	touch /var/run/nfs/rmtab
+	printf "Starting NFS statd: "
+	rpc.statd && echo OK || echo FAIL
+	printf "Starting NFS services: "
+	exportfs -r && echo OK || echo FAIL
+	printf "Starting NFS daemon: "
+	rpc.nfsd "$NR_THREADS" && echo OK || echo FAIL
+	printf "Starting NFS mountd: "
+	rpc.mountd && echo OK || echo FAIL
+	touch /var/lock/subsys/nfs
+}
+
+stop() {
+	printf "Stopping NFS mountd: "
+	killall -q rpc.mountd; echo OK
+	printf "Stopping NFS daemon: "
+	rpc.nfsd 0 && echo OK || echo FAIL
+	printf "Unexporting: "
+	exportfs -au && echo OK || echo FAIL
+	printf "Stopping NFS statd: "
+	killall -q rpc.statd; echo OK
+	rm -f /var/lock/subsys/nfs /var/run/rpc.statd.pid
+}
+
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart) stop; start ;;
+	reload) grep -qs '^SVC_NFS=0' /etc/diet.conf || exportfs -r ;;
+	*) echo "Usage: $0 {start|stop|restart|reload}"; exit 1 ;;
+esac
+exit 0

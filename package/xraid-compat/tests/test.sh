@@ -59,8 +59,13 @@ stub mount 'echo "/dev/x $3 ext4 rw 0 0" >> "'"$R"'/proc/mounts"'
 printf 'Personalities : [raid1]\nmd11 : active raid1 dm-3[1] dm-2[0]\n      100 blocks [2/2] [UU]\n' > "$R/proc/mdstat"
 export NAS_RAID_ROOT=$R
 nr0() { NAS_RAID_DISKS="$DISKS" $SH "$SRC/nas-raid" "$@"; }
-DISKS="$T/big/sda.img $T/big/sdb.img"; : > "$T/cmd.log"; nr0 mount 2>/dev/null >/dev/null
+# xraid-info wrapped: its arguments go to xi.log (sampling or not)
+mv "$R/bin/xraid-info" "$R/bin/xraid-info.real"
+printf '#!/bin/sh\necho "xraid-info $*" >> "%s/xi.log"\nexec "%s/bin/xraid-info.real" "$@"\n' "$T" "$R" > "$R/bin/xraid-info"; chmod 755 "$R/bin/xraid-info"
+sampled() { grep -q -- '--samples [1-9]' "$T/xi.log"; }
+DISKS="$T/big/sda.img $T/big/sdb.img"; : > "$T/cmd.log"; : > "$T/xi.log"; nr0 mount 2>/dev/null >/dev/null
 check "XRAID_RW=no (default): read-only even when healthy" "grep -q 'xraid-ro rw_disabled' '$R/var/run/nas-raid.mode' && ! grep -q mdadm '$T/cmd.log'"
+check "read-only mount: no disk comparison (xraid-info --samples 0 only)" "grep -q -- '--samples 0' '$T/xi.log' && ! sampled"
 nr0 unmount 2>/dev/null >/dev/null
 echo XRAID_RW=yes > "$R/etc/nas-raid.conf"
 nr() { NAS_RAID_DISKS="$DISKS" $SH "$SRC/nas-raid" "$@"; }
@@ -71,8 +76,9 @@ within_v() {
 }
 
 DISKS="$T/big/sda.img $T/big/sdb.img"
-: > "$T/cmd.log"; nr mount 2>/dev/null >/dev/null
+: > "$T/cmd.log"; : > "$T/xi.log"; nr mount 2>/dev/null >/dev/null
 check "mount (clean): xraid-rw" "[ \"\$(mode_of)\" = xraid-rw ]"
+check "rw mount: fast analysis first, then comparison with SAMPLES (256)" "grep -n -- '--samples' '$T/xi.log' | sed -n '1p' | grep -q -- '--samples 0 ' && grep -q -- '--samples 256 ' '$T/xi.log'"
 check "mount: mdadm --build RAID 1 without superblock, base first" "grep -q 'mdadm --build /dev/md11 --level=1 --raid-devices=2 --assume-clean /dev/mapper/xr-a-s1 /dev/mapper/xr-b-s1' '$T/cmd.log'"
 check "mount: p5 mapped onto md11 at 512008" "grep -q \"dmsetup create xr-p5 --table 0 1460504296 linear /dev/md11 512008\" '$T/cmd.log'"
 check "mount: no table beyond V" "within_v 1465128688"
@@ -93,8 +99,9 @@ nr verify 2>/dev/null
 check "verify (clean): mark removed after full comparison" "[ ! -e '$R/var/lib/nas-raid/xraid-dirty' ] && grep -q '^ok ' '$R/var/lib/nas-raid/verify.state'"
 # X-RAID shut down uncleanly under RAIDiator: ro, then rw after a successful verification
 DISKS="$T/dirty/sda.img $T/dirty/sdb.img"; rm -f "$R/var/lib/nas-raid/xraid-verified"
-nr mount 2>/dev/null >/dev/null
+: > "$T/xi.log"; nr mount 2>/dev/null >/dev/null
 check "dirty superblock: read-only" "grep -q 'xraid-ro unclean_shutdown' '$R/var/run/nas-raid.mode'"
+check "read-only forced by another safeguard (XRAID_RW=yes): no comparison" "! sampled"
 nr verify 2>/dev/null; nr mount 2>/dev/null >/dev/null
 check "verified dirty superblock: rw (unclean_shutdown_verified)" "grep -q 'xraid-rw unclean_shutdown_verified' '$R/var/run/nas-raid.mode'"
 rm -f "$R/var/lib/nas-raid/xraid-dirty"
@@ -102,8 +109,9 @@ DISKS="$T/degraded/sdb.img"; : > "$T/cmd.log"
 nr mount 2>/dev/null >/dev/null
 check "degraded: read-only on the present disk" "grep -q 'xraid-ro missing_disk' '$R/var/run/nas-raid.mode' && ! grep -q mdadm '$T/cmd.log'"
 DISKS="$T/different/sda.img $T/different/sdb.img"
-nr mount 2>/dev/null >/dev/null
+: > "$T/cmd.log"; : > "$T/xi.log"; nr mount 2>/dev/null >/dev/null
 check "different mirror: read-only" "grep -q 'xraid-ro mirror_differs' '$R/var/run/nas-raid.mode'"
+check "different mirror: found by the comparison before rw, no md assembled" "sampled && ! grep -q mdadm '$T/cmd.log'"
 nr repair 2>/dev/null >/dev/null; rc=$?
 check "repair: refused without confirmation" "[ $rc != 0 ]"
 DISKS="$T/sync/sda.img $T/sync/sdb.img"
