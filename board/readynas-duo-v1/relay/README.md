@@ -31,6 +31,7 @@ checked in simulation only (`test-addon.sh`).
 | `build-module.sh`, `build/` | builds the module in NETGEAR's SPARC compile environment (QEMU) |
 | `addon/`, `build-addon.sh` | RAIDiator add-ons that install / remove the relay |
 | `test-addon.sh` | checks the add-ons on the PC (simulated system volume) |
+| `test-slots.sh` | checks the system slots on the PC: relay-switch, initramfs choice, nas-update |
 | `../rootfs-overlay/etc/init.d/S99relay-confirm` | 6.18 side: removes the "boot pending" marker |
 
 Licence: GPL-2.0, like the rest of the repository. The module is written from the GPL
@@ -168,6 +169,19 @@ returns only when the previous init should start:
 
 On the 6.18 side, `S99relay-confirm` (last init script) removes `/.relay_pending`: the boot
 is complete. Each boot is logged in `/relay/relay.log` on the system volume.
+
+**System slots** (add-on 1.1; system updates from the web interface, `nas-update`,
+docs/DIET.md). `rootfs-6.18` above is really the *active slot*: `/boot/slot` on the stick
+names it (missing: `rootfs-6.18`), and a slot's kernel is `<slot>/boot/vmlinux.bin`
+(missing: `/boot/vmlinux.bin`, the first install). `/boot/slot.try` names a slot to boot
+once: before anything else, its `.relay_pending` is written; when 6.18 completes its boot,
+`S99relay-confirm` makes it the active slot; if the marker is still there at the next
+power-on, the trial failed: `slot.try` removed, `/boot/slot.failed` written, and the
+**active slot** boots (the previous init only if the active slot fails too). The skip-once
+file works in either slot. The 6.18 initramfs mounts the same slot: `slot.try` when its
+`.relay_pending` is there, otherwise `/boot/slot` (a TFTP boot never takes an unmarked
+trial). `relay-switch` writes `/boot/relay-slots` so that 6.18 knows the relay handles
+slots. A stick with only `rootfs-6.18` and `/boot/vmlinux.bin` boots exactly as before.
 
 Back to RAIDiator (or DIET): **cut the power** after a failed 6.18 boot (nothing persistent
 is changed by the module; the next power-on starts the previous init), remove the stick,

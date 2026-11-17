@@ -420,8 +420,8 @@ sleep 3	# the check (sparse 4 GB images) writes in $R: let it finish
 api GET 'a=log&f=storage'
 check "storage log: nas-raid log" '[ "$ST" = 200 ]'
 # "allow writing on the X-RAID" switch: real nas-raid remount on the images,
-# dm/LVM/fuse2fs simulated; umount refuses while $R/busy exists (open files)
-for c in dmsetup lvm fuse2fs; do stub $c; done
+# dm/LVM/mount simulated; umount refuses while $R/busy exists (open files)
+for c in dmsetup lvm mount; do stub $c; done
 stub umount '[ ! -e "$DIET_ROOT/busy" ]'
 # both X-RAID legs healthy for nas-raid (md10, md11 idle): a clean unmount marks the superblock clean
 MDSTAT_SAVE=$(cat "$R"/proc/mdstat)
@@ -443,7 +443,7 @@ check "xraid_rw on: wrong word refused" '[ "$ST" = 400 ]'
 : > "$R"/cmd.log
 api POST a=xraid_rw 'on=1&confirm=WRITE&yes=1'
 check "xraid_rw on: XRAID_RW=yes written once, other keys and comment kept" '[ "$ST" = 200 ] && [ "$(grep -c "^XRAID_RW=" "$R"/etc/nas-raid.conf)" = 1 ] && grep -qx "XRAID_RW=yes" "$R"/etc/nas-raid.conf && grep -qx "SAMPLES=8" "$R"/etc/nas-raid.conf && grep -qx "VERIFY_MAX_DAYS=3" "$R"/etc/nas-raid.conf && grep -qx "# local settings" "$R"/etc/nas-raid.conf && [ ! -e "$R"/etc/nas-raid.conf.tmp ]'
-check "xraid_rw on: services stopped, /c unmounted then mounted rw, services started" 'grep -q "S70ksmbd stop" "$R"/cmd.log && grep -q "S60nfs stop" "$R"/cmd.log && grep -q "S60minidlnad stop" "$R"/cmd.log && grep -q "S61rsyncd stop" "$R"/cmd.log && grep -q "S51webdav stop" "$R"/cmd.log && grep -q "^umount /c" "$R"/cmd.log && grep -q "fuse2fs -o allow_other" "$R"/cmd.log && grep -q "S70ksmbd start" "$R"/cmd.log && awk "/umount \/c/ { u = NR } /S70ksmbd start/ { s = NR } /S70ksmbd stop/ { t = NR } END { exit !(t < u && u < s) }" "$R"/cmd.log'
+check "xraid_rw on: services stopped, /c unmounted then mounted rw, services started" 'grep -q "S70ksmbd stop" "$R"/cmd.log && grep -q "S60nfs stop" "$R"/cmd.log && grep -q "S60minidlnad stop" "$R"/cmd.log && grep -q "S61rsyncd stop" "$R"/cmd.log && grep -q "S51webdav stop" "$R"/cmd.log && grep -q "^umount /c" "$R"/cmd.log && grep -q "mount -t ext4 -o noatime /dev/mapper/c-c /c" "$R"/cmd.log && grep -q "S70ksmbd start" "$R"/cmd.log && awk "/umount \/c/ { u = NR } /S70ksmbd start/ { s = NR } /S70ksmbd stop/ { t = NR } END { exit !(t < u && u < s) }" "$R"/cmd.log'
 api GET a=storage
 check "xraid_rw on: mode xraid-rw, switch on" "json 'j[\"mode\"]==\"xraid-rw\" and j[\"xraid_rw\"]==\"yes\"'"
 # a safeguard refuses (RAIDiator unclean shutdown): read-only is kept, with the reason
@@ -529,6 +529,137 @@ api GET 'a=smart&d=sda'
 check "smart without smartctl: drivetemp and dmesg" 'case "$OUT" in *"38 °C (drivetemp)"*"[sda]"*) true;; *) false;; esac'
 api GET 'a=smart&d=..%2Fetc'
 check "smart: unknown disk refused" '[ "$ST" = 400 ]'
+
+# ---------- system update (nas-update: two slots on a simulated USB stick) ----------
+# The stick is a folder (DIET_STICK, no mount), the jobs run in the foreground
+# (NAS_UPDATE_SYNC). relay-switch and the initramfs on the same layout:
+# board/readynas-duo-v1/relay/test-slots.sh.
+K=$R/stick; export DIET_STICK="$K" NAS_UPDATE_SYNC=1
+NL0=$(wc -l < "$R"/cmd.log); : > "$R/update.start"
+ln -s "$SRC/usr/sbin/nas-update" "$R/bin/nas-update"
+nu() { DIET_ROOT="$R" "$R/bin/nas-update" "$@"; }
+mkdir -p "$K/boot" "$K/rootfs-6.18/sbin" "$R/proc/self"
+echo old-init > "$K/rootfs-6.18/sbin/init"; echo old-kernel > "$K/boot/vmlinux.bin"
+running() { echo "25 1 8:33 /$1 / rw,noatime shared:1 - ext4 /dev/sdc1 rw" > "$R/proc/self/mountinfo"; }
+running rootfs-6.18
+# df: free kB of the stick from $R/stick.free, otherwise the /c volume
+stub df 'case "$*" in *stick*) echo "Filesystem 1024-blocks Used Available Capacity Mounted on"; echo "/dev/sdc1 1900000 1 $(cat "$DIET_ROOT/stick.free") 1% /s";; *) echo "Filesystem 1024-blocks Used Available Capacity Mounted on"; echo "/dev/md0 1922000000 922000000 1000000000 48% /c";; esac'
+echo 1000000 > "$R/stick.free"
+# settings of this NAS that must follow the update
+mkdir -p "$R/root/.ssh" "$R/etc/dropbear" "$R/etc/lighttpd/ssl" "$R/var/lib/nas-raid"
+echo "ssh-ed25519 AAAA test" > "$R/root/.ssh/authorized_keys"; echo hostkey > "$R/etc/dropbear/dropbear_ed25519_host_key"
+echo "admin:\$6\$x" > "$R/etc/lighttpd/htpasswd"; echo key > "$R/etc/lighttpd/ssl/server.key"
+echo state > "$R/var/lib/nas-raid/mark"; echo "XRAID_RW=no" > "$R/etc/nas-raid.conf"
+printf 'root:$6$runninghash:19000:0:99999:7:::\n' > "$R/etc/shadow"
+grep -q '^nas:' "$R/etc/passwd" || echo "nas:x:105:105:DIET WebDAV:/:/bin/false" >> "$R/etc/passwd"
+grep -q '^zoe:' "$R/etc/passwd" || { echo "zoe:x:1007:1007::/c/home/zoe:/bin/false" >> "$R/etc/passwd"; echo "zoe:x:1007:nas" >> "$R/etc/group"; }
+[ -f "$R/etc/avahi/services/rsync.service" ] && mv "$R/etc/avahi/services/rsync.service" "$R/etc/avahi/services/rsync.service.off"
+# images of a new version: a small rootfs.tar (./ prefix, like Buildroot's) and a kernel
+IMG=$R/images; mkdir -p "$IMG/root/sbin" "$IMG/root/etc/avahi/services" "$IMG/root/bin"
+echo "new-init" > "$IMG/root/sbin/init"; chmod 755 "$IMG/root/sbin/init"; echo tool > "$IMG/root/bin/newtool"
+printf 'root:x:0:0:root:/root:/bin/sh\nnas:x:101:102:DIET WebDAV:/:/bin/false\nnewsys:x:103:104::/:/bin/false\n' > "$IMG/root/etc/passwd"
+printf 'root:x:0:\nusers:x:100:\nnas:x:102:\nnewsys:x:104:\n' > "$IMG/root/etc/group"
+printf 'root::::::::\nnewsys:*:::::::\n' > "$IMG/root/etc/shadow"
+echo "SPINDOWN_MIN=0" > "$IMG/root/etc/diet.conf"
+echo x > "$IMG/root/etc/avahi/services/rsync.service"; echo x > "$IMG/root/etc/avahi/services/ssh.service"
+tar -C "$IMG/root" -cf "$IMG/rootfs.tar" .
+head -c 204800 /dev/urandom > "$IMG/vmlinux.bin"
+MK=$HERE/../../../board/readynas-duo-v1/mkupdate.sh
+VERSION=2.0 sh "$MK" "$IMG" "$IMG" >/dev/null && VERSION=3.0 sh "$MK" "$IMG" "$IMG" >/dev/null
+P2=$IMG/readynasng-update-2.0.tar; P3=$IMG/readynasng-update-3.0.tar
+upload() {	# upload <file>: POST a=update_upload, the file as body
+	raw=$(REQUEST_METHOD=POST QUERY_STRING="a=update_upload&l=en" CONTENT_LENGTH=$(stat -c %s "$1") \
+		HTTP_X_DIET=1 REMOTE_ADDR=10.0.0.9 $SH "$SRC/www/cgi-bin/api" < "$1")
+	ST=$(printf '%s\n' "$raw" | sed -n 's/^Status: \([0-9]*\).*/\1/p' | head -n 1); ST=${ST:-200}
+	OUT=$(printf '%s\n' "$raw" | tr -d '\r' | sed '1,/^$/d')
+}
+
+api GET a=update
+check "update: first install seen (rootfs-6.18 active and running, no other version, relay without slots)" "json 'j[\"stick\"]==1 and j[\"running\"]==j[\"active\"]==\"rootfs-6.18\" and j[\"other\"]==\"rootfs-b\" and j[\"relay\"]==0 and j[\"slots\"][0][\"ok\"]==1 and j[\"slots\"][1][\"ok\"]==0 and j[\"job\"][\"state\"]==\"idle\"'"
+# refusals: damaged package, not a package, not enough room, job running
+mkdir "$R/bad"; tar -C "$R/bad" -xf "$P2"; sed -i '1s/^./0/; 1s/^0/1/' "$R/bad/SHA256SUMS"
+tar -C "$R/bad" -cf "$R/bad.tar" manifest SHA256SUMS rootfs.tar.gz vmlinux.bin
+upload "$R/bad.tar"
+api GET a=update
+check "update: damaged package refused (checksum), nothing installed, package removed" "json 'j[\"job\"][\"state\"]==\"failed\" and \"Checksum\" in j[\"job\"][\"msg\"] and j[\"slots\"][1][\"ok\"]==0 and j[\"try\"]==\"\"' && [ ! -e \"$K/update/package.tar\" ]"
+head -c 4096 /dev/urandom > "$R/junk.tar"; upload "$R/junk.tar"
+api GET a=update
+check "update: something else than a package refused" "json 'j[\"job\"][\"state\"]==\"failed\" and \"Invalid update package\" in j[\"job\"][\"msg\"]'"
+echo 16400 > "$R/stick.free"; upload "$P2"
+check "update: not enough room for the package: refused at once (409)" '[ "$ST" = 409 ] && case "$OUT" in *"Not enough room"*) true;; *) false;; esac'
+echo $(( 16384 + $(stat -c %s "$P2") / 1024 + 2 )) > "$R/stick.free"; upload "$P2"
+api GET a=update
+check "update: room for the package but not for the system: refused, active slot untouched" "json 'j[\"job\"][\"state\"]==\"failed\" and \"Not enough room\" in j[\"job\"][\"msg\"]' && [ \"\$(cat $K/rootfs-6.18/sbin/init)\" = old-init ]"
+echo 1000000 > "$R/stick.free"
+mkdir -p "$R/var/run/nas-update"; echo $$ > "$R/var/run/nas-update/pid"; upload "$P2"
+check "update: refused while another update runs" '[ "$ST" = 409 ] && case "$OUT" in *"already in progress"*) true;; *) false;; esac'
+rm -f "$R/var/run/nas-update/pid"
+# relay add-on 1.0 (no /boot/relay-slots): installed, no trial
+upload "$P2"
+check "update: upload accepted" '[ "$ST" = 200 ]'
+api GET a=update
+check "update: installed in rootfs-b but relay too old: no trial scheduled" "json 'j[\"job\"][\"state\"]==\"done\" and \"too old\" in j[\"job\"][\"msg\"] and j[\"try\"]==\"\" and j[\"slots\"][1][\"ok\"]==1 and j[\"slots\"][1][\"ver\"]==\"2.0\"'"
+B=$K/rootfs-b
+check "update: system extracted, kernel and its md5 in the slot, package removed" '[ "$(cat "$B/sbin/init")" = new-init ] && [ -f "$B/bin/newtool" ] && cmp -s "$B/boot/vmlinux.bin" "$IMG/vmlinux.bin" && (cd "$B/boot" && md5sum -c vmlinux.bin.md5 >/dev/null) && [ ! -e "$B/.incomplete" ] && [ ! -e "$K/update/package.tar" ] && [ "$(cat "$K/boot/vmlinux.bin")" = old-kernel ]'
+check "update: settings copied (diet.conf, ksmbd, nas-raid, SSH keys, host keys, web password, certificate)" 'cmp -s "$R/etc/diet.conf" "$B/etc/diet.conf" && cmp -s "$R/etc/ksmbd/ksmbd.conf" "$B/etc/ksmbd/ksmbd.conf" && cmp -s "$R/etc/nas-raid.conf" "$B/etc/nas-raid.conf" && cmp -s "$R/root/.ssh/authorized_keys" "$B/root/.ssh/authorized_keys" && cmp -s "$R/etc/dropbear/dropbear_ed25519_host_key" "$B/etc/dropbear/dropbear_ed25519_host_key" && cmp -s "$R/etc/lighttpd/htpasswd" "$B/etc/lighttpd/htpasswd" && [ -f "$B/etc/lighttpd/ssl/server.key" ] && [ -f "$B/var/lib/nas-raid/mark" ] && cmp -s "$R/etc/hostname" "$B/etc/hostname"'
+check "update: accounts merged (users and uids of this NAS, root password, new system account kept)" 'grep -q "^zoe:x:1007:" "$B/etc/passwd" && grep -q "^nas:x:105:" "$B/etc/passwd" && grep -q "^newsys:x:103:" "$B/etc/passwd" && grep -q "^zoe:x:1007:nas" "$B/etc/group" && grep -q "^newsys:" "$B/etc/group" && grep -q "^root:\$6\$runninghash:" "$B/etc/shadow" && grep -q "^newsys:" "$B/etc/shadow" && [ $(grep -c "^root:" "$B/etc/passwd") = 1 ]'
+check "update: Avahi announcement of a stopped service stays off" '[ -f "$B/etc/avahi/services/rsync.service.off" ] && [ ! -f "$B/etc/avahi/services/rsync.service" ] && [ -f "$B/etc/avahi/services/ssh.service" ]'
+# relay add-on 1.1: the other version can be tried
+echo 1 > "$K/boot/relay-slots"
+api POST a=update_switch
+check "update: switch schedules a trial of rootfs-b" '[ "$ST" = 200 ] && [ "$(cat "$K/boot/slot.try")" = rootfs-b ]'
+api POST a=update_cancel
+check "update: cancel removes the trial" '[ "$ST" = 200 ] && [ ! -e "$K/boot/slot.try" ]'
+upload "$P2"
+api GET a=update
+check "update: package installed again, trial of rootfs-b scheduled" "json 'j[\"job\"][\"state\"]==\"done\" and j[\"try\"]==\"rootfs-b\" and \"restart\" in j[\"job\"][\"msg\"]'"
+echo "SPINDOWN_MIN=7" >> "$R/etc/diet.conf"
+nu sync
+check "update: setting changed before the restart copied again at shutdown (sync)" 'grep -q "^SPINDOWN_MIN=7" "$B/etc/diet.conf"'
+# boot of rootfs-b complete (relay-switch marked it, S99relay-confirm)
+: > "$B/.relay_pending"; running rootfs-b; rm -f "$B/.relay_pending"; nu confirm
+api GET a=update
+check "update: completed boot of the trial makes it active" "json 'j[\"active\"]==\"rootfs-b\" and j[\"running\"]==\"rootfs-b\" and j[\"try\"]==\"\" and j[\"other\"]==\"rootfs-6.18\"' && [ \"\$(cat $K/boot/slot)\" = rootfs-b ]"
+# manual return to the previous version (the first install)
+api POST a=update_switch
+check "update: going back schedules the previous version (rootfs-6.18), settings copied into it" '[ "$ST" = 200 ] && [ "$(cat "$K/boot/slot.try")" = rootfs-6.18 ] && grep -q "^SPINDOWN_MIN=7" "$K/rootfs-6.18/etc/diet.conf"'
+api POST a=update_cancel
+# 3.0 goes into the slot of the first install; its kernel /boot/vmlinux.bin is no longer used
+upload "$P3"
+api GET a=update
+check "update: 3.0 installed into rootfs-6.18 (the slot not running), first-install kernel removed" "json 'j[\"try\"]==\"rootfs-6.18\" and j[\"slots\"][0][\"ver\"]==\"3.0\" and j[\"slots\"][0][\"ok\"]==1' && [ ! -e $K/boot/vmlinux.bin ] && [ -f $K/rootfs-6.18/boot/vmlinux.bin ] && [ \"\$(cat $K/rootfs-6.18/sbin/init)\" = new-init ] && [ \"\$(cat $K/rootfs-b/etc/system-version)\" = 2.0 ]"
+# trial that does not complete: relay-switch drops it at the next boot (test-slots.sh)
+# and the active slot starts again; the interface reports it
+rm -f "$K/boot/slot.try"; echo rootfs-6.18 > "$K/boot/slot.failed"; nu confirm
+api GET a=update
+check "update: failed trial reported, rootfs-b still active" "json 'j[\"failed\"]==\"rootfs-6.18\" and j[\"active\"]==\"rootfs-b\" and j[\"try\"]==\"\"'"
+api POST a=update_switch
+check "update: the failed version can be tried again (switch)" '[ "$(cat "$K/boot/slot.try")" = rootfs-6.18 ] && [ ! -e "$K/boot/slot.failed" ]'
+api POST a=update_cancel
+# while a trial runs (not confirmed yet), nothing is installed
+echo rootfs-6.18 > "$K/boot/slot.try"; running rootfs-6.18
+upload "$P2"
+api GET a=update
+check "update: refused while the running system is not the active one" "json 'j[\"job\"][\"state\"]==\"failed\" and \"not the active slot\" in j[\"job\"][\"msg\"]' && [ \"\$(cat $K/rootfs-b/sbin/init)\" = new-init ]"
+running rootfs-b; rm -f "$K/boot/slot.try"
+# download (GitHub release URL + SHA-256)
+stub wget 'case "$*" in *github.com*) cat "$DIET_ROOT/images/readynasng-update-2.0.tar";; *127.0.0.1:8200*) echo "<tr><td>Audio files</td><td>12</td></tr><tr><td>Video files</td><td>3</td></tr><tr><td>Image files</td><td>40</td></tr>";; *) echo "{\"ok\":true}";; esac'
+U=https://github.com/example/ReadyNasNextGen/releases/download/v2.0/readynasng-update-2.0.tar
+S2=$(cut -d' ' -f1 "$P2.sha256")
+api POST a=update_url "url=$(enc http://example.com/x.tar)&sha=$S2"
+check "update URL: other sites refused" '[ "$ST" = 409 ]'
+api POST a=update_url "url=$(enc "$U")&sha="
+check "update URL: SHA-256 required" '[ "$ST" = 409 ] && case "$OUT" in *SHA-256*) true;; *) false;; esac'
+api POST a=update_url "url=$(enc "$U")&sha=$(echo "$S2" | tr 0-9a-f 1-9a-f0)"
+api GET a=update
+check "update URL: download with another SHA-256 refused" "json 'j[\"job\"][\"state\"]==\"failed\" and \"SHA-256\" in j[\"job\"][\"msg\"]'"
+api POST a=update_url "url=$(enc "$U")&sha=$S2"
+api GET a=update
+check "update URL: downloaded, checked, installed into rootfs-6.18" "json 'j[\"job\"][\"state\"]==\"done\" and j[\"try\"]==\"rootfs-6.18\" and j[\"slots\"][0][\"ver\"]==\"2.0\"'"
+api GET 'a=log&f=update'
+check "update: log (received, checked, confirmed, refused)" 'case "$OUT" in *"package received"*"is now the active system"*"refused"*) true;; *) false;; esac'
+check "update: data disks never touched (no mount, nothing written under /c)" '! tail -n +$((NL0 + 1)) "$R"/cmd.log | grep -q "^u*mount" && [ -z "$(find "$R/c" -newer "$R/update.start")" ]'
+unset DIET_STICK NAS_UPDATE_SYNC
 
 # ---------- diet-hwmon (one round) ----------
 echo "$DEGRADED" > "$R"/proc/mdstat

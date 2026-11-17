@@ -13,7 +13,9 @@
 #   make relay           padre_relay.ko for the stock 2.6.17 kernel (QEMU + Docker,
 #                        output-relay/), see board/readynas-duo-v1/relay/README.md
 #   make relay-addon     RAIDiator add-ons installing/removing the relay, checked
-#                        by test-addon.sh [VERSION=x.y KO=/path/padre_relay.ko]
+#                        by test-addon.sh and test-slots.sh [VERSION=x.y KO=/path/padre_relay.ko]
+#   make update-package  system update package for the web interface, from
+#                        output-rapide/images [IMAGES=dir VERSION=x.y]
 #   make clean          removes output*/
 #   make buildroot-reset resets buildroot/ to the tag (drops our patches)
 #   make distclean       clean + buildroot-reset + removal of dl/
@@ -99,13 +101,19 @@ toolchain-sdk: | buildroot-patch
 	cd $(TOP)/release && sha256sum $(SDK_NAME).tar.xz $(SDK_NAME)_legal-info.tar > SHA256SUMS
 
 # Relay: boot 6.18 from the stock 2.6.17 kernel (board/readynas-duo-v1/relay/)
-.PHONY: relay relay-addon
+.PHONY: relay relay-addon update-package
 RELAY := $(TOP)/board/readynas-duo-v1/relay
 relay:
 	$(RELAY)/build-module.sh
 relay-addon:
 	$(RELAY)/build-addon.sh
 	$(RELAY)/test-addon.sh
+	$(RELAY)/test-slots.sh
+
+# System update (web interface, nas-update): readynasng-update-<version>.tar
+IMAGES ?= $(TOP)/output-rapide/images
+update-package:
+	$(TOP)/board/readynas-duo-v1/mkupdate.sh $(IMAGES)
 
 clean:
 	rm -rf $(O) $(TOP)/output-rapide $(TOP)/output-toolchain $(TOP)/output-relay

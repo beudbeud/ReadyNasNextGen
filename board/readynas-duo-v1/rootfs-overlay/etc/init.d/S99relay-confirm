@@ -2,11 +2,18 @@
 # Linux 6.18 side of the relay (board/readynas-duo-v1/relay/).
 # The boot is complete: remove the marker written by relay-switch, so that
 # the next power-on hands over to 6.18 again. While the marker is still
-# there, relay-switch starts DIET instead (6.18 failed or was cut off).
-# The marker lives in the 6.18 root itself (rootfs-6.18 on the USB stick):
+# there, relay-switch starts DIET instead (6.18 failed or was cut off), or,
+# when this slot was being tried after an update, the previous slot.
+# The marker lives in the 6.18 root itself (the slot on the USB stick):
 # nothing is written to the RAIDiator system volume.
 #   touch /.relay_skip_once   -> the next power-on starts DIET once
+# Updates (nas-update): at start, a slot being tried becomes the active one;
+# at shutdown, the settings are copied again into a slot about to be tried.
 case "$1" in
-start) rm -f /.relay_pending ;;
+start)
+	rm -f /.relay_pending
+	[ -x /usr/sbin/nas-update ] && /usr/sbin/nas-update confirm ;;
+stop)
+	[ -x /usr/sbin/nas-update ] && /usr/sbin/nas-update sync ;;
 esac
 exit 0

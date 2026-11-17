@@ -17,6 +17,7 @@ two SATA disks.
 | Boot through iboot + TFTP, serial console ttyS1 (9600 baud) | works |
 | Boot through the original 2.6.17 kernel ([relay](#relay-booting-from-the-original-kernel)) | hand-over validated on one NAS (started from DIET's switch); `relay-init` and the add-ons tested in simulation |
 | MMU, caches, interrupts, timer, task sleep/wakeup | works |
+| 16 KiB pages (`patches/linux/0003`, like the stock 2.6.17 kernel) | works: boot, services, kernel ext4 mount of the X-RAID `/c` and of the system volume `xr-p1` (ext3, 16 KiB blocks), read-only; see [below](#16-kib-pages) |
 | FPU emulation (the Padre has none): hardware floating-point programs, `printf("%f")`, awk | works (fmovs/fnegs/fabss fixed in `math-emu/math_32.c`: the Padre emulates everything, including these copies) |
 | Built-in initramfs, `/init`, busybox, fork/exec, page faults | works |
 | SATA disks (libata, PIO; optional DMA through the LP coprocessor) | detected |
@@ -27,7 +28,7 @@ two SATA disks.
 | Unaligned integer accesses in user space | emulated by the kernel (`user_unaligned_trap`, `unaligned_32.c`), like 2.6.17 and sparc64; the original sparc32 sent SIGBUS. The first 10 are logged in `dmesg` (`padre: emulated unaligned access, …`) |
 | Hardware clock (Dallas DS1337, I2C 0x68) | works: `padre_rtc` (`/dev/rtc0`), time read at boot (`RTC_HCTOSYS`), written back after NTP (`S41time`, `hwclock -w`, and `RTC_SYSTOHC`); the 16 registers are shown in `dmesg` at boot |
 | LVM (lvm2 2.03.31) | works: `board/readynas-duo-v1/patches/lvm2/` aligns the `dm_task_get_device_list()` list on 8 bytes (64-bit `dev_t`: SIGBUS from `lvm pvs` on SPARC) |
-| ksmbd, NFS v3/v4, mdadm, fuse2fs (X-RAID ext3 with 16 KB blocks) | built, not tested |
+| ksmbd, NFS v3/v4, mdadm | built, not tested |
 | [DIET](DIET.md) web dashboard (lighttpd HTTPS) | ported, tested in simulation |
 
 ## Build
@@ -107,6 +108,24 @@ release. The SDK can also be used on its own: extract it, run
 uClibc-ng, the Linux headers and the host tools with their patches, plus
 `buildroot-patches/` (our v7 patch for Buildroot).
 
+## 16 KiB pages
+
+The data volume `/c` and the RAIDiator system volume are ext3 with 16 KiB blocks: the kernel
+mounts a block size only up to its page size. Like the stock 2.6.17 kernel
+(`CONFIG_PADRE_16K_PAGE`), the Padre kernel has 16 KiB pages (`patches/linux/0003`): a Linux
+PTE is 4 consecutive 4 KiB entries of the Infrant MMU (`pte_t` holds the 4 words,
+`pte_val()`/`__pte()` work on the first one plus the A/D bits the MMU set in the others), a
+table of 256 Linux PTEs is one 4 KiB hardware table, directories and tables are 4 KiB blocks of
+the uncached pool (`/proc/cpuinfo`: `pagetables`), the TLB probe of a page covers its 4 entries,
+the kernel stack is one page, `AT_PAGESZ` is 16384. So `nas-raid` mounts `/c` with the kernel
+ext4 driver; fuse2fs is gone.
+
+Measured (200 MiB of a file of `/c`, cold cache, disks in PIO): kernel ext4 11.8 MiB/s, fuse2fs
+3.3 MiB/s; same md5 of a 344 MB file both ways. User space needs every `PT_LOAD` congruent
+modulo 16 KiB: the binutils default for SPARC (max-page-size 64 KiB) already gives it, and from
+the r3 toolchain on the default is 16 KiB (`patches/binutils/0001`, less padding).
+`post-image.sh` refuses any ELF of the rootfs that does not comply.
+
 ## Relay: booting from the original kernel
 
 Sources, build and assumptions: [board/readynas-duo-v1/relay/](../board/readynas-duo-v1/relay/README.md).
@@ -165,7 +184,14 @@ DIET's switch in front of `relay-init`: install the relay add-on again afterward
 **Build.** `make relay` builds `output-relay/padre_relay.ko` with NETGEAR's gcc 3.3.5 in
 their SPARC compile environment (QEMU in Docker), from their GPL 2.6.17 tree, both
 downloaded once into `dl/relay/`. `make relay-addon` builds the two RAIDiator add-ons from it
-and runs `test-addon.sh` (install, reinstall, remove in a simulated system volume).
+and runs `test-addon.sh` (install, reinstall, remove in a simulated system volume) and
+`test-slots.sh` (system slots: relay-switch, the initramfs slot choice, nas-update, on a
+simulated stick).
+
+**System updates.** `make update-package` (`board/readynas-duo-v1/mkupdate.sh`,
+`IMAGES=` and `VERSION=` optional) makes `readynasng-update-<version>.tar` and its
+`.sha256` from `output-rapide/images`, installed from the Settings page into the second
+system slot of the stick and tried once (docs/DIET.md, “System update”).
 
 ## Kernel parameters (built-in command line, `board/readynas-duo-v1/linux-padre.config`)
 
@@ -188,6 +214,26 @@ rewrite, 0 errors expected; `without` must show some), `test-fp-s`, `test-fp-d`,
 `test-fp-n` (FPU emulation in static, dynamic PIE, dynamic non-PIE), `test-align` (emulated
 unaligned accesses, `malloc` alignment), `test-ldso 200`
 (dynamic programs in a loop, 0 failures and 0 ld-uClibc segfaults expected).
+
+## SSH (dropbear)
+
+`board/readynas-duo-v1/rootfs-overlay/etc/default/dropbear` sets
+`DROPBEAR_ARGS="-K 30 -I 1800"`, read by Buildroot's `S50dropbear`:
+
+- `-K 30`: once logged in, dropbear sends a keepalive every 30 s; when the client has not
+  answered for 3 intervals (90 s, `DEFAULT_KEEPALIVE_LIMIT`), the session exits
+  ("Keepalive timeout"). A client that vanished (laptop asleep, network cut) no longer leaves
+  a dropbear process behind.
+- `-I 1800`: a session with no data in either direction for 30 min is closed ("Idle
+  timeout"). Keepalives do not count; command output does. A *silent* command running over
+  30 min in the foreground (`mkfs`, a wait loop) is cut off with it: run it with
+  `nohup … &` or `setsid`.
+
+Closing the session does not stop what it started: without a pty (`ssh nas 'command'`), the
+command gets no SIGHUP and keeps running (checked on the PC with dropbear 2026.94: `sleep`
+survives a keepalive timeout); it only dies on SIGPIPE if it writes to its closed output.
+For a long command that must stop with the session, use `ssh -t` (the pty hangup sends
+SIGHUP), or `timeout <s> command`.
 
 ## Dashboard: tests on the PC
 
@@ -213,8 +259,8 @@ docs/DIET.md                     what changes compared with DIET
 board/readynas-duo-v1/
   linux-padre.config, linux-padre-nas.fragment
   patches/linux/                 Padre platform for Linux 6.18.63 (arch/sparc, drivers)
-  patches/e2fsprogs/             fuse2fs with uClibc-ng
   patches/uclibc/                flush after the PLT rewrite by ld-uClibc; SPARC longjmp fix
+  patches/binutils/              16 KiB default ELF page size (toolchain from r3)
   patches/lvm2/                  alignment of the dm device list (libdm)
   initramfs/                     /init, `list` (gen_init_cpio), test sources
   rootfs-overlay/                ksmbd, NFS, fan control

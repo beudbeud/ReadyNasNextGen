@@ -1,10 +1,12 @@
 #!/bin/busybox sh
 # /init of the 6.18 kernel initramfs (ReadyNAS Duo v1).
 # Looks, on USB disks ONLY (the internal SATA disks are never probed), for
-# the ext2/3/4 partition holding $ROOTDIR/sbin/init (currently /rootfs-6.18
-# on the key), mounts that folder as root and hands over to it. Fallback:
-# shell on the console.
-# Command line: rootdev=/dev/sdXN (no search), rootdir=/other,
+# the ext2/3/4 partition holding <slot>/sbin/init, mounts that folder as root
+# and hands over to it. Fallback: shell on the console.
+# Slot (same rule as relay-switch, see nas-update): /boot/slot.try when
+# relay-switch marked it for this boot (<slot>/.relay_pending), otherwise
+# /boot/slot, otherwise /rootfs-6.18 (stick without slots).
+# Command line: rootdev=/dev/sdXN (no search), rootdir=/other (no slot choice),
 # tests=1 (debugging tests before the search)
 /bin/busybox --install -s /bin
 export PATH=/bin
@@ -12,7 +14,7 @@ mount -t devtmpfs devtmpfs /dev
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 
-ROOTDIR=/rootfs-6.18
+ROOTDIR=
 ROOTDEV=
 TESTS=
 for a in $(cat /proc/cmdline); do
@@ -44,14 +46,28 @@ candidates() {
 	done
 }
 
+# slot <mount point>: folder to boot on the stick mounted there
+okslot() { case "$1" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac; }
+slot() {
+	if [ -n "$ROOTDIR" ]; then echo "$ROOTDIR"; return; fi
+	a=rootfs-6.18; b=
+	[ -f "$1/boot/slot" ] && read -r a < "$1/boot/slot"
+	[ -f "$1/boot/slot.try" ] && read -r b < "$1/boot/slot.try"
+	okslot "$a" || a=rootfs-6.18
+	okslot "$b" && [ -f "$1/$b/.relay_pending" ] && a=$b
+	echo "/$a"
+}
+
+# prints "<partition> <folder>"
 find_root() {
 	for p in $(candidates); do
 		[ -b "$p" ] || continue
 		# read-only without replaying the journal: probing writes nothing
 		mount -t ext4 -o ro,noload "$p" /mnt 2>/dev/null || continue
-		if [ -x "/mnt$ROOTDIR/sbin/init" ]; then
+		d=$(slot /mnt)
+		if [ -x "/mnt$d/sbin/init" ]; then
 			umount /mnt
-			echo "$p"
+			echo "$p $d"
 			return 0
 		fi
 		umount /mnt
@@ -131,9 +147,10 @@ while [ $n -lt 150 ]; do
 	usleep 100000
 done
 
+D=${P#* }; P=${P%% *}
 if [ -n "$P" ] && mount -t ext4 -o rw,noatime "$P" /mnt; then
-	echo "init [$(t)]: root $P:$ROOTDIR"
-	mount --bind "/mnt$ROOTDIR" /newroot
+	echo "init [$(t)]: root $P:$D"
+	mount --bind "/mnt$D" /newroot
 	mount --move /dev /newroot/dev
 	umount /proc /sys
 	exec switch_root /newroot /sbin/init

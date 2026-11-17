@@ -1,0 +1,298 @@
+#!/bin/sh
+# nas-update: system update with two slots on the USB stick, and going back
+# (ReadyNAS Duo v1, Linux 6.18). Used by the web API and S99relay-confirm.
+#
+# Stick (ext3, also read by relay-switch under 2.6.17 and by the 6.18 initramfs):
+#   /rootfs-6.18, /rootfs-b     the two system slots (rootfs-6.18: name of the first install)
+#   /<slot>/boot/vmlinux.bin    kernel of the slot (+ .md5); a slot without one boots
+#                               /boot/vmlinux.bin (first install)
+#   /boot/slot                  active slot (missing: rootfs-6.18)
+#   /boot/slot.try              slot booted once at the next power-on; relay-switch marks it
+#                               (<slot>/.relay_pending), S99relay-confirm makes it active
+#                               (confirm); still marked at the following boot = it failed:
+#                               relay-switch drops it, writes /boot/slot.failed and boots
+#                               the active slot again
+#   /boot/relay-slots           written by a relay-switch that knows slots (add-on >= 1.1)
+#   /update/package.tar         package being installed
+# Commands:
+#   status                  JSON for the API
+#   receive <bytes>         package on stdin -> stick, then "install" in the background
+#   fetch <url> <sha256>    download a GitHub release asset, check it, install (background)
+#   switch                  settings copied into the other slot, which is tried at the
+#                           next boot (going back to the previous version, or forth)
+#   cancel                  no trial at the next boot
+#   confirm                 (S99relay-confirm start) the slot being tried booted: active
+#   sync                    (S99relay-confirm stop) settings copied again into the slot to try
+# Package (make update-package): uncompressed tar of manifest (VERSION=, ROOTFS_KB=),
+# SHA256SUMS, rootfs.tar.gz and vmlinux.bin.
+# Writes only to the USB stick that holds / (checked: ext*, USB) and to /var of this
+# system: never to the data disks nor to the flash.
+# Log: /var/lib/nas-update/log (carried over with the settings).
+# Tests on a PC: DIET_ROOT=fake root, DIET_STICK=directory standing for the stick (no
+# mount), NAS_UPDATE_SYNC=1 (jobs in the foreground).
+R=${DIET_ROOT:-}
+export PATH=${R:+$R/bin:}/bin:/sbin:/usr/bin:/usr/sbin
+W=$R/var/run/nas-update
+LOGD=$R/var/lib/nas-update
+SLOTS="rootfs-6.18 rootfs-b"
+MAXPKG=536870912	# 512 MB
+MARGIN=16384		# kB left free on the stick
+case ${L:-} in fr|de|en) ;; *) L=$(cat "$R/etc/diet-lang" 2>/dev/null) ;; esac
+tx() { case $L in fr) printf '%s' "$2";; de) printf '%s' "$3";; *) printf '%s' "$1";; esac; }
+log() { mkdir -p "$LOGD" && echo "[$(date '+%F %T')] $*" >> "$LOGD/log"; }
+# fail message: refusal of a synchronous command (message on stdout, for the API)
+fail() { echo "$1"; log "refused: $1"; exit 1; }
+
+# Settings of this NAS (everything the API, diet-webpass, passwd and dropbear write)
+KEEP_FILES="etc/diet.conf etc/fan.conf etc/exports etc/rsyncd.conf etc/rsyncd.secrets
+ etc/minidlna.conf etc/nas-raid.conf etc/hostname etc/TZ etc/diet-lang etc/diet-notify.conf
+ etc/network/interfaces etc/ksmbd/ksmbd.conf etc/ksmbd/ksmbdpwd.db etc/lighttpd/htpasswd
+ etc/lighttpd/htpasswd-users etc/lighttpd/webdav.conf"
+KEEP_DIRS="etc/dropbear etc/lighttpd/ssl root/.ssh var/lib/nas-raid var/lib/nas-update"
+MERGE="etc/passwd etc/group etc/shadow"
+
+MNT=; JOB=
+cleanup() {
+	[ -n "$JOB" ] && rm -f "$W/pid"
+	[ -n "$MNT" ] && { cd /; umount "$MNT" 2>/dev/null; rmdir "$MNT" 2>/dev/null; }
+}
+trap cleanup EXIT
+trap 'exit 1' INT TERM HUP
+
+# RUNNING: slot of / (its root inside the file system), DEV/FST: its device and type
+rootinfo() {
+	RUNNING=; DEV=; FST=
+	while read -r _ _ _ root mp rest; do
+		[ "$mp" = / ] || continue
+		RUNNING=${root#/}; set -- ${rest#* - }; FST=${1:-}; DEV=${2:-}
+	done < "$R/proc/self/mountinfo"
+}
+# stick: mounts (a second time) the USB stick holding / in $S
+stick() {
+	rootinfo
+	if [ -n "${DIET_STICK:-}" ]; then S=$DIET_STICK; return 0; fi
+	case $FST in ext2|ext3|ext4) ;; *) return 1;; esac
+	case $DEV in /dev/sd[a-z][0-9]*) ;; *) return 1;; esac
+	case $(readlink -f "/sys/class/block/${DEV#/dev/}") in */usb*) ;; *) return 1;; esac
+	mkdir -p "$W" && S=$W/mnt.$$ && mkdir -p "$S" || return 1
+	MNT=$S
+	mount -t "$FST" -o rw,noatime "$DEV" "$S" || { rmdir "$S"; MNT=; return 1; }
+}
+needstick() { stick || fail "$(tx "USB stick of the system not found" "Clé USB du système introuvable" "USB-Stick des Systems nicht gefunden")"; }
+okslot() { case $1 in ''|.*|*[!A-Za-z0-9._-]*) return 1;; esac; }
+# ACTIVE, TRY, FAILED (/boot on the stick); OTHER: the slot that is not active
+slots() {
+	ACTIVE=rootfs-6.18; TRY=; FAILED=
+	[ -f "$S/boot/slot" ] && read -r ACTIVE < "$S/boot/slot"
+	[ -f "$S/boot/slot.try" ] && read -r TRY < "$S/boot/slot.try"
+	[ -f "$S/boot/slot.failed" ] && read -r FAILED < "$S/boot/slot.failed"
+	okslot "$ACTIVE" || ACTIVE=rootfs-6.18
+	okslot "$TRY" || TRY=
+	okslot "$FAILED" || FAILED=
+	OTHER=
+	case " $SLOTS " in *" $ACTIVE "*) for s in $SLOTS; do [ "$s" = "$ACTIVE" ] || OTHER=$s; done;; esac
+}
+# bootable <slot>: complete, with an init and a kernel (its own, or the first install's)
+bootable() {
+	okslot "$1" && [ -d "$S/$1" ] && [ ! -e "$S/$1/.incomplete" ] || return 1
+	{ [ -e "$S/$1/sbin/init" ] || [ -L "$S/$1/sbin/init" ]; } && \
+		{ [ -f "$S/$1/boot/vmlinux.bin" ] || [ -f "$S/boot/vmlinux.bin" ]; }
+}
+version() { V=; [ -f "$S/$1/etc/system-version" ] && read -r V < "$S/$1/etc/system-version"; V=$(printf '%s' "$V" | tr -dc 'A-Za-z0-9._+-' | cut -c1-64); }
+freekb() { set -- $(df -P -k "$S" 2>/dev/null | tail -n 1); F=${4:-0}; case $F in *[!0-9]*|'') F=0;; esac; }
+busy() { P=; read -r P 2>/dev/null < "$W/pid" && [ -n "$P" ] && [ "$P" != $$ ] && kill -0 "$P" 2>/dev/null; }
+setstate() { mkdir -p "$W" && printf '%s %s\n' "$1" "$2" > "$W/state.tmp" && mv "$W/state.tmp" "$W/state"; log "$1: $2"; }
+# job failure: state, package removed, the slot being written stays marked .incomplete
+jfail() { setstate failed "$1"; [ -n "${PKG:-}" ] && rm -f "$PKG"; exit 1; }
+spawn() {	# spawn <job arguments>: background job (foreground with NAS_UPDATE_SYNC=1)
+	if [ -n "${NAS_UPDATE_SYNC:-}" ]; then "$0" job "$@"; return 0; fi
+	setsid "$0" job "$@" </dev/null >/dev/null 2>&1 &
+}
+
+# keep <slot dir>: settings of this system into another slot
+keep() {
+	D=$1
+	for f in $KEEP_FILES; do
+		[ -f "$R/$f" ] && [ ! -L "$R/$f" ] || continue
+		mkdir -p "$D/${f%/*}" && cp -p "$R/$f" "$D/$f" || return 1
+	done
+	for d in $KEEP_DIRS; do
+		[ -d "$R/$d" ] && [ ! -L "$R/$d" ] || continue
+		rm -rf "${D:?}/$d" && mkdir -p "$D/${d%/*}" && cp -a "$R/$d" "$D/$d" || return 1
+	done
+	# accounts: union by name, the line of this system wins (uids, passwords), the
+	# system accounts that only the new image has are added
+	for f in $MERGE; do
+		[ -f "$R/$f" ] || continue
+		if [ -f "$D/$f" ]; then
+			awk -F: 'FNR == NR { if (!($1 in o)) n[++c] = $1; o[$1] = $0; next }
+				{ print (($1 in o) ? o[$1] : $0); s[$1] = 1 }
+				END { for (i = 1; i <= c; i++) if (!(n[i] in s)) print o[n[i]] }' "$R/$f" "$D/$f" > "$D/$f.tmp" \
+				&& cat "$D/$f.tmp" > "$D/$f" && rm -f "$D/$f.tmp" || return 1
+		else cp -p "$R/$f" "$D/$f" || return 1; fi
+	done
+	# Avahi announcements of the services switched off (*.service.off, API svc_set)
+	for f in "$D"/etc/avahi/services/*.service; do
+		[ -f "$f" ] && [ -f "$R/etc/avahi/services/${f##*/}.off" ] && mv "$f" "$f.off"
+	done
+	return 0
+}
+
+# schedule <slot> <version>: trial at the next boot (relay-switch >= 1.1 only)
+schedule() {
+	if [ ! -f "$S/boot/relay-slots" ]; then
+		setstate done "$(tx "$2 installed in $1, but the relay add-on on the system disk is too old to boot it: install ReadyNasNextGen_relay 1.1 or later, then use “Switch to the other version”" \
+			"$2 installé dans $1, mais l’add-on relais du disque système est trop ancien pour le démarrer : installer ReadyNasNextGen_relay 1.1 ou plus récent, puis « Passer à l’autre version »" \
+			"$2 in $1 installiert, aber das Relay-Add-on auf der Systemplatte ist zu alt, um es zu starten: ReadyNasNextGen_relay ab 1.1 installieren, dann „Zur anderen Version wechseln“")"
+		return 0
+	fi
+	echo "$1" > "$S/boot/slot.try.tmp" && mv "$S/boot/slot.try.tmp" "$S/boot/slot.try" && sync \
+		|| jfail "$(tx "Cannot write to the USB stick" "Écriture impossible sur la clé USB" "Schreiben auf den USB-Stick nicht möglich")"
+	setstate done "$(tx "$2 ready in $1: restart to try it (if it does not start completely, the next power-on goes back to the current version)" \
+		"$2 prêt dans $1 : redémarrer pour l’essayer (s’il ne démarre pas complètement, la mise sous tension suivante revient à la version actuelle)" \
+		"$2 bereit in $1: neu starten, um es zu testen (startet es nicht vollständig, kehrt der nächste Start zur aktuellen Version zurück)")"
+}
+
+# install <package on the stick>: check, extract into the other slot, settings, trial
+install_pkg() {
+	PKG=$1
+	slots
+	[ "$RUNNING" = "$ACTIVE" ] && [ -n "$OTHER" ] || jfail "$(tx "The running system ($RUNNING) is not the active slot ($ACTIVE): restart first" "Le système en marche ($RUNNING) n’est pas l’emplacement actif ($ACTIVE) : redémarrer d’abord" "Das laufende System ($RUNNING) ist nicht der aktive Platz ($ACTIVE): zuerst neu starten")"
+	T=$S/$OTHER
+	BAD="$(tx "Invalid update package" "Paquet de mise à jour invalide" "Ungültiges Update-Paket")"
+	setstate busy "$(tx "Checking the package" "Vérification du paquet" "Paket wird geprüft")"
+	[ "$(tar -tf "$PKG" 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')" = "SHA256SUMS manifest rootfs.tar.gz vmlinux.bin " ] || jfail "$BAD"
+	MAN=$(tar -xOf "$PKG" manifest) || jfail "$BAD"
+	VER=$(printf '%s\n' "$MAN" | sed -n 's/^VERSION=//p' | head -n 1)
+	KB=$(printf '%s\n' "$MAN" | sed -n 's/^ROOTFS_KB=//p' | head -n 1)
+	case $VER in ''|*[!A-Za-z0-9._+-]*) jfail "$BAD";; esac
+	case $KB in ''|*[!0-9]*) jfail "$BAD";; esac
+	[ ${#VER} -le 64 ] && [ ${#KB} -le 9 ] || jfail "$BAD"
+	SUMS=$(tar -xOf "$PKG" SHA256SUMS) || jfail "$BAD"
+	for f in rootfs.tar.gz vmlinux.bin; do
+		want=$(printf '%s\n' "$SUMS" | awk -v f="$f" '$2 == f || $2 == "*" f { print $1; exit }')
+		got=$(tar -xOf "$PKG" "$f" | sha256sum | cut -d' ' -f1)
+		[ ${#want} = 64 ] && [ "$want" = "$got" ] || jfail "$(tx "Checksum error on $f: package damaged" "Somme de contrôle fausse pour $f : paquet abîmé" "Prüfsumme von $f falsch: Paket beschädigt")"
+		[ $f = vmlinux.bin ] && KSUM=$want
+	done
+	KKB=$(( $(tar -xOf "$PKG" vmlinux.bin | wc -c) / 1024 + 1 ))
+	# room: what is free + what the old slot takes >= new slot + margin
+	freekb; old=0
+	[ -d "$T" ] && { set -- $(du -sk "$T"); old=${1:-0}; }
+	need=$((KB + KKB + MARGIN))
+	[ $((F + old)) -ge $need ] || jfail "$(tx "Not enough room on the USB stick: $((need / 1024)) MB needed, $(((F + old) / 1024)) MB available" "Pas assez de place sur la clé USB : $((need / 1024)) Mo nécessaires, $(((F + old) / 1024)) Mo disponibles" "Zu wenig Platz auf dem USB-Stick: $((need / 1024)) MB nötig, $(((F + old) / 1024)) MB frei")"
+
+	setstate busy "$(tx "Installing $VER into $OTHER (several minutes)" "Installation de $VER dans $OTHER (plusieurs minutes)" "$VER wird in $OTHER installiert (einige Minuten)")"
+	rm -f "$S/boot/slot.try" "$S/boot/slot.failed"
+	[ "$OTHER" != "$ACTIVE" ] && [ "$OTHER" != "$RUNNING" ] || jfail "$BAD"
+	rm -rf "$T" && mkdir "$T" && : > "$T/.incomplete" || jfail "$(tx "Cannot write to the USB stick" "Écriture impossible sur la clé USB" "Schreiben auf den USB-Stick nicht möglich")"
+	tar -xOf "$PKG" rootfs.tar.gz | gunzip -c | tar -xf - -C "$T" 2>/dev/null
+	{ [ -e "$T/sbin/init" ] || [ -L "$T/sbin/init" ]; } || jfail "$(tx "Extraction failed (no /sbin/init)" "Échec de l’extraction (pas de /sbin/init)" "Entpacken fehlgeschlagen (kein /sbin/init)")"
+	mkdir -p "$T/boot" && tar -xOf "$PKG" vmlinux.bin > "$T/boot/vmlinux.bin" \
+		&& [ "$(sha256sum < "$T/boot/vmlinux.bin" | cut -d' ' -f1)" = "$KSUM" ] \
+		&& (cd "$T/boot" && md5sum vmlinux.bin > vmlinux.bin.md5) \
+		|| jfail "$(tx "Cannot write the kernel" "Écriture du noyau impossible" "Kernel kann nicht geschrieben werden")"
+	setstate busy "$(tx "Copying the settings of this NAS" "Recopie des réglages de ce NAS" "Einstellungen dieses NAS werden übernommen")"
+	keep "$T" || jfail "$(tx "Cannot copy the settings" "Recopie des réglages impossible" "Einstellungen können nicht übernommen werden")"
+	echo "$VER" > "$T/etc/system-version"
+	rm -f "$PKG" "$T/.incomplete"
+	# kernel of the first install, now unused (its slot was just replaced)
+	[ "$OTHER" = rootfs-6.18 ] && [ -f "$S/$ACTIVE/boot/vmlinux.bin" ] && rm -f "$S/boot/vmlinux.bin" "$S/boot/vmlinux.bin.md5"
+	sync
+	schedule "$OTHER" "$VER"
+}
+
+jstr() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\000-\037'; }
+
+case ${1:-} in
+status)
+	st=idle; msg=
+	[ -r "$W/state" ] && read -r st msg < "$W/state"
+	[ "$st" = busy ] && ! busy && { st=failed; msg=$(tx "Interrupted" "Interrompu" "Abgebrochen"); }
+	if ! stick; then printf '{"stick":0,"job":{"state":"%s","msg":"%s"}}\n' "$st" "$(jstr "$msg")"; exit 0; fi
+	slots; freekb; J=
+	for s in $SLOTS; do
+		version "$s"; bootable "$s" && b=1 || b=0
+		[ -e "$S/$s/.incomplete" ] && inc=1 || inc=0
+		J="$J${J:+,}{\"name\":\"$s\",\"ver\":\"$V\",\"ok\":$b,\"incomplete\":$inc}"
+	done
+	[ -f "$S/boot/relay-slots" ] && rl=1 || rl=0
+	okslot "$RUNNING" || RUNNING=
+	printf '{"stick":1,"running":"%s","active":"%s","other":"%s","try":"%s","failed":"%s","relay":%d,"free":%s,"slots":[%s],"job":{"state":"%s","msg":"%s"}}\n' \
+		"$RUNNING" "$ACTIVE" "$OTHER" "$TRY" "$FAILED" "$rl" "$F" "$J" "$st" "$(jstr "$msg")" ;;
+receive)
+	SIZE=${2:-}
+	case $SIZE in ''|*[!0-9]*) fail "$(tx "Invalid size" "Taille invalide" "Ungültige Größe")";; esac
+	# on a refusal the upload is still read, so that the browser gets the answer
+	drain() { head -c "$SIZE" > /dev/null; fail "$1"; }
+	[ ${#SIZE} -le 10 ] && [ "$SIZE" -ge 1024 ] && [ "$SIZE" -le $MAXPKG ] || drain "$(tx "Invalid package size (512 MB max.)" "Taille de paquet invalide (512 Mo au plus)" "Ungültige Paketgröße (höchstens 512 MB)")"
+	busy && drain "$(tx "An update is already in progress" "Une mise à jour est déjà en cours" "Ein Update läuft bereits")"
+	stick || drain "$(tx "USB stick of the system not found" "Clé USB du système introuvable" "USB-Stick des Systems nicht gefunden")"
+	freekb
+	[ $((F - MARGIN)) -ge $((SIZE / 1024 + 1)) ] || drain "$(tx "Not enough room on the USB stick for the package" "Pas assez de place sur la clé USB pour le paquet" "Zu wenig Platz auf dem USB-Stick für das Paket")"
+	mkdir -p "$W" && echo $$ > "$W/pid"; JOB=1
+	setstate busy "$(tx "Receiving the package" "Réception du paquet" "Paket wird empfangen")"
+	mkdir -p "$S/update" && head -c "$SIZE" > "$S/update/package.tar"
+	if [ "$(wc -c < "$S/update/package.tar")" != "$SIZE" ]; then
+		rm -f "$S/update/package.tar"
+		setstate failed "$(tx "Incomplete upload" "Envoi incomplet" "Upload unvollständig")"
+		fail "$(tx "Incomplete upload" "Envoi incomplet" "Upload unvollständig")"
+	fi
+	log "package received ($SIZE bytes)"
+	cleanup; MNT=; JOB=
+	spawn install
+	tx "Package received: checking and installing" "Paquet reçu : vérification et installation" "Paket empfangen: Prüfung und Installation" ;;
+fetch)
+	URL=${2:-}; SUM=${3:-}
+	case $URL in https://github.com/*/releases/download/*) ;; *) URL=;; esac
+	case $URL in *[!A-Za-z0-9._~/:%+-]*|*..*) URL=;; esac
+	[ -n "$URL" ] && [ ${#URL} -le 300 ] || fail "$(tx "Only https://github.com/…/releases/download/… addresses" "Seulement des adresses https://github.com/…/releases/download/…" "Nur Adressen https://github.com/…/releases/download/…")"
+	case $SUM in *[!0-9a-f]*) SUM=;; esac
+	[ ${#SUM} = 64 ] || fail "$(tx "The SHA-256 of the package (64 hexadecimal characters, published with the release) is required" "La somme SHA-256 du paquet (64 caractères hexadécimaux, publiée avec la version) est obligatoire" "Die SHA-256-Summe des Pakets (64 Hexadezimalzeichen, mit dem Release veröffentlicht) ist nötig")"
+	busy && fail "$(tx "An update is already in progress" "Une mise à jour est déjà en cours" "Ein Update läuft bereits")"
+	needstick
+	cleanup; MNT=
+	spawn fetch "$URL" "$SUM"
+	tx "Download started" "Téléchargement lancé" "Download gestartet" ;;
+switch)
+	busy && fail "$(tx "An update is in progress" "Une mise à jour est en cours" "Ein Update läuft")"
+	needstick; slots
+	[ "$RUNNING" = "$ACTIVE" ] && [ -n "$OTHER" ] || fail "$(tx "The running system is not the active slot: restart first" "Le système en marche n’est pas l’emplacement actif : redémarrer d’abord" "Das laufende System ist nicht der aktive Platz: zuerst neu starten")"
+	bootable "$OTHER" || fail "$(tx "No other version on the USB stick" "Pas d’autre version sur la clé USB" "Keine andere Version auf dem USB-Stick")"
+	keep "$S/$OTHER" || fail "$(tx "Cannot copy the settings" "Recopie des réglages impossible" "Einstellungen können nicht übernommen werden")"
+	rm -f "$S/boot/slot.failed"
+	version "$OTHER"
+	schedule "$OTHER" "${V:-$OTHER}"
+	cut -d' ' -f2- "$W/state" ;;
+cancel)
+	busy && fail "$(tx "An update is in progress" "Une mise à jour est en cours" "Ein Update läuft")"
+	needstick; slots
+	rm -f "$S/boot/slot.try" "$W/state"; sync
+	log "trial of ${TRY:-?} cancelled"
+	tx "No trial at the next boot" "Pas d’essai au prochain démarrage" "Kein Test beim nächsten Start" ;;
+confirm)
+	stick || exit 0
+	slots
+	if [ -n "$TRY" ] && [ "$TRY" = "$RUNNING" ]; then
+		echo "$TRY" > "$S/boot/slot.tmp" && mv "$S/boot/slot.tmp" "$S/boot/slot" && rm -f "$S/boot/slot.try" && sync \
+			&& log "boot of $TRY complete: it is now the active system"
+	fi ;;
+sync)
+	stick || exit 0
+	slots
+	[ -n "$TRY" ] && [ "$TRY" != "$RUNNING" ] && bootable "$TRY" && keep "$S/$TRY" && sync && log "settings copied again into $TRY" ;;
+job)	# background part of receive / fetch
+	mkdir -p "$W" && echo $$ > "$W/pid"; JOB=1
+	stick || jfail "$(tx "USB stick of the system not found" "Clé USB du système introuvable" "USB-Stick des Systems nicht gefunden")"
+	PKG=$S/update/package.tar
+	if [ "$2" = fetch ]; then
+		setstate busy "$(tx "Downloading" "Téléchargement" "Download läuft")"
+		mkdir -p "$S/update"; log "download of $3"
+		wget -q -T 60 -O - "$3" 2>/dev/null | head -c $MAXPKG > "$PKG"
+		[ "$(sha256sum < "$PKG" | cut -d' ' -f1)" = "$4" ] || jfail "$(tx "Download failed or SHA-256 different from the expected one" "Téléchargement échoué ou SHA-256 différente de celle attendue" "Download fehlgeschlagen oder SHA-256 anders als erwartet")"
+	fi
+	install_pkg "$PKG" ;;
+*)
+	echo "usage: nas-update status|receive <bytes>|fetch <url> <sha256>|switch|cancel|confirm|sync" >&2; exit 2 ;;
+esac
+exit 0

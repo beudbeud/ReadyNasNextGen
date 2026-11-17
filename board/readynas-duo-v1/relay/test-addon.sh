@@ -14,7 +14,7 @@
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 TOP=$(cd "$HERE/../../.." && pwd)
-VERSION=${VERSION:-1.0}
+VERSION=${VERSION:-1.1}
 INST=${1:-$TOP/output-relay/ReadyNasNextGen_relay_$VERSION.bin}
 REM=${2:-$TOP/output-relay/ReadyNasNextGen_relay_remove_$VERSION.bin}
 L1='  # Linux 6.18 on a USB stick (padre_relay): returns only if DIET should start'

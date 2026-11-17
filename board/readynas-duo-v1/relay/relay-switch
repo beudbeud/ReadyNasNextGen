@@ -11,7 +11,8 @@
 #   /relay/dry-run           do everything except the jump (then the previous init)
 #   /relay/relay.log         what happened at each boot
 #   /.relay_skip_once        no relay once (removed when seen)
-# USB stick (first ext3/ext2 partition holding rootfs-6.18; 2.6.17 has no ext4):
+# USB stick (first ext3/ext2 partition holding the active slot, rootfs-6.18 by
+# default; 2.6.17 has no ext4):
 #   /rootfs-6.18/sbin/init           the 6.18 system
 #   /boot/vmlinux.bin                the raw 6.18 image (output/images/vmlinux.bin)
 #   /boot/vmlinux.bin.md5            optional, "md5sum vmlinux.bin" output
@@ -20,36 +21,55 @@
 #                                    still there at the next boot = 6.18 failed:
 #                                    removed, and the previous init starts this time
 #   /rootfs-6.18/.relay_skip_once    no relay once (can be created from 6.18)
+# Slots (system updates, nas-update on 6.18; a stick without /boot/slot* boots as above):
+#   /boot/slot                       active slot directory (missing: rootfs-6.18)
+#   /<slot>/boot/vmlinux.bin (+.md5) kernel of a slot (missing: /boot/vmlinux.bin)
+#   /boot/slot.try                   slot booted once: its .relay_pending is written at
+#                                    once; still there at the next boot = the trial
+#                                    failed: slot.try removed, /boot/slot.failed
+#                                    written, the active slot boots (not the previous
+#                                    init). 6.18 makes it active when its boot completes.
+#   /boot/relay-slots                written here: tells 6.18 that this relay knows slots
+# The 6.18 initramfs picks the same slot (slot.try if its .relay_pending is there).
 PATH=/sbin:/bin:/usr/sbin:/usr/bin
 export PATH
-D=/relay
-K=/mnt/relay-stick
-R=$K/rootfs-6.18
-IMG=$K/boot/vmlinux.bin
+P=		# prefix of every path (tests: simulated system volume)
+D=$P/relay
+K=$P/mnt/relay-stick
 WAIT=15		# seconds to wait for the USB stick
 
 log() { echo "`date` relay: $*" >> $D/relay.log 2>/dev/null; }
 out() { umount $K 2>/dev/null; log "$*: starting the previous init"; exit 0; }
 try_mount() { mount -t ext3 "$1" $K 2>/dev/null || mount -t ext2 "$1" $K 2>/dev/null; }
+okslot() { case "$1" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac; return 0; }
+# ACTIVE and TRY slots of the mounted stick
+slots() {
+	ACTIVE=rootfs-6.18; TRY=
+	[ -f $K/boot/slot ] && read ACTIVE < $K/boot/slot
+	[ -f $K/boot/slot.try ] && read TRY < $K/boot/slot.try
+	okslot "$ACTIVE" || ACTIVE=rootfs-6.18
+	okslot "$TRY" && [ "$TRY" != "$ACTIVE" ] || TRY=
+}
+hasinit() { [ -e $K/$1/sbin/init ] || [ -L $K/$1/sbin/init ]; }
 
 [ -f $D/disabled ] && exit 0
 # Quieter fan while the stick is read (2.6.17 interface, 0-255; the firmware's
 # own fan control never runs on this path). Linux 6.18 takes over after the jump.
-[ -w /proc/sys/dev/hwmon/fan0_speed_control ] && echo ${RELAY_FAN:-50} > /proc/sys/dev/hwmon/fan0_speed_control
-if [ -f /.relay_skip_once ]; then
-	rm -f /.relay_skip_once
+[ -w $P/proc/sys/dev/hwmon/fan0_speed_control ] && echo ${RELAY_FAN:-50} > $P/proc/sys/dev/hwmon/fan0_speed_control
+if [ -f $P/.relay_skip_once ]; then
+	rm -f $P/.relay_skip_once
 	log "no relay requested once (/.relay_skip_once): starting the previous init"
 	exit 0
 fi
-[ -f /proc/partitions ] || mount -t proc proc /proc
+[ -f $P/proc/partitions ] || mount -t proc proc $P/proc
 mkdir -p $K
 
 # USB storage: not loaded yet at this point (RAIDiator does it later in its rc
 # scripts), from its /lib/modules/2.6.17.14ReadyNAS; no uhci-hcd.
-M=/lib/modules/`uname -r`/kernel/drivers
+M=$P/lib/modules/`uname -r`/kernel/drivers
 for m in scsi/scsi_mod:scsi_mod scsi/sd_mod:sd_mod usb/host/ehci-hcd:ehci_hcd usb/storage/usb-storage:usb_storage; do
 	f=${m%%:*}; n=${m##*:}
-	grep -q "^$n " /proc/modules || insmod $M/$f.ko 2>/dev/null || log "insmod $f.ko failed"
+	grep -q "^$n " $P/proc/modules || insmod $M/$f.ko 2>/dev/null || log "insmod $f.ko failed"
 done
 
 STICK=
@@ -57,29 +77,53 @@ n=0
 while [ -z "$STICK" ] && [ $n -le $WAIT ]; do
 	while read major minor blocks name; do
 		case "$name" in sd[a-z][0-9]*) ;; *) continue ;; esac
-		[ -b /dev/$name ] || mknod /dev/$name b $major $minor
-		try_mount /dev/$name || continue
-		if [ -e $R/sbin/init ] || [ -L $R/sbin/init ]; then
-			STICK=/dev/$name
+		[ -b $P/dev/$name ] || mknod $P/dev/$name b $major $minor
+		try_mount $P/dev/$name || continue
+		slots
+		if hasinit $ACTIVE; then
+			STICK=$P/dev/$name
 			break
 		fi
 		umount $K
-	done < /proc/partitions
+	done < $P/proc/partitions
 	[ -n "$STICK" ] && break
 	sleep 1
 	n=$((n + 1))
 done
-[ -n "$STICK" ] || { log "no USB stick with an ext3/ext2 rootfs-6.18 after ${WAIT}s: starting the previous init"; exit 0; }
+[ -n "$STICK" ] || { log "no USB stick with an ext3/ext2 6.18 system after ${WAIT}s: starting the previous init"; exit 0; }
+[ -d $K/boot ] || mkdir $K/boot
+[ -f $K/boot/relay-slots ] || echo 1 > $K/boot/relay-slots
 
-if [ -f $R/.relay_skip_once ]; then
-	rm -f $R/.relay_skip_once
-	out "no relay requested once from 6.18 (.relay_skip_once)"
+for s in $ACTIVE $TRY; do
+	if [ -f $K/$s/.relay_skip_once ]; then
+		rm -f $K/$s/.relay_skip_once
+		out "no relay requested once from 6.18 (.relay_skip_once)"
+	fi
+done
+if [ -n "$TRY" ] && [ -f $K/$TRY/.relay_pending ]; then
+	rm -f $K/$TRY/.relay_pending $K/boot/slot.try
+	echo $TRY > $K/boot/slot.failed
+	log "the trial of $TRY did not complete: back to $ACTIVE"
+	TRY=
 fi
-if [ -f $R/.relay_pending ]; then
-	rm -f $R/.relay_pending
-	out "the last 6.18 boot did not complete (.relay_pending still there)"
+if [ -n "$TRY" ] && hasinit $TRY; then
+	# one attempt only, whatever happens from here on
+	: > $K/$TRY/.relay_pending
+	sync
+	BOOT=$TRY
+	log "trying $TRY once (active slot: $ACTIVE)"
+else
+	[ -n "$TRY" ] && { rm -f $K/boot/slot.try; log "$TRY has no sbin/init: trial dropped"; }
+	BOOT=$ACTIVE
+	if [ -f $K/$BOOT/.relay_pending ]; then
+		rm -f $K/$BOOT/.relay_pending
+		out "the last 6.18 boot did not complete (.relay_pending still there)"
+	fi
 fi
-[ -f $IMG ] || out "no /boot/vmlinux.bin on $STICK"
+R=$K/$BOOT
+IMG=$R/boot/vmlinux.bin
+[ -f $IMG ] || IMG=$K/boot/vmlinux.bin
+[ -f $IMG ] || out "no boot/vmlinux.bin for $BOOT on $STICK"
 if [ -f $IMG.md5 ] && [ -x /usr/bin/md5sum ]; then
 	set -- `cat $IMG.md5`; WANT=$1
 	set -- `md5sum $IMG`
@@ -89,35 +133,35 @@ set -- `ls -l $IMG`; SIZE=$5
 
 insmod $D/padre_relay.ko || out "insmod padre_relay.ko failed"
 # load, check the header, run the trampoline copy test (no machine change)
-if ! cat $IMG > /proc/padre_relay/image || ! echo "test $SIZE" > /proc/padre_relay/control; then
-	cat /proc/padre_relay/control >> $D/relay.log 2>/dev/null
+if ! cat $IMG > $P/proc/padre_relay/image || ! echo "test $SIZE" > $P/proc/padre_relay/control; then
+	cat $P/proc/padre_relay/control >> $D/relay.log 2>/dev/null
 	rmmod padre_relay
 	out "image refused or copy test failed"
 fi
-cat /proc/padre_relay/control >> $D/relay.log 2>/dev/null
+cat $P/proc/padre_relay/control >> $D/relay.log 2>/dev/null
 if [ -f $D/dry-run ]; then
 	rmmod padre_relay
 	out "dry run (/relay/dry-run)"
 fi
 
-log "starting Linux 6.18 from $STICK ($SIZE bytes)"
-umount /initrd 2>/dev/null && [ -x /sbin/blockdev ] && /sbin/blockdev --flushbufs /dev/ram0
+log "starting Linux 6.18 from $STICK ($BOOT, $SIZE bytes)"
+umount $P/initrd 2>/dev/null && [ -x $P/sbin/blockdev ] && $P/sbin/blockdev --flushbufs /dev/ram0
 sync
-if ! mount -o remount,ro /; then
+if ! mount -o remount,ro $P/; then
 	rmmod padre_relay
 	out "cannot remount / read-only"
 fi
 : > $R/.relay_pending
 if ! umount $K; then
-	rm -f $R/.relay_pending
-	mount -o remount,rw /
+	[ "$BOOT" = "$TRY" ] || rm -f $R/.relay_pending
+	mount -o remount,rw $P/
 	rmmod padre_relay
 	out "cannot unmount the stick"
 fi
 sync
-echo "go $SIZE" > /proc/padre_relay/control
+echo "go $SIZE" > $P/proc/padre_relay/control
 # only reached if padre_relay refused before its point of no return
-mount -o remount,rw /
-try_mount $STICK && rm -f $R/.relay_pending
+mount -o remount,rw $P/
+try_mount $STICK && { [ "$BOOT" = "$TRY" ] || rm -f $R/.relay_pending; }
 rmmod padre_relay
 out "padre_relay refused to jump"

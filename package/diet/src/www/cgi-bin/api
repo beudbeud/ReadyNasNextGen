@@ -1,11 +1,13 @@
 #!/bin/sh
 # DIET web API (CGI run by lighttpd), ReadyNAS Duo v1 on Linux 6.18.
-#   GET  ?a=status | config | shares | users | nfs | sys | hist | storage | services
-#        ?a=log&f=diet|messages|dmesg|storage    ?a=smart&d=sda   ?a=md&d=md0
+#   GET  ?a=status | config | shares | users | nfs | sys | hist | storage | services | update
+#        ?a=log&f=diet|messages|dmesg|storage|update    ?a=smart&d=sda   ?a=md&d=md0
 #   POST ?a=spindown|ksmbd|nfsd|ntp|reboot|poweroff|config|share_add|share_del|share_set
 #        |user_set|user_del|nfs_add|nfs_del|sys_set|notify_test
 #        |svc_set|dlna_set|dlna_scan|rsync_pw|rsync_c
-#        |raid_verify|xraid_rw   (X-Diet: 1 header required)
+#        |raid_verify|xraid_rw
+#        |update_upload (body: the package) |update_url|update_switch|update_cancel
+#        (X-Diet: 1 header required)
 # Message language: &l=fr|de|en.
 # Testing on a PC: DIET_ROOT=/path/to/fake-root prefixes every file read or
 # written (/proc, /sys, /etc, /var) and puts $DIET_ROOT/bin first in PATH
@@ -988,6 +990,12 @@ qp a; A=$QP
 if [ "$REQUEST_METHOD" = "POST" ]; then
   # CSRF protection: a form from another site cannot set this header
   [ "$HTTP_X_DIET" = "1" ] || fail "403 Forbidden" "$(tx "Action only through the web interface" "Action réservée à l’interface" "Aktion nur über die Oberfläche")"
+  # system update package: the body (streamed by lighttpd) goes straight to the USB stick
+  if [ "$A" = update_upload ]; then
+    if OUT=$(L=$L nas-update receive "${CONTENT_LENGTH:-}"); then note "Update: package uploaded"; invalidate; ok "$OUT"
+    else fail "409 Conflict" "$OUT"; fi
+    exit 0
+  fi
   BODY=""; CL=${CONTENT_LENGTH:-0}
   case "$CL" in *[!0-9]*) CL=0;; esac
   [ "$CL" -lt 4096 ] || fail "413 Request Entity Too Large" "$(tx "too much data" "trop de données" "zu viele Daten")"
@@ -1034,6 +1042,11 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
     raid_plan|raid_run)	# md wizards (migrate, create...): disabled for now, docs/XRAID-MIGRATION.md
       fail "409 Conflict" "$(tx "md support is disabled for now: X-RAID only" "md désactivé pour l’instant : X-RAID seulement" "md vorerst deaktiviert: nur X-RAID")" ;;
     xraid_rw) xraid_rw ;;
+    update_url|update_switch|update_cancel)	# system update (nas-update, docs/DIET.md)
+      url=""; sha=""
+      for kv in $(echo "$BODY" | tr '&' ' '); do case "${kv%%=*}" in url) url=$(urldec "${kv#*=}");; sha) sha=$(urldec "${kv#*=}");; esac; done
+      case "$A" in update_url) set -- fetch "$url" "$sha";; update_switch) set -- switch;; *) set -- cancel;; esac
+      if OUT=$(L=$L nas-update "$@"); then note "Update: $1"; ok "$OUT"; else fail "409 Conflict" "$OUT"; fi ;;
     *) fail "400 Bad Request" "$(tx "unknown action" "action inconnue" "unbekannte Aktion")" ;;
   esac
   invalidate
@@ -1044,6 +1057,7 @@ fi
 case "$A" in
   ""|status|all|config|shares|users|nfs|sys|storage|services) hdr application/json; calc "${A:-status}" ;;
   hist) hdr 'text/plain; charset=utf-8'; cat "$RUN/hwmon.hist" 2>/dev/null ;;
+  update) hdr application/json; L=$L nas-update status ;;
   log)
     hdr 'text/plain; charset=utf-8'
     qp f; case $QP in
@@ -1051,6 +1065,7 @@ case "$A" in
       messages) tail -n 300 "$R/var/log/messages" 2>/dev/null ;;
       dmesg)    dmesg | tail -n 300 ;;
       storage) tail -n 300 "$R/var/lib/nas-raid/log" 2>/dev/null ;;
+      update) tail -n 300 "$R/var/lib/nas-update/log" 2>/dev/null ;;
       *) tx "unknown log" "journal inconnu" "unbekanntes Protokoll"; echo ;;
     esac ;;
   smart)

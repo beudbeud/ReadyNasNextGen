@@ -1,5 +1,7 @@
 # ReadyNasNextGen
 
+[![tests](https://github.com/beudbeud/ReadyNasNextGen/actions/workflows/tests.yml/badge.svg)](https://github.com/beudbeud/ReadyNasNextGen/actions/workflows/tests.yml)
+
 A modern system to bring the **NETGEAR ReadyNAS Duo v1** back to life: Linux 6.18, file
 sharing for Windows/macOS (SMB) and Linux (NFS), and a web administration interface, without
 touching the original firmware.
@@ -66,8 +68,9 @@ if 6.18 failed to boot last time, RAIDiator starts as usual.
    (cd /mnt/boot && md5sum vmlinux.bin > vmlinux.bin.md5)
    umount /mnt
    ```
-   To update, extract into a new empty `rootfs-6.18` rather than over the previous system,
-   and copy the new `vmlinux.bin` (and its `.md5`).
+   To update later, use the web interface (below); by hand, extract into a new empty
+   `rootfs-6.18` rather than over the previous system, and copy the new `vmlinux.bin`
+   (and its `.md5`).
 
 3. **Install the relay add-on** `ReadyNasNextGen_relay_<version>.bin`, in either of two ways:
 
@@ -80,12 +83,14 @@ if 6.18 failed to boot last time, RAIDiator starts as usual.
      ```sh
      sh tools/frontview-upload.sh <NAS-IP> ReadyNasNextGen_relay_<version>.bin
      ```
-     It asks for the Frontview `admin` password, uploads and verifies the add-on, then asks
-     before performing the update. Without a terminal, set `FRONTVIEW_PASSWORD=…` and
-     `FRONTVIEW_YES=1`. Then restart the NAS (power button, or Frontview).
+     It asks for the Frontview `admin` password, uploads and verifies the add-on, asks
+     before performing the update, then restarts the NAS as Frontview's **System → Shutdown**
+     page would. Without a terminal, set `FRONTVIEW_PASSWORD=…` and `FRONTVIEW_YES=1`;
+     `FRONTVIEW_NO_REBOOT=1` skips the restart (do it yourself: power button or Frontview).
 
-   On the next boot RAIDiator installs the add-on, then restarts by itself about 2 minutes
-   later. Install log on the NAS: `/var/log/relay-install.log`. (With DIET installed, start
+   RAIDiator does not restart by itself after **Perform System Update**. On the next boot it
+   installs the add-on, then the NAS restarts once more by itself about 2 minutes later: wait
+   for both restarts, without powering it off. Install log on the NAS: `/var/log/relay-install.log`. (With DIET installed, start
    RAIDiator once from DIET to reach Frontview; the relay then starts before DIET's own boot
    switch.)
 
@@ -95,6 +100,17 @@ if 6.18 failed to boot last time, RAIDiator starts as usual.
 5. **First access**: log in over SSH (`ssh root@<NAS-IP>`), set the web interface password with
    `diet-webpass`, then open `https://<NAS-IP>/` (user `admin`; accept the self-signed
    certificate).
+
+### Updating
+
+`make update-package` builds `readynasng-update-<version>.tar` (and its `.sha256`) from
+`output-rapide/images`. In the web interface, **Settings → System update**: upload it (or
+give its GitHub release address and SHA-256), then **Restart to try it**. The new version
+goes into the second system slot of the stick with the settings of this NAS; if it does not
+start completely (cut the power if it hangs), the next power-on goes back to the current
+version. **Switch to the other version** goes back to the previous one. Needs the relay
+add-on 1.1 or later (`make relay-addon`, installed like step 3). Details:
+[docs/DIET.md](docs/DIET.md#system-update-settings-page).
 
 ### Development: booting by TFTP
 

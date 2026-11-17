@@ -225,6 +225,21 @@ dialog h3{margin:0 0 8px;font-size:16px}
       </form>
       <p class="small" style="margin-bottom:0">An alert is sent when the RAID degrades, a disk leaves the RAID or reports bad sectors, on overheating or a stopped fan, and again on recovery.</p>
     </div>
+    <div class="card" style="max-width:620px;margin-top:12px">
+      <h2>System update</h2>
+      <div id="updi" class="small"></div>
+      <div class="btns" id="updb" style="margin-top:8px"></div>
+      <form id="updf" class="btns" style="margin-top:14px;align-items:center">
+        <input type="file" id="updfile" accept=".tar" required class="small">
+        <button class="b pri" type="submit">Upload and install</button>
+      </form>
+      <form id="updu" class="btns" style="margin-top:8px;align-items:center">
+        <input class="inp" name="url" placeholder="https://github.com/…/releases/download/…/readynasng-update-….tar" required style="flex:1;min-width:240px">
+        <input class="inp" name="sha" placeholder="SHA-256 of the package" required pattern="[0-9a-fA-F]{64}" style="flex:1;min-width:240px">
+        <button class="b" type="submit">Download and install</button>
+      </form>
+      <p class="small" style="margin-bottom:0">The new version is installed next to the current one on the USB stick, with the settings of this NAS, and tried at the next restart. If it does not start completely (cut the power if it hangs), the following power-on goes back to the current version by itself. The previous version stays available.</p>
+    </div>
   </section>
 
   <section class="page" id="p-log">
@@ -235,6 +250,7 @@ dialog h3{margin:0 0 8px;font-size:16px}
           <option value="messages">System log</option>
           <option value="dmesg">Kernel (dmesg)</option>
           <option value="storage">Storage log</option>
+          <option value="update">Update log</option>
         </select>
         <button class="b" id="logr">Reload</button>
         <span class="small" style="margin-left:auto">SMART report (wakes the disk):</span>
@@ -249,7 +265,7 @@ dialog h3{margin:0 0 8px;font-size:16px}
 <div class="toast" id="toast"></div>
 <dialog id="xrwd"><form method="dialog">
 <h3>Allow writing on the X-RAID</h3>
-<p class="small" style="color:var(--bad)">Writing goes through fuse2fs on the ext3 file system with 16 KB blocks created by RAIDiator, every write going to both disks. This path has not been tested for long yet: a backup of /c is strongly recommended. The volume is unmounted and mounted again; SMB, NFS, DLNA, rsync and WebDAV are stopped meanwhile. The safeguards of nas-raid may keep it read-only.</p>
+<p class="small" style="color:var(--bad)">Writing goes through the kernel ext4 driver on the ext3 file system with 16 KB blocks created by RAIDiator, every write going to both disks. This path has not been tested for long yet: a backup of /c is strongly recommended. The volume is unmounted and mounted again; SMB, NFS, DLNA, rsync and WebDAV are stopped meanwhile. The safeguards of nas-raid may keep it read-only.</p>
 <p><label><input type="checkbox" id="xrwc"> I have a backup of /c or I accept the risk.</label></p>
 <p class="small"><span id="xrwl"></span><br><input class="inp" id="xrwi" autocomplete="off" spellcheck="false" style="width:100%"></p>
 <div class="btns"><span class="sp"></span><button class="b" value="cancel">Cancel</button><button class="b danger" type="button" id="xrwgo" disabled>Enable</button></div>
@@ -469,6 +485,28 @@ const I18N = {
   "read errors": ["erreurs de lecture", "Lesefehler"],
   "Check the mirror": ["Vérifier le miroir", "Spiegel prüfen"],
   "Storage log": ["Journal du stockage", "Speicherprotokoll"],
+  "Update log": ["Journal des mises à jour", "Update-Protokoll"],
+  "System update": ["Mise à jour du système", "Systemaktualisierung"],
+  "Upload and install": ["Envoyer et installer", "Hochladen und installieren"],
+  "Download and install": ["Télécharger et installer", "Herunterladen und installieren"],
+  "SHA-256 of the package": ["SHA-256 du paquet", "SHA-256 des Pakets"],
+  "The new version is installed next to the current one on the USB stick, with the settings of this NAS, and tried at the next restart. If it does not start completely (cut the power if it hangs), the following power-on goes back to the current version by itself. The previous version stays available.": ["La nouvelle version est installée à côté de l’actuelle sur la clé USB, avec les réglages de ce NAS, puis essayée au prochain redémarrage. Si elle ne démarre pas complètement (couper l’alimentation si elle bloque), la mise sous tension suivante revient d’elle-même à la version actuelle. La version précédente reste disponible.", "Die neue Version wird neben der aktuellen auf dem USB-Stick installiert, mit den Einstellungen dieses NAS, und beim nächsten Neustart getestet. Startet sie nicht vollständig (bei Hängen Strom trennen), kehrt der folgende Start von selbst zur aktuellen Version zurück. Die vorherige Version bleibt verfügbar."],
+  "USB stick of the system not found": ["Clé USB du système introuvable", "USB-Stick des Systems nicht gefunden"],
+  "Running version": ["Version en marche", "Laufende Version"],
+  "Other version": ["Autre version", "Andere Version"],
+  "first install": ["première installation", "Erstinstallation"],
+  "incomplete": ["incomplète", "unvollständig"],
+  "none": ["aucune", "keine"],
+  "Free on the USB stick": ["Libre sur la clé USB", "Frei auf dem USB-Stick"],
+  "{0} will be tried at the next restart": ["{0} sera essayée au prochain redémarrage", "{0} wird beim nächsten Neustart getestet"],
+  "The last trial ({0}) did not start completely: back to the current version": ["Le dernier essai ({0}) n’a pas démarré complètement : retour à la version actuelle", "Der letzte Test ({0}) startete nicht vollständig: zurück zur aktuellen Version"],
+  "The relay add-on on the system disk is too old to start another version: install ReadyNasNextGen_relay 1.1 or later": ["L’add-on relais du disque système est trop ancien pour démarrer une autre version : installer ReadyNasNextGen_relay 1.1 ou plus récent", "Das Relay-Add-on auf der Systemplatte ist zu alt, um eine andere Version zu starten: ReadyNasNextGen_relay ab 1.1 installieren"],
+  "Restart to try it": ["Redémarrer pour l’essayer", "Neu starten zum Testen"],
+  "Cancel the trial": ["Annuler l’essai", "Test abbrechen"],
+  "Switch to the other version": ["Passer à l’autre version", "Zur anderen Version wechseln"],
+  "Try the other version ({0}) at the next restart? The settings of this NAS are copied into it.": ["Essayer l’autre version ({0}) au prochain redémarrage ? Les réglages de ce NAS y sont recopiés.", "Die andere Version ({0}) beim nächsten Neustart testen? Die Einstellungen dieses NAS werden übernommen."],
+  "Install {0}? The current version stays on the USB stick.": ["Installer {0} ? La version actuelle reste sur la clé USB.", "{0} installieren? Die aktuelle Version bleibt auf dem USB-Stick."],
+  "Uploading… {0} %": ["Envoi… {0} %", "Hochladen … {0} %"],
   "Type “{0}” to confirm:": ["Tapez « {0} » pour confirmer :", "„{0}“ eintippen zum Bestätigen:"],
   "Read both disks entirely and compare them (read-only, several hours)?": ["Lire tout le contenu des deux disques et les comparer (lecture seule, plusieurs heures) ?", "Beide Platten vollständig lesen und vergleichen (nur Lesen, mehrere Stunden)?"],
   "Services": ["Services", "Dienste"],
@@ -526,7 +564,7 @@ const I18N = {
   "writing disabled (switch “Allow writing on the X-RAID”)": ["écriture désactivée (interrupteur « Autoriser l’écriture sur le X-RAID »)", "Schreiben deaktiviert (Schalter „Schreiben auf das X-RAID erlauben“)"],
   "Allow writing on the X-RAID": ["Autoriser l’écriture sur le X-RAID", "Schreiben auf das X-RAID erlauben"],
   "writing requested, refused by the safeguards above": ["écriture demandée, refusée par les garde-fous ci-dessus", "Schreiben verlangt, von den obigen Schutzregeln abgelehnt"],
-  "Writing goes through fuse2fs on the ext3 file system with 16 KB blocks created by RAIDiator, every write going to both disks. This path has not been tested for long yet: a backup of /c is strongly recommended. The volume is unmounted and mounted again; SMB, NFS, DLNA, rsync and WebDAV are stopped meanwhile. The safeguards of nas-raid may keep it read-only.": ["L’écriture passe par fuse2fs sur le système de fichiers ext3 à blocs de 16 Ko créé par RAIDiator, chaque écriture allant sur les deux disques. Ce chemin n’a pas encore été éprouvé longuement : une sauvegarde de /c est fortement recommandée. Le volume est démonté puis remonté ; SMB, NFS, DLNA, rsync et WebDAV sont arrêtés pendant ce temps. Les garde-fous de nas-raid peuvent garder la lecture seule.", "Geschrieben wird über fuse2fs auf das ext3-Dateisystem mit 16-KB-Blöcken von RAIDiator, jede Schreibung geht auf beide Platten. Dieser Weg ist noch nicht lange erprobt: eine Sicherung von /c wird dringend empfohlen. Das Volume wird aus- und wieder eingehängt; SMB, NFS, DLNA, rsync und WebDAV stehen währenddessen. Die Schutzregeln von nas-raid können weiter nur Lesen erlauben."],
+  "Writing goes through the kernel ext4 driver on the ext3 file system with 16 KB blocks created by RAIDiator, every write going to both disks. This path has not been tested for long yet: a backup of /c is strongly recommended. The volume is unmounted and mounted again; SMB, NFS, DLNA, rsync and WebDAV are stopped meanwhile. The safeguards of nas-raid may keep it read-only.": ["L’écriture passe par le pilote ext4 du noyau sur le système de fichiers ext3 à blocs de 16 Ko créé par RAIDiator, chaque écriture allant sur les deux disques. Ce chemin n’a pas encore été éprouvé longuement : une sauvegarde de /c est fortement recommandée. Le volume est démonté puis remonté ; SMB, NFS, DLNA, rsync et WebDAV sont arrêtés pendant ce temps. Les garde-fous de nas-raid peuvent garder la lecture seule.", "Geschrieben wird über den ext4-Treiber des Kernels auf das ext3-Dateisystem mit 16-KB-Blöcken von RAIDiator, jede Schreibung geht auf beide Platten. Dieser Weg ist noch nicht lange erprobt: eine Sicherung von /c wird dringend empfohlen. Das Volume wird aus- und wieder eingehängt; SMB, NFS, DLNA, rsync und WebDAV stehen währenddessen. Die Schutzregeln von nas-raid können weiter nur Lesen erlauben."],
   "I have a backup of /c or I accept the risk.": ["J’ai une sauvegarde de /c ou j’accepte le risque.", "Ich habe eine Sicherung von /c oder nehme das Risiko in Kauf."],
   "Enable": ["Activer", "Einschalten"],
   "Put the X-RAID back to read-only? The volume is unmounted and mounted again (SMB, NFS, DLNA, rsync and WebDAV stopped meanwhile).": ["Repasser le X-RAID en lecture seule ? Le volume est démonté puis remonté (SMB, NFS, DLNA, rsync et WebDAV arrêtés pendant ce temps).", "X-RAID wieder nur lesend? Das Volume wird aus- und wieder eingehängt (SMB, NFS, DLNA, rsync und WebDAV stehen währenddessen)."],
@@ -791,7 +829,7 @@ $('#alarmx').onclick = ()=>{ try{ localStorage.setItem('dietWarnHidden', warnTex
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('act',x===b));
   document.querySelectorAll('.page').forEach(p=>p.classList.toggle('act',p.id==='p-'+b.dataset.p));
-  if(b.dataset.p==='cfg'){ loadCfg(); loadSys(); }
+  if(b.dataset.p==='cfg'){ loadCfg(); loadSys(); loadUpd(); }
   if(b.dataset.p==='shares'){ loadShares(); loadUsers(); loadNfs(); loadSvc(); }
   if(b.dataset.p==='log') loadLog();
 });
@@ -862,6 +900,67 @@ $('#tgtest').onclick = async ev=>{
   ev.target.disabled = true;
   try{ const r = await post('notify_test'); toast(r.msg); }catch(e){ toast(e.message); }
   ev.target.disabled = false;
+};
+
+// System update (nas-update): two system slots on the USB stick, the other one tried at the next restart
+let updT = null, updOther = '';
+async function loadUpd(){
+  clearTimeout(updT);
+  let u; try{ u = await get('update'); }catch(e){ $('#updi').textContent = t('Error: {0}', e.message); return; }
+  const j = u.job || {}, busy = j.state==='busy', sl = u.slots || [];
+  const slot = n => sl.find(x=>x.name===n) || {};
+  const ver = n => slot(n).ver || (slot(n).ok ? t('first install') : '–');
+  const row = (k, v) => `<div class="row"><span>${k}</span><span>${esc(v)}</span></div>`;
+  const note = (c, s) => `<div style="color:var(--${c});margin-top:4px">${esc(s)}</div>`;
+  let h = '';
+  if(!u.stick) h = note('warn', t('USB stick of the system not found'));
+  else {
+    const o = slot(u.other); updOther = o.ok ? ver(u.other) : '';
+    h += row(t('Running version'), ver(u.running)+' · '+u.running);
+    h += row(t('Other version'), o.ok ? ver(u.other)+' · '+u.other : o.incomplete ? t('incomplete') : t('none'));
+    h += row(t('Free on the USB stick'), kb(u.free));
+    if(u.try) h += note('warn', t('{0} will be tried at the next restart', ver(u.try)));
+    if(u.failed) h += note('bad', t('The last trial ({0}) did not start completely: back to the current version', ver(u.failed)));
+    if(!u.relay) h += note('warn', t('The relay add-on on the system disk is too old to start another version: install ReadyNasNextGen_relay 1.1 or later'));
+  }
+  if(j.state && j.state!=='idle') h += note(j.state==='failed' ? 'bad' : j.state==='busy' ? 'mute' : 'ok', j.msg || '');
+  $('#updi').innerHTML = h;
+  const b = [];
+  if(u.try) b.push(`<button class="b pri" data-u="reboot">${t('Restart to try it')}</button>`, `<button class="b" data-u="update_cancel">${t('Cancel the trial')}</button>`);
+  else if(updOther && u.relay && u.running===u.active && !busy) b.push(`<button class="b" data-u="update_switch">${t('Switch to the other version')}</button>`);
+  $('#updb').innerHTML = b.join('');
+  document.querySelectorAll('#updf button, #updu button').forEach(x=>{ x.disabled = busy || !u.stick; });
+  if(busy) updT = setTimeout(loadUpd, 3000);
+}
+$('#updb').onclick = async ev=>{
+  const a = ev.target.dataset.u; if(!a) return;
+  if(a==='reboot'){
+    if(!confirm(t('Restart now?'))) return;
+    try{ await post('reboot'); waitBack(t('Restarting…<br><small>The page will reload by itself.</small>')); }catch(e){ toast(t('Error: {0}', e.message)); }
+    return;
+  }
+  if(a==='update_switch' && !confirm(t('Try the other version ({0}) at the next restart? The settings of this NAS are copied into it.', updOther))) return;
+  try{ toast((await post(a)).msg); }catch(e){ toast(t('Error: {0}', e.message)); }
+  loadUpd();
+};
+// upload: XMLHttpRequest for the progress; the body is the package itself
+$('#updf').onsubmit = ev=>{
+  ev.preventDefault();
+  const f = $('#updfile').files[0]; if(!f || !confirm(t('Install {0}? The current version stays on the USB stick.', f.name))) return;
+  const x = new XMLHttpRequest();
+  x.open('POST', API+'?a=update_upload&l='+LANG);
+  x.setRequestHeader('X-Diet', '1'); x.setRequestHeader('Content-Type', 'application/octet-stream');
+  x.upload.onprogress = e=>{ if(e.lengthComputable) $('#updi').textContent = t('Uploading… {0} %', Math.round(100*e.loaded/e.total)); };
+  x.onload = ()=>{ let m = x.responseText.trim(); try{ m = JSON.parse(m).msg; }catch(e){} toast(x.status===200 ? m : t('Error: {0}', m)); loadUpd(); };
+  x.onerror = ()=>{ toast(t('Error: {0}', t('no connection'))); loadUpd(); };
+  document.querySelectorAll('#updf button, #updu button').forEach(b=>{ b.disabled = true; });
+  x.send(f);
+};
+$('#updu').onsubmit = async ev=>{
+  ev.preventDefault(); const f = ev.target;
+  try{ toast((await post('update_url', 'url='+encodeURIComponent(f.url.value.trim())+'&sha='+encodeURIComponent(f.sha.value.trim().toLowerCase()))).msg); }
+  catch(e){ toast(t('Error: {0}', e.message)); }
+  loadUpd();
 };
 
 // Shares

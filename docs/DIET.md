@@ -141,6 +141,64 @@ as its uid if free); an account created earlier switches to it when its password
 is set again. Refused names: those of a system group (`audio`, `video`,
 `users`…), `sauvegarde`, `nas`, `c`, `home`, `webdav`, `root`.
 
+## System update (Settings page)
+
+The USB stick holds two **system slots**: `rootfs-6.18` (the first install) and
+`rootfs-b`. One is active; the other holds the previous (or the next) version.
+`nas-update` (`/usr/sbin`, called by the API) installs a new version into the slot that
+is not active and has it tried once at the next restart:
+
+1. **Package** (`make update-package`, from `output-rapide/images`):
+   `readynasng-update-<version>.tar`, an uncompressed tar of `manifest` (`VERSION=`,
+   `ROOTFS_KB=` room needed once extracted), `SHA256SUMS`, `rootfs.tar.gz` and
+   `vmlinux.bin`, plus a `.sha256` file next to it.
+2. **Upload** from the browser (`POST ?a=update_upload`, the body is the file): lighttpd
+   streams it to the API (`server.stream-request-body = 2` for this URL only, nothing
+   in `/tmp`, which is RAM), which writes it to `/update/package.tar` on the stick after
+   checking the room left (16 MB margin). Or **download** (`?a=update_url`): only
+   `https://github.com/…/releases/download/…` addresses, and the SHA-256 of the package
+   is required (busybox wget checks no certificate). 512 MB at most.
+3. **Check** in the background: the four members exactly, version and size in the manifest,
+   SHA-256 of `rootfs.tar.gz` and `vmlinux.bin`, room (free + what the old slot takes ≥
+   new slot + kernel + 16 MB). Any refusal leaves the active slot untouched.
+4. **Extraction** into the other slot (deleted first, marked `.incomplete` until the end),
+   kernel into `<slot>/boot/vmlinux.bin` (+ `.md5` for the relay), version into
+   `<slot>/etc/system-version`.
+5. **Settings of this NAS** copied into it: `diet.conf`, `fan.conf`, `exports`,
+   `rsyncd.conf`, `rsyncd.secrets`, `minidlna.conf`, `nas-raid.conf`, `hostname`, `TZ`,
+   `diet-lang`, `diet-notify.conf`, `network/interfaces`, `ksmbd/ksmbd.conf`,
+   `ksmbd/ksmbdpwd.db`, `lighttpd/htpasswd`, `lighttpd/htpasswd-users`,
+   `lighttpd/webdav.conf` (in `/etc`); the folders `/etc/dropbear` (host keys),
+   `/etc/lighttpd/ssl` (certificate), `/root/.ssh`, `/var/lib/nas-raid`,
+   `/var/lib/nas-update`; `passwd`, `group` and `shadow` merged by name (the lines of this
+   NAS win: users, uids, passwords; system accounts new in the image are added); the
+   Avahi announcements of stopped services stay `*.service.off`. They are copied again
+   at shutdown (`S99relay-confirm stop`, `nas-update sync`), so a setting changed before
+   the restart is not lost. Not copied: the MiniDLNA database (rebuilt), WebDAV locks.
+6. **Trial**: `/boot/slot.try` names the slot. At the next power-on `relay-switch`
+   boots it once (marker `.relay_pending` written in it first) with its own kernel; the
+   6.18 initramfs mounts the same slot. When its boot completes, `S99relay-confirm`
+   (`nas-update confirm`) makes it the active slot (`/boot/slot`). Otherwise (hang: cut
+   the power; refused kernel; any failure) the next power-on finds the marker, drops the
+   trial, writes `/boot/slot.failed` (shown in the interface) and boots the active slot
+   again, not RAIDiator.
+
+**Going back**: “Switch to the other version” copies the settings into the other slot
+and tries it the same way (so a failed version can also be tried again). “Cancel the
+trial” removes `/boot/slot.try`. Nothing is installed while the running system is not
+the active slot (a trial that has not completed yet).
+
+The trial needs the relay add-on **1.1** (`relay-switch` with slots, which writes
+`/boot/relay-slots` on the stick): with 1.0 the version is installed but not scheduled,
+and the interface asks for the new add-on. A stick of the first install (only
+`/rootfs-6.18` and `/boot/vmlinux.bin`) boots unchanged with either. Installing into
+`rootfs-6.18` removes `/boot/vmlinux.bin`, unused from then on; going back to the relay
+add-on 1.0 afterwards would no longer boot 6.18 (RAIDiator starts).
+
+Written: only the stick that holds `/` (checked: ext2/3/4 on a USB disk, mounted a second
+time in `/var/run/nas-update/`), never the data disks nor the flash. Log:
+`/var/lib/nas-update/log` (Logs page, “Update log”).
+
 ## Storage: writing to the X-RAID
 
 The "Storage /c" card shows the X-RAID state as RAIDiator sees it (superblock
@@ -152,7 +210,7 @@ missing (`sb_writer` field): read-only only. md actions (migrate, create) are
 disabled for now: `POST ?a=raid_plan|raid_run` answer 409
 (docs/XRAID-MIGRATION.md).
 
-- **Enable**: warning dialog (writing through fuse2fs to the RAIDiator ext3 with
+- **Enable**: warning dialog (writing through the kernel ext4 driver to the RAIDiator ext3 with
   16 KB blocks, backup recommended), checkbox **and**
   the word `WRITE` to type; `POST ?a=xraid_rw` with `on=1&confirm=WRITE&yes=1`.
 - **Disable**: simple confirmation, `on=0`.
@@ -168,7 +226,7 @@ disabled for now: `POST ?a=raid_plan|raid_run` answer 409
   (unclean shutdown, mismatched mirror…), the response and the card give the mode
   and the reason ("writing requested, refused by the safeguards").
 - The remount is done during the request (reading the samples of both
-  disks, starting fuse2fs): a few tens of seconds on the NAS.
+  disks, mounting): a few tens of seconds on the NAS.
 
 ## Speed: collector and cache
 
@@ -218,6 +276,9 @@ creates a fake root (`DIET_ROOT`) with simulated `/proc`, `/sys` and `/etc`
 (healthy then degraded RAID1, drivetemp, ksmbd.conf, exports), replaces
 the NAS commands with scripts that record their arguments, calls
 the API as lighttpd would and checks the JSON and the written files.
+System updates run against a folder standing for the USB stick (`DIET_STICK`); the
+boot side of the slots (relay-switch, initramfs) is checked by
+`board/readynas-duo-v1/relay/test-slots.sh`.
 `--serve` starts the interface on http://127.0.0.1:8080/ with this data
 (busybox httpd of the host).
 

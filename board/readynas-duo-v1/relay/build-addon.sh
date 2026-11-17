@@ -13,7 +13,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 TOP=$(cd "$HERE/../../.." && pwd)
 OUT=${OUT:-$TOP/output-relay}
 KO=${KO:-$OUT/padre_relay.ko}
-VERSION=${VERSION:-1.0}
+VERSION=${VERSION:-1.1}
 [ -f "$KO" ] || { echo "$KO not found: run 'make relay' first (or KO=/path/padre_relay.ko)" >&2; exit 1; }
 
 T=$(mktemp -d)
