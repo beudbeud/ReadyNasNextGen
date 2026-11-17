@@ -4,8 +4,9 @@ A modern system to bring the **NETGEAR ReadyNAS Duo v1** back to life: Linux 6.1
 sharing for Windows/macOS (SMB) and Linux (NFS), and a web administration interface, without
 touching the original firmware.
 
-> **Experimental project.** It boots and serves files, but it is still started from a PC at
-> every boot (see [Current limitations](#current-limitations)). Keep a backup of your data.
+> **Experimental project.** It boots on its own from a USB stick through the original
+> firmware and serves files (see [Current limitations](#current-limitations)). Keep a backup
+> of your data.
 
 ## What you get
 
@@ -19,50 +20,78 @@ touching the original firmware.
   created as a standard Linux RAID1 (md).
 - **Temperature-controlled fan**: the NAS stays quiet when idle.
 - **Hardware clock** read at boot, then kept accurate over the network (NTP).
-- The **original firmware stays intact**: a normal reboot starts RAIDiator or DIET again.
+- The **original firmware stays intact**: without the USB stick, the NAS starts RAIDiator
+  again.
 
 ## Required hardware
 
 - A **ReadyNAS Duo v1** (Infrant SPARC processor; the Duo v2 is different hardware).
 - A **USB stick** of at least 1 GB, plugged into the NAS.
-- A **3.3 V USB-to-serial adapter** connected to the NAS internal serial header (9600 baud).
-- A **Linux PC** on the same network, with Docker (TFTP server) and what is needed to build
-  the system (see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#build), ~15 GB free).
+- The NAS running its original firmware, **RAIDiator 4.1.x** (DIET installed on top of it
+  also works).
+- A **Linux PC** to build the system and prepare the stick (see
+  [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#build), ~15 GB free; Docker for the relay module).
+- For development only: a **3.3 V USB-to-serial adapter** on the NAS internal serial header
+  (9600 baud) and a TFTP server on the PC.
 
 ## Installation
 
-1. **Build the system** on the PC:
+The NAS keeps booting its original firmware from flash; on the system disk, the **relay**
+(a RAIDiator add-on) hands the NAS over to Linux 6.18 on the USB stick (details in
+[board/readynas-duo-v1/relay/](board/readynas-duo-v1/relay/README.md)). Without the stick, or
+if 6.18 failed to boot last time, RAIDiator starts as usual.
+
+1. **Build the system and the relay add-ons** on the PC:
    ```sh
    git clone --recursive https://github.com/beudbeud/ReadyNasNextGen.git
    cd ReadyNasNextGen
    make rapide        # downloads the prebuilt toolchain, then builds
+   make relay         # relay module for the original kernel (Docker + QEMU, ~10 min)
+   make relay-addon   # RAIDiator add-ons, checked on the PC
    ```
-   Output in `output-rapide/images/`: `vmlinux.k3` (the kernel) and `rootfs.tar` (the system).
+   Output: `output-rapide/images/vmlinux.bin` (the kernel), `rootfs.tar` (the system), and
+   the add-ons `output-relay/ReadyNasNextGen_relay_<version>.bin` and
+   `ReadyNasNextGen_relay_remove_<version>.bin`.
 
-2. **Prepare the USB stick**: one ext4 (or ext3) partition, then, as root, extract the system
-   into an **empty** `rootfs-6.18` directory at its root:
+2. **Prepare the USB stick** on the PC: one **ext3** partition (the original kernel cannot
+   read ext4, and the relay reads the stick), then, as root:
    ```sh
+   mkfs.ext3 -I 128 -L nas618 /dev/sdX1
    mount /dev/sdX1 /mnt
-   mkdir /mnt/rootfs-6.18
+   mkdir /mnt/rootfs-6.18 /mnt/boot
    tar -xpf output-rapide/images/rootfs.tar -C /mnt/rootfs-6.18
+   cp output-rapide/images/vmlinux.bin /mnt/boot/
+   (cd /mnt/boot && md5sum vmlinux.bin > vmlinux.bin.md5)
    umount /mnt
    ```
-   Plug the stick into the NAS. To update, extract into a new empty directory rather than over
-   the previous system.
+   To update, extract into a new empty `rootfs-6.18` rather than over the previous system,
+   and copy the new `vmlinux.bin` (and its `.md5`).
 
-3. **Boot the NAS on the new system**: start the TFTP server
-   (`tools/tftp-server.sh output-rapide/images`), open the serial console, power on the NAS and
-   interrupt `iboot` during boot. At the `iboot>` prompt:
-   ```
-   tftp <NAS-MAC> <NAS-IP> <PC-IP> vmlinux.k3 0x80004000
-   go 0x80004000
-   ```
-   `tools/iboot-cmd.py` does these steps automatically. The system boots from the stick in a
-   few seconds.
+3. **Install the relay add-on** from RAIDiator's web interface (Frontview): **System →
+   Update → Local**, select `ReadyNasNextGen_relay_<version>.bin`, **Upload and verify image**
+   (RAIDiator warns that the add-on is not signed by NETGEAR: expected), then **Perform System
+   Update**. The NAS reboots, RAIDiator installs the add-on during that boot and restarts by
+   itself about 2 minutes later. Install log on the NAS: `/var/log/relay-install.log`.
+   (With DIET installed, start RAIDiator once from DIET to reach Frontview; the relay then
+   starts before DIET's own boot switch.)
 
-4. **First access**: log in over SSH (`ssh root@<NAS-IP>`), set the web interface password with
+4. **Plug the stick into the NAS and restart it.** The original kernel starts, then Linux 6.18
+   from the stick. Without the stick, RAIDiator (or DIET) starts as before.
+
+5. **First access**: log in over SSH (`ssh root@<NAS-IP>`), set the web interface password with
    `diet-webpass`, then open `https://<NAS-IP>/` (user `admin`; accept the self-signed
    certificate).
+
+### Development: booting by TFTP
+
+Without the relay, 6.18 can be started from the PC: start the TFTP server
+(`tools/tftp-server.sh output-rapide/images`), open the serial console, power on the NAS and
+interrupt `iboot` during boot. At the `iboot>` prompt:
+```
+tftp <NAS-MAC> <NAS-IP> <PC-IP> vmlinux.k3 0x80004000
+go 0x80004000
+```
+`tools/iboot-cmd.py` does these steps automatically. The stick may then also be ext4.
 
 ## Your data (X-RAID)
 
@@ -77,15 +106,20 @@ to a standard Linux RAID1 are possible; they are described, with their precautio
 
 ## Current limitations
 
-- **Booting from the PC**: every boot needs the serial adapter and the TFTP server.
-  Standalone boot (without a PC) is being studied.
+- **Boot through the original firmware**: the NAS boots RAIDiator's 2.6.17 kernel first, then
+  the relay hands over to 6.18 (the stick must be ext3). The hand-over was validated on one NAS
+  (started from DIET); the add-on's own boot switch is tested in simulation only so far. If a
+  6.18 boot fails, the next power-on starts RAIDiator.
 - **Writing to an X-RAID volume**: reading is validated; writing (Storage card switch) has
   only been tried in simulation so far.
 
 ## Going back to the original system
 
-Just reboot the NAS normally: the original firmware boots from its flash memory, which this
-project never modifies.
+Unplug the stick and restart: RAIDiator starts. With the stick plugged in, RAIDiator once:
+`touch /.relay_skip_once` in 6.18. Never relay again: `touch /relay/disabled` on the system
+volume (from RAIDiator over SSH), or install `ReadyNasNextGen_relay_remove_<version>.bin` the
+same way as the relay add-on: it puts the previous `/sbin/init` back and deletes `/relay`.
+The flash memory, where the original firmware lives, is never modified.
 
 **Never write to the flash** (`iboot` NAND write commands, `/dev/mtd*`): a corrupted flash
 makes the NAS unusable without recovery hardware.
@@ -98,12 +132,14 @@ Detailed documentation:
   kernel parameters, source tree.
 - [docs/DIET.md](docs/DIET.md): the web interface and its differences from DIET.
 - [docs/XRAID.md](docs/XRAID.md): using X-RAID disks, writing, migrating to md.
+- [board/readynas-duo-v1/relay/](board/readynas-duo-v1/relay/README.md): the relay (boot
+  from the original kernel), its build and its add-ons.
 - [FEASIBILITY.md](FEASIBILITY.md): initial study.
 
 ## Credits and licences
 
-- Kernel, drivers and scripts: **GPL-2.0** (see `LICENSE`), written from the GPL sources of
-  the 2.6.17 kernel published by NETGEAR; the LP coprocessor firmware
+- Kernel, drivers, relay module and scripts: **GPL-2.0** (see `LICENSE`), written from the
+  GPL sources of the 2.6.17 kernel published by NETGEAR; the LP coprocessor firmware
   (`arch/sparc/kernel/padre_lpram.c`) comes from the same GPL sources.
 - Web interface: derived from [DIET](https://github.com/mfe-/ReadyNASDuoSparc) by davemmi
   (Duo v1 support: [mfe-/ReadyNASDuoSparc#16](https://github.com/mfe-/ReadyNASDuoSparc/pull/16)).

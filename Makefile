@@ -10,7 +10,11 @@
 #   make rapide          same system with the prebuilt toolchain (output-rapide/)
 #                        [TOOLCHAIN_ARCHIVE=/path/sdk.tar.xz for a local archive]
 #   make toolchain-sdk   rebuilds the prebuilt toolchain (SDK + legal-info, release/)
-#   make clean           removes output*/
+#   make relay           padre_relay.ko for the stock 2.6.17 kernel (QEMU + Docker,
+#                        output-relay/), see board/readynas-duo-v1/relay/README.md
+#   make relay-addon     RAIDiator add-ons installing/removing the relay, checked
+#                        by test-addon.sh [VERSION=x.y KO=/path/padre_relay.ko]
+#   make clean          removes output*/
 #   make buildroot-reset resets buildroot/ to the tag (drops our patches)
 #   make distclean       clean + buildroot-reset + removal of dl/
 #   make JOBS=4          limits parallelism (default: number of CPUs)
@@ -94,8 +98,17 @@ toolchain-sdk: | buildroot-patch
 		-cf $(TOP)/release/$(SDK_NAME)_legal-info.tar legal-info
 	cd $(TOP)/release && sha256sum $(SDK_NAME).tar.xz $(SDK_NAME)_legal-info.tar > SHA256SUMS
 
+# Relay: boot 6.18 from the stock 2.6.17 kernel (board/readynas-duo-v1/relay/)
+.PHONY: relay relay-addon
+RELAY := $(TOP)/board/readynas-duo-v1/relay
+relay:
+	$(RELAY)/build-module.sh
+relay-addon:
+	$(RELAY)/build-addon.sh
+	$(RELAY)/test-addon.sh
+
 clean:
-	rm -rf $(O) $(TOP)/output-rapide $(TOP)/output-toolchain
+	rm -rf $(O) $(TOP)/output-rapide $(TOP)/output-toolchain $(TOP)/output-relay
 
 distclean: clean buildroot-reset
 	rm -rf $(TOP)/dl

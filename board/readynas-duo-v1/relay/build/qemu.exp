@@ -1,0 +1,22 @@
+#!/usr/bin/expect -f
+# Boots NETGEAR's SPARC compile environment (Debian, gcc 3.3.5) without network,
+# its disk as a throw-away snapshot, mounts the work disk (/work/work.ext2 on
+# SCSI index 2 = /dev/sdb; a third SCSI target makes the esp driver fail),
+# runs guest.sh and powers off. A global -snapshot would discard the work disk too.
+set timeout 1800
+log_user 1
+spawn qemu-system-sparc -M SS-5 -m 128 -drive file=/img/compile_environment.qcow,if=scsi,index=0,snapshot=on \
+    -drive file=/work/work.ext2,format=raw,if=scsi,index=2,media=disk -net none -nographic
+expect "login:"
+send "root\r"
+expect "Password:"
+send "a\r"
+expect "# "
+send "mount -t ext2 /dev/sdb /mnt && sh /mnt/guest.sh > /mnt/out/build.log 2>&1; tail -5 /mnt/out/build.log; sync; umount /mnt; echo DONE-\$?\r"
+set timeout 14400
+expect -re "DONE-\[0-9\]+"
+expect "# "
+send "poweroff\r"
+set timeout 120
+expect -re "halted|Power down|Restarting system" { sleep 2 }
+exit 0

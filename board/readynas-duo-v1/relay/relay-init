@@ -1,0 +1,42 @@
+#!/bin/sh
+# relay-init: boot switch of the ReadyNasNextGen relay.
+# Installed as /sbin/init on the RAIDiator system volume by the relay add-on.
+# The previous init (RAIDiator's, or DIET's boot switch when DIET is installed)
+# is kept as /sbin/init.before-relay and started whenever the relay does not
+# take over. linuxrc runs it as pid 1, chrooted into the system volume, with
+# /proc unmounted; linuxrc reinstalls the firmware if /sbin/init is missing.
+#
+# No relay attempt when:
+#   /relay/disabled           never relay
+#   /.raidiator_once          RAIDiator requested once (DIET; left for DIET's switch)
+#   /.new_addons or /tmp/addons/*/install.sh
+#                             an add-on waits for RAIDiator to install it (rc3),
+#                             e.g. the relay remove add-on; once per set of
+#                             waiting add-ons, so a stuck add-on cannot block the relay
+# Otherwise relay-switch decides (/.relay_skip_once, USB stick, its
+# .relay_pending marker, image checks); it returns only if the previous init
+# should start.
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+R=
+if [ $$ -eq 1 ] && [ -x $R/relay/relay-switch ]; then
+	why=
+	[ -f $R/relay/disabled ] && why="/relay/disabled"
+	[ -f $R/.raidiator_once ] && why="/.raidiator_once"
+	P=`ls -l $R/tmp/addons/*/install.sh 2>/dev/null | tr -s ' \n' ' '`
+	if [ -z "$P" ]; then
+		rm -f $R/relay/addons-seen
+	elif [ "$P" != "`cat $R/relay/addons-seen 2>/dev/null`" ]; then
+		echo "$P" > $R/relay/addons-seen
+		why="add-on waiting for installation"
+	fi
+	[ -e $R/.new_addons ] && why="add-on waiting for installation"
+	if [ -n "$why" ]; then
+		echo "`date` relay: not tried ($why): starting the previous init" >> $R/relay/relay.log
+	else
+		M=
+		[ -d /proc/1 ] || { mount -t proc proc /proc && M=1; }
+		$R/relay/relay-switch
+		[ -n "$M" ] && umount /proc
+	fi
+fi
+exec $R/sbin/init.before-relay "$@"

@@ -15,6 +15,7 @@ two SATA disks.
 | Item | Status |
 |---|---|
 | Boot through iboot + TFTP, serial console ttyS1 (9600 baud) | works |
+| Boot through the original 2.6.17 kernel ([relay](#relay-booting-from-the-original-kernel)) | hand-over validated on one NAS (started from DIET's switch); `relay-init` and the add-ons tested in simulation |
 | MMU, caches, interrupts, timer, task sleep/wakeup | works |
 | FPU emulation (the Padre has none): hardware floating-point programs, `printf("%f")`, awk | works (fmovs/fnegs/fabss fixed in `math-emu/math_32.c`: the Padre emulates everything, including these copies) |
 | Built-in initramfs, `/init`, busybox, fork/exec, page faults | works |
@@ -61,7 +62,8 @@ Output in `output/images/`:
 * `vmlinux.k3`: the same, encrypted for iboot (`readynas_crypto -k3`, built during
   `post-image.sh`);
 * `rootfs.tar`: the system, to extract into `/rootfs-6.18` on an ext3/ext4 partition of a USB
-  stick (the initramfs looks for this directory and switches to it).
+  stick (the initramfs looks for this directory and switches to it); **ext3** when booting
+  through the relay.
 
 `post-image.sh` also checks the load address, the absence of `sdiv`/`sdivcc`/`casa` in the
 kernel, the system and the initramfs, that no floating-point instruction is executed by the
@@ -99,6 +101,66 @@ release. The SDK can also be used on its own: extract it, run
 `.div`/`.udiv` instead of `sdiv`). The legal-info archive contains the sources of gcc, binutils,
 uClibc-ng, the Linux headers and the host tools with their patches, plus
 `buildroot-patches/` (our v7 patch for Buildroot).
+
+## Relay: booting from the original kernel
+
+Sources, build and assumptions: [board/readynas-duo-v1/relay/](../board/readynas-duo-v1/relay/README.md).
+
+**How it works.** iboot and the NETGEAR 2.6.17 kernel boot from flash as usual, and linuxrc
+(RAIDiator's initrd) starts `/sbin/init` of the system volume as pid 1. The relay add-on puts
+its own boot switch there, `relay-init`; the previous init (RAIDiator's, or DIET's boot switch
+when DIET is installed) is kept as `/sbin/init.before-relay` and started whenever the relay
+does not take over. `relay-init` runs `/relay/relay-switch`, which loads the USB storage
+modules (nothing has loaded them yet at that point: `scsi_mod`, `sd_mod`, `ehci-hcd`,
+`usb-storage` from `/lib/modules/2.6.17.14ReadyNAS/` of the system volume), looks for an
+ext3/ext2 partition holding `rootfs-6.18/sbin/init`, checks `boot/vmlinux.bin` (and its
+`.md5`), loads `padre_relay.ko`, stages the image and has the trampoline copy it in test mode.
+Then it remounts `/` read-only, writes `rootfs-6.18/.relay_pending` on the stick and makes the
+module jump: reboot notifiers and `device_shutdown()`, DMA stopped (GMAC, PCI bus mastering),
+interrupts and timers off, caches written back and off, copy of the image to 0x8000_4000, MMU
+and PSR as iboot leaves them, `jmp 0x80004000`. The console shows `RCJ` (trampoline) then
+`LPK` (6.18 head).
+
+What the boot switch respects (from RAIDiator's linuxrc and rc3): linuxrc checks that
+`/sbin/init` exists before starting it and repairs or reinstalls the firmware otherwise, so
+the add-ons replace it only by `mv` of a checked file; linuxrc extracts uploaded add-ons into
+`/tmp/addons/` before starting init, and rc3 installs them, so `relay-init` lets RAIDiator
+boot while one is waiting (once per set of waiting add-ons); linuxrc unmounts `/proc` before
+starting init, so `relay-init` mounts it for `relay-switch` and unmounts it again.
+
+The USB stick must be **ext3** (or ext2): the 2.6.17 kernel has no ext4 and the marker is
+written there. The 6.18 initramfs mounts it with its ext4 driver, which does not change the
+ext3 features. Format it with `mkfs.ext3 -I 128` (128-byte inodes for 2.6.17).
+
+**Fallback.** Whenever something is missing or refused (no stick after 15 s, bad image, md5
+mismatch, module refused, copy test failed, cannot remount), `relay-switch` returns and the
+previous init starts; each boot is logged in `/relay/relay.log`. After the jump nothing can
+return to 2.6.17: if 6.18 does not complete its boot, power off/on. 6.18 removes
+`/.relay_pending` (its own root on the stick) in `S99relay-confirm`, its last init script; a
+marker still there at the next power-on means the 6.18 boot failed: `relay-switch` removes it
+and starts the previous init this time.
+
+**Disabling.**
+
+| Where | File | Effect |
+|---|---|---|
+| system volume (`/mnt/root` from DIET) | `/relay/disabled` | never relay |
+| system volume | `/relay/dry-run` | everything except the jump, then the previous init (tests) |
+| system volume | `/.relay_skip_once` | no relay once (removed when seen) |
+| system volume | `/.raidiator_once` | no relay (DIET's "RAIDiator once", left for DIET's switch) |
+| system volume | `/.new_addons`, `/tmp/addons/*/install.sh` | no relay while an add-on waits for installation |
+| stick, i.e. `/` in 6.18 | `/.relay_skip_once` | no relay once |
+| stick, i.e. `/` in 6.18 | `/.relay_pending` | written before the jump; still there = last 6.18 boot failed: no relay once |
+
+Or remove the stick, or install the `ReadyNasNextGen_relay_remove_<version>.bin` add-on (the
+previous `/sbin/init` is moved back). The relay add-on also migrates the hand-made install of
+the first tests (two lines in DIET's switch). Installing or updating DIET after the relay puts
+DIET's switch in front of `relay-init`: install the relay add-on again afterwards.
+
+**Build.** `make relay` builds `output-relay/padre_relay.ko` with NETGEAR's gcc 3.3.5 in
+their SPARC compile environment (QEMU in Docker), from their GPL 2.6.17 tree, both
+downloaded once into `dl/relay/`. `make relay-addon` builds the two RAIDiator add-ons from it
+and runs `test-addon.sh` (install, reinstall, remove in a simulated system volume).
 
 ## Kernel parameters (built-in command line, `board/readynas-duo-v1/linux-padre.config`)
 
@@ -152,6 +214,7 @@ board/readynas-duo-v1/
   initramfs/                     /init, `list` (gen_init_cpio), test sources
   rootfs-overlay/                ksmbd, NFS, fan control
   readynas_crypto/               iboot encryption tool (GPL), compiled by post-image.sh
+  relay/                         padre_relay.ko (2.6.17 module), relay-init, relay-switch, add-ons, build in QEMU
   post-image.sh
 tools/                           iboot-cmd.py (serial console), tftp-server.sh
 ```

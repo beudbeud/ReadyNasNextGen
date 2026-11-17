@@ -1,0 +1,120 @@
+#!/bin/sh
+# relay-switch: run by /sbin/init (relay-init) as a child of pid 1, before
+# the previous init (RAIDiator, or DIET) starts, on the RAIDiator system volume (2.6.17).
+# If a USB stick holds the Linux 6.18 system, hand the NAS over to it with
+# padre_relay.ko. Otherwise, or on any problem, return: the caller then
+# starts the previous init as usual.
+#
+# System volume:
+#   /relay/padre_relay.ko, /relay/relay-switch
+#   /relay/disabled          never relay
+#   /relay/dry-run           do everything except the jump (then the previous init)
+#   /relay/relay.log         what happened at each boot
+#   /.relay_skip_once        no relay once (removed when seen)
+# USB stick (first ext3/ext2 partition holding rootfs-6.18; 2.6.17 has no ext4):
+#   /rootfs-6.18/sbin/init           the 6.18 system
+#   /boot/vmlinux.bin                the raw 6.18 image (output/images/vmlinux.bin)
+#   /boot/vmlinux.bin.md5            optional, "md5sum vmlinux.bin" output
+#   /rootfs-6.18/.relay_pending      written before the jump, removed by 6.18
+#                                    (S99relay-confirm) once its boot is complete;
+#                                    still there at the next boot = 6.18 failed:
+#                                    removed, and the previous init starts this time
+#   /rootfs-6.18/.relay_skip_once    no relay once (can be created from 6.18)
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+export PATH
+D=/relay
+K=/mnt/relay-stick
+R=$K/rootfs-6.18
+IMG=$K/boot/vmlinux.bin
+WAIT=15		# seconds to wait for the USB stick
+
+log() { echo "`date` relay: $*" >> $D/relay.log 2>/dev/null; }
+out() { umount $K 2>/dev/null; log "$*: starting the previous init"; exit 0; }
+try_mount() { mount -t ext3 "$1" $K 2>/dev/null || mount -t ext2 "$1" $K 2>/dev/null; }
+
+[ -f $D/disabled ] && exit 0
+if [ -f /.relay_skip_once ]; then
+	rm -f /.relay_skip_once
+	log "no relay requested once (/.relay_skip_once): starting the previous init"
+	exit 0
+fi
+[ -f /proc/partitions ] || mount -t proc proc /proc
+mkdir -p $K
+
+# USB storage: not loaded yet at this point (RAIDiator does it later in its rc
+# scripts), from its /lib/modules/2.6.17.14ReadyNAS; no uhci-hcd.
+M=/lib/modules/`uname -r`/kernel/drivers
+for m in scsi/scsi_mod:scsi_mod scsi/sd_mod:sd_mod usb/host/ehci-hcd:ehci_hcd usb/storage/usb-storage:usb_storage; do
+	f=${m%%:*}; n=${m##*:}
+	grep -q "^$n " /proc/modules || insmod $M/$f.ko 2>/dev/null || log "insmod $f.ko failed"
+done
+
+STICK=
+n=0
+while [ -z "$STICK" ] && [ $n -le $WAIT ]; do
+	while read major minor blocks name; do
+		case "$name" in sd[a-z][0-9]*) ;; *) continue ;; esac
+		[ -b /dev/$name ] || mknod /dev/$name b $major $minor
+		try_mount /dev/$name || continue
+		if [ -e $R/sbin/init ] || [ -L $R/sbin/init ]; then
+			STICK=/dev/$name
+			break
+		fi
+		umount $K
+	done < /proc/partitions
+	[ -n "$STICK" ] && break
+	sleep 1
+	n=$((n + 1))
+done
+[ -n "$STICK" ] || { log "no USB stick with an ext3/ext2 rootfs-6.18 after ${WAIT}s: starting the previous init"; exit 0; }
+
+if [ -f $R/.relay_skip_once ]; then
+	rm -f $R/.relay_skip_once
+	out "no relay requested once from 6.18 (.relay_skip_once)"
+fi
+if [ -f $R/.relay_pending ]; then
+	rm -f $R/.relay_pending
+	out "the last 6.18 boot did not complete (.relay_pending still there)"
+fi
+[ -f $IMG ] || out "no /boot/vmlinux.bin on $STICK"
+if [ -f $IMG.md5 ] && [ -x /usr/bin/md5sum ]; then
+	set -- `cat $IMG.md5`; WANT=$1
+	set -- `md5sum $IMG`
+	[ "$1" = "$WANT" ] || out "vmlinux.bin does not match vmlinux.bin.md5"
+fi
+set -- `ls -l $IMG`; SIZE=$5
+
+insmod $D/padre_relay.ko || out "insmod padre_relay.ko failed"
+# load, check the header, run the trampoline copy test (no machine change)
+if ! cat $IMG > /proc/padre_relay/image || ! echo "test $SIZE" > /proc/padre_relay/control; then
+	cat /proc/padre_relay/control >> $D/relay.log 2>/dev/null
+	rmmod padre_relay
+	out "image refused or copy test failed"
+fi
+cat /proc/padre_relay/control >> $D/relay.log 2>/dev/null
+if [ -f $D/dry-run ]; then
+	rmmod padre_relay
+	out "dry run (/relay/dry-run)"
+fi
+
+log "starting Linux 6.18 from $STICK ($SIZE bytes)"
+umount /initrd 2>/dev/null && [ -x /sbin/blockdev ] && /sbin/blockdev --flushbufs /dev/ram0
+sync
+if ! mount -o remount,ro /; then
+	rmmod padre_relay
+	out "cannot remount / read-only"
+fi
+: > $R/.relay_pending
+if ! umount $K; then
+	rm -f $R/.relay_pending
+	mount -o remount,rw /
+	rmmod padre_relay
+	out "cannot unmount the stick"
+fi
+sync
+echo "go $SIZE" > /proc/padre_relay/control
+# only reached if padre_relay refused before its point of no return
+mount -o remount,rw /
+try_mount $STICK && rm -f $R/.relay_pending
+rmmod padre_relay
+out "padre_relay refused to jump"
