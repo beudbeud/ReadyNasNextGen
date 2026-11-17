@@ -5513,7 +5513,7 @@
 +static int temp_0, fan_rpm[2], power_switch, lm75_addr;
 +static int fan_req[2] = { 255, 255 };
 +
-+/* Initial setpoint (0-255): moderate, fan control (S45fan service, disk
++/* Initial setpoint (0-255): moderate, fan control (S03fan service, disk
 + * temperatures from drivetemp) then takes over.
 + * Safety net: without a write to fan0_speed_control for NO_CONTROL_TIMEOUT,
 + * go back to full speed (no daemon = no monitoring).

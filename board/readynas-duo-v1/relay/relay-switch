@@ -33,6 +33,9 @@ out() { umount $K 2>/dev/null; log "$*: starting the previous init"; exit 0; }
 try_mount() { mount -t ext3 "$1" $K 2>/dev/null || mount -t ext2 "$1" $K 2>/dev/null; }
 
 [ -f $D/disabled ] && exit 0
+# Quieter fan while the stick is read (2.6.17 interface, 0-255; the firmware's
+# own fan control never runs on this path). Linux 6.18 takes over after the jump.
+[ -w /proc/sys/dev/hwmon/fan0_speed_control ] && echo ${RELAY_FAN:-50} > /proc/sys/dev/hwmon/fan0_speed_control
 if [ -f /.relay_skip_once ]; then
 	rm -f /.relay_skip_once
 	log "no relay requested once (/.relay_skip_once): starting the previous init"

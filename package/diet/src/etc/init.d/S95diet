@@ -1,7 +1,7 @@
 #!/bin/sh
 # DIET: power button (/sbin/hotplug helper), disk spin-down, LEDs, time
 # sync (ntpd), monitoring (diet-hwmon) and the interface collector (the API in
-# the background, ready answers in /var/run/diet). Fan control is S45fan, the
+# the background, ready answers in /var/run/diet). Fan control is S03fan, the
 # shares S60nfs and S70ksmbd, the web interface S50lighttpd.
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 [ -r /etc/diet-lang.sh ] && . /etc/diet-lang.sh || tx() { printf "%s" "$1"; }
