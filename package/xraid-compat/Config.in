@@ -1,5 +1,5 @@
 config BR2_PACKAGE_XRAID_COMPAT
-	bool "xraid-compat (ReadyNAS X-RAID read/write, switch to md)"
+	bool "xraid-compat (ReadyNAS X-RAID read/write)"
 	depends on BR2_USE_MMU # lvm2, rsync
 	depends on BR2_TOOLCHAIN_HAS_THREADS # lvm2
 	depends on !BR2_STATIC_LIBS # lvm2 standard install
@@ -13,9 +13,10 @@ config BR2_PACKAGE_XRAID_COMPAT
 	help
 	  X-RAID compatibility layer (ReadyNAS Duo v1, RAIDiator 4.x)
 	  for Linux 6.18: xraid-info (read-only analysis of the "WGao"
-	  superblock, mirror check, SMART), nas-raid (dm-linear + md
-	  assembly without superblock, LVM, /c through fuse2fs;
-	  migration to md) and S35storage.
+	  superblock, mirror check, SMART), xraid-sb (keeps the X-RAID
+	  superblock up to date like RAIDiator), nas-raid (dm-linear +
+	  md assembly without superblock, LVM, /c through fuse2fs) and
+	  S35storage. md volumes: disabled for now.
 	  Kernel: CONFIG_BLK_DEV_DM, CONFIG_MD_RAID1, CONFIG_FUSE_FS.
 	  See docs/XRAID.md.
 

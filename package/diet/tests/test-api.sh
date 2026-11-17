@@ -97,7 +97,7 @@ if [ -n "$del" ]; then grep -v "^$1:" "$db" > "$db.t"; mv "$db.t" "$db"
 else IFS= read -r p1; IFS= read -r p2; [ "$p1" = "$p2" ] || exit 1; printf '%s' "$p1" > "$DIET_ROOT/password.log"; echo "$1:SIMULATED" >> "$db"; fi
 EOF
 chmod 755 "$R"/bin/ksmbd.adduser
-for s in S45fan S60nfs S70ksmbd S95diet S50avahi-daemon S51webdav S60minidlnad S61rsyncd; do
+for s in S03fan S60nfs S70ksmbd S95diet S50avahi-daemon S51webdav S60minidlnad S61rsyncd; do
 	printf '#!/bin/sh\necho "%s $*" >> "$DIET_ROOT/cmd.log"\n' "$s" > "$R/etc/init.d/$s"; chmod 755 "$R/etc/init.d/$s"
 done
 for s in diet-notify diet-alerts; do ln -s "$SRC/usr/sbin/$s" "$R/bin/$s"; done
@@ -154,11 +154,11 @@ check "diet-alerts: nothing if healthy" '[ -z "$($SH "$SRC"/usr/sbin/diet-alerts
 
 # ---------- hardware settings ----------
 api GET a=config
-check "config: reads fan.conf and diet.conf" "json 'j[\"FAN_PWM_MIN\"]==50 and j[\"PERIOD\"]==60 and j[\"SPINDOWN_MIN\"]==30'"
+check "config: reads fan.conf and diet.conf" "json 'j[\"FAN_PWM_MIN\"]==30 and j[\"PERIOD\"]==60 and j[\"SPINDOWN_MIN\"]==30'"
 api POST a=config 'FAN_PWM_MIN=60&TEMP_HIGH=52&SPINDOWN_MIN=10'
 check "config: saved (200)" '[ "$ST" = 200 ]'
 check "config: fan.conf changed, comment kept" 'grep -q "^FAN_PWM_MIN=60 .*# idle setpoint" "$R"/etc/fan.conf && grep -q "^TEMP_HIGH=52" "$R"/etc/fan.conf'
-check "config: padre-fan restarted, spin-down applied" 'grep -q "S45fan restart" "$R"/cmd.log && grep -q "hdparm -S 120 /dev/sda" "$R"/cmd.log'
+check "config: padre-fan restarted, spin-down applied" 'grep -q "S03fan restart" "$R"/cmd.log && grep -q "hdparm -S 120 /dev/sda" "$R"/cmd.log'
 api POST a=config 'FAN_PWM_MIN=5'
 check "config: minimum too low refused (400)" '[ "$ST" = 400 ]'
 api POST a=config 'PERIOD=600'
@@ -386,7 +386,7 @@ check "Restart NFS allowed again" '[ "$ST" = 200 ] && grep -q "S60nfs restart" "
 # ---------- storage: X-RAID (compatibility) and md, through nas-raid ----------
 # real nas-raid and xraid-info built for the host, on fake X-RAID images
 XC=$HERE/../../xraid-compat
-cc -O2 -o "$R"/bin/xraid-info "$XC"/src/xraid-info.c && ln -s "$XC"/src/nas-raid "$R"/bin/nas-raid
+cc -O2 -o "$R"/bin/xraid-info "$XC"/src/xraid-info.c && cc -O2 -o "$R"/bin/xraid-sb "$XC"/src/xraid-sb.c && ln -s "$XC"/src/nas-raid "$R"/bin/nas-raid
 for s in clean dirty degraded md; do python3 "$XC"/tests/make-images.py "$R/img/$s" $s > /dev/null; done
 stk() {	# stk scenario "content of nas-raid.mode"
 	export NAS_RAID_DISKS="$(ls "$R/img/$1"/*.img | tr '\n' ' ')"
@@ -395,27 +395,20 @@ stk() {	# stk scenario "content of nas-raid.mode"
 }
 stk clean xraid-rw
 check "storage, clean X-RAID: rw, 2 sections, base/mirror" "json 'j[\"mode\"]==\"xraid-rw\" and j[\"xraid\"][\"mode\"]==\"rw\" and len(j[\"xraid\"][\"sections\"])==2 and j[\"xraid\"][\"mirror\"].endswith(\"sda.img\")'"
+check "storage: superblock state for the card (clean, counters, disk states, writer)" "json 'j[\"xraid\"][\"clean\"]==1 and j[\"xraid\"][\"failed_disks\"]==0 and [d[\"state\"] for d in j[\"xraid\"][\"disks\"]]==[\"online\",\"online\"] and j[\"sb_writer\"]==\"yes\"'"
 stk dirty 'xraid-ro unclean_shutdown'
 check "storage, dirty X-RAID: read-only, reason unclean_shutdown" "json 'j[\"mode\"]==\"xraid-ro\" and [r[\"code\"] for r in j[\"xraid\"][\"reasons\"]]==[\"unclean_shutdown\"]'"
 stk degraded 'xraid-ro missing_disk'
 check "storage, degraded X-RAID: read-only, a single disk" "json 'j[\"xraid\"][\"mirror\"]==\"\" and j[\"xraid\"][\"reasons\"][0][\"code\"]==\"missing_disk\"'"
 stk md md
-check "storage md: mode md" "json 'j[\"mode\"]==\"md\" and j[\"migration\"][\"step\"]==\"\"'"
+check "storage md: mode md" "json 'j[\"mode\"]==\"md\"'"
 stk clean xraid-rw
-cp "$R"/proc/mounts "$R"/mounts.bak; echo '/dev/root / ext4 rw 0 0' > "$R"/proc/mounts	# simulated /c too full for the image
+# md wizards: disabled for now (409), nas-raid not started
+: > "$R"/cmd.log
 api POST a=raid_plan 'op=migrate'
-mv "$R"/mounts.bak "$R"/proc/mounts
-check "raid_plan migrate: dry run (mdadm --create, rsync)" 'case "$OUT" in *"mdadm --create /dev/md/donnees"*"rsync -aH"*) true;; *) false;; esac'
-api POST a=raid_run 'op=migrate&yes=1'
-check "raid_run: refused without phrase" '[ "$ST" = 400 ]'
-api POST a=raid_run 'op=migrate&confirm=MIGRATE'
-check "raid_run: refused without the second confirmation" '[ "$ST" = 400 ]'
-api POST a=raid_run "op=migrate&confirm=$(enc "MIGRATE';reboot")&yes=1"
-check "raid_run: phrase with forbidden characters refused" '[ "$ST" = 400 ]'
-api POST a=raid_run 'op=create&d=sdz&confirm=ERASE+sdz&yes=1'
-check "raid_run: unknown disk refused" '[ "$ST" = 400 ]'
-api POST a=raid_plan 'op=rm'
-check "raid_plan: unknown operation refused" '[ "$ST" = 400 ]'
+check "raid_plan: md disabled (409)" '[ "$ST" = 409 ] && case "$OUT" in *"md support is disabled"*) true;; *) false;; esac'
+api POST a=raid_run 'op=create&d=sda&confirm=ERASE+sda&yes=1'
+check "raid_run: md disabled (409), nas-raid not started" '[ "$ST" = 409 ] && ! grep -q "nas-raid" "$R"/cmd.log'
 api POST a=raid_verify ''
 check "raid_verify: started" '[ "$ST" = 200 ]'
 sleep 3	# the check (sparse 4 GB images) writes in $R: let it finish
@@ -425,6 +418,10 @@ check "storage log: nas-raid log" '[ "$ST" = 200 ]'
 # dm/LVM/fuse2fs simulated; umount refuses while $R/busy exists (open files)
 for c in dmsetup lvm fuse2fs; do stub $c; done
 stub umount '[ ! -e "$DIET_ROOT/busy" ]'
+# both X-RAID legs healthy for nas-raid (md10, md11 idle): a clean unmount marks the superblock clean
+MDSTAT_SAVE=$(cat "$R"/proc/mdstat)
+printf 'md10 : active raid1 dm-1[1] dm-0[0]\n      1 blocks [2/2] [UU]\nmd11 : active raid1 dm-3[1] dm-2[0]\n      1 blocks [2/2] [UU]\n' > "$R"/proc/mdstat
+for i in 0 1; do mkdir -p "$R/sys/block/md1$i/md"; echo idle > "$R/sys/block/md1$i/md/sync_action"; done
 i=0; while [ $i -lt 30 ] && grep -qs '^running' "$R"/var/lib/nas-raid/verify.state; do sleep 1; i=$((i + 1)); done
 rm -f "$R"/var/lib/nas-raid/xraid-dirty
 export NAS_RAID_DISKS="$(ls "$R/img/clean"/*.img | tr '\n' ' ')"
@@ -467,6 +464,7 @@ check "xraid_rw: refused on an md volume (409)" '[ "$ST" = 409 ] && grep -qx "XR
 api POST a=xraid_rw 'on=2'
 check "xraid_rw: invalid value refused" '[ "$ST" = 400 ]'
 echo 'xraid-rw' > "$R"/var/run/nas-raid.mode; rm -f "$R"/etc/nas-raid.conf "$R"/etc/nas-raid.conf.bak "$R"/var/lib/nas-raid/xraid-dirty
+echo "$MDSTAT_SAVE" > "$R"/proc/mdstat; rm -rf "$R"/sys/block/md10 "$R"/sys/block/md11
 unset NAS_RAID_DISKS
 
 # ---------- collector cache (S95diet: the API with DIET_COLLECT=1) ----------

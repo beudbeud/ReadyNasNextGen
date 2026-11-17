@@ -37,9 +37,9 @@ in `package/diet/src/`, laid out as on the target system.
 | Web server | busybox httpd behind a static lighttpd | lighttpd alone: mbedTLS TLS, `mod_auth` (SHA-512 htpasswd), `mod_cgi` |
 | Shares | Samba 3.6, `smb.conf` + `shares.conf`, `smbpasswd` | ksmbd: `/etc/ksmbd/ksmbd.conf`, `ksmbd.adduser` (password on standard input), `ksmbd.control -r` |
 | NFS | RAIDiator programs in a chroot (`diet-nfs`) | kernel nfsd + nfs-utils 2.x: the interface edits `/etc/exports` and runs `exportfs -ra` |
-| Storage | X-RAID (`/proc/xraid`), LVM `/dev/c/c` | md (`/proc/mdstat`, `mdadm --detail`), `df /c`, libata disks `sda`/`sdb` (bay = ata port); existing X-RAID and switch to md through `nas-raid` (docs/XRAID.md) |
+| Storage | X-RAID (`/proc/xraid`), LVM `/dev/c/c` | md (`/proc/mdstat`, `mdadm --detail`), `df /c`, libata disks `sda`/`sdb` (bay = ata port); existing X-RAID through `nas-raid` (docs/XRAID.md); md: disabled for now (docs/XRAID-MIGRATION.md) |
 | Temperatures | `smartctl` every 5 min | drivetemp (`/sys/block/sdX/device/hwmon/*/temp1_input`); `smartctl` used only if present |
-| Fan | controlled by `diet-hwmon` | controlled by `padre-fan` (S45fan); the interface shows its state (`/var/run/fan.state`) and edits `/etc/fan.conf` (curve, period, thresholds), then restarts the service |
+| Fan | controlled by `diet-hwmon` | controlled by `padre-fan` (S03fan); the interface shows its state (`/var/run/fan.state`) and edits `/etc/fan.conf` (curve, period, thresholds), then restarts the service |
 | `diet-hwmon` | control, SMART, history, alerts, emergency shutdown | monitoring only: history, SMART if present, Telegram alerts. The emergency shutdown is done by `padre-fan` |
 | Power button | `diet-hotplug` (`/proc/sys/kernel/hotplug`) | `/sbin/hotplug` → `diet-hotplug` (CONFIG_UEVENT_HELPER): held 3 s = power off |
 | Network | `/etc/diet-net.conf` + `S41diet-net` | `/etc/network/interfaces` (busybox ifupdown), applied at next boot |
@@ -141,9 +141,14 @@ is set again. Refused names: those of a system group (`audio`, `video`,
 
 ## Storage: writing to the X-RAID
 
-The "Storage /c" card shows, in X-RAID mode only (not in md),
-the "Allow writing on the X-RAID" switch, checked if `XRAID_RW=yes`
-in `/etc/nas-raid.conf` (`xraid_rw` field of `GET ?a=storage`).
+The "Storage /c" card shows the X-RAID state as RAIDiator sees it (superblock
+clean or in use, each disk online/faulty/ready, counters, sections in sync) and,
+in X-RAID mode only (not in md), the "Allow writing on the X-RAID" switch,
+checked if `XRAID_RW=yes` in `/etc/nas-raid.conf` (`xraid_rw` field of
+`GET ?a=storage`). It is disabled when the superblock writer `xraid-sb` is
+missing (`sb_writer` field): read-only only. md actions (migrate, create) are
+disabled for now: `POST ?a=raid_plan|raid_run` answer 409
+(docs/XRAID-MIGRATION.md).
 
 - **Enable**: warning dialog (writing through fuse2fs to the RAIDiator ext3 with
   16 KB blocks, backup recommended), checkbox **and**

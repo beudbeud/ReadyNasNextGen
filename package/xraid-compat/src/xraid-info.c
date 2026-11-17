@@ -282,9 +282,11 @@ static int analyse(int argc, char **argv, int k)
 	struct section S[7];
 	struct part P[MAXP];
 	int nd = argc, i, j, ref = -1, ns = 0, np = 0, base = -1, mirror = -1, rd = -1;
-	int diffsb = 0, diff = -2;
+	int diffsb = 0, diff = -2, torn = 0;
 	const unsigned char *sb;
 	unsigned v, nr_disks, raid_disks, fake, clean, nb_lun, ver[3];
+	unsigned utime, active, working, failed, spare;
+	u64 l_size = 0;
 	char buf[64];
 
 	if (nd < 1 || nd > MAXD)
@@ -292,6 +294,11 @@ static int analyse(int argc, char **argv, int k)
 	for (i = 0; i < nd; i++) {
 		open_disk(&D[i], argv[i]);
 		read_disk(&D[i]);
+		/* RAIDiator writes the "bis" copy just before its main copy, with
+		 * the same bytes: a difference means an interrupted update */
+		for (j = 0; j < 4; j += 2)
+			if (D[i].magic[j] == WGAO && memcmp(D[i].sb[j], D[i].sb[j + 1], SB_LEN))
+				torn = 1;
 	}
 	/* reference superblock: identical on the majority, otherwise the newest */
 	for (i = 0; i < nd; i++) {
@@ -322,6 +329,13 @@ static int analyse(int argc, char **argv, int k)
 	raid_disks = be32(sb + 0x28);
 	fake = sb[0x33];
 	clean = be32(sb + 0x84) & 1;
+	/* 0x80: shown as "update_time" by RAIDiator, but used as a flag: 1 =
+	 * reinstall (factory default) requested for the next RAIDiator boot */
+	utime = be32(sb + 0x80);
+	active = be32(sb + 0x88);
+	working = be32(sb + 0x8C);
+	failed = be32(sb + 0x90);
+	spare = be32(sb + 0x94);
 	nb_lun = be32(sb + 0x100);
 
 	/* checks */
@@ -333,8 +347,14 @@ static int analyse(int argc, char **argv, int k)
 		reason(1, "backup_superblock", "current superblock missing: reading the backup");
 	if (diffsb)
 		reason(1, "superblocks_differ", "the superblocks of the disks differ");
+	if (torn)
+		reason(1, "superblock_torn", "a superblock and its copy differ (interrupted superblock update)");
 	if (!clean)
 		reason(1, "unclean_shutdown", "superblock marked as not cleanly shut down (clean shutdown = 0)");
+	if (utime)
+		reason(1, "reinstall_pending", "RAIDiator reinstall flag set (0x80): RAIDiator would reset the NAS at its next boot");
+	if (failed || working < nr_disks || active != working)
+		reason(1, "degraded", "RAIDiator counters: a disk failed or is missing (active/working/failed)");
 	if (nr_disks != 2 || raid_disks != 2 || fake)
 		reason(1, "not_2_disks", "one-disk configuration (fake mirror) or more than 2 disks");
 	if (v == 0 || v > D[ref].n - 4096)
@@ -350,14 +370,17 @@ static int analyse(int argc, char **argv, int k)
 		S[ns].alive = 1;
 		S[ns].raid = e[5];
 		/* +4 carrying disks (bits 0 and 1: driver dmap), +7 "initialized"
-		 * (1 = mirror synchronised). +8 is NOT a resume point: it stays
-		 * non-zero on a healthy volume (initialized=1, redundant under RAIDiator). */
+		 * (1 = mirror synchronised; RAIDiator resyncs a section at 0 and
+		 * resets it to 0 when a disk fails). +8 is a sync watermark that
+		 * RAIDiator only resumes from in RAID 4; on a RAID 1 it can keep a
+		 * stale non-zero value on a healthy volume (docs/XRAID-FORMAT.md). */
 		S[ns].dmap = e[4];
 		S[ns].init = e[7];
 		S[ns].init_mark = be32(e + 8);
 		S[ns].start = be32(e + 0x10);
 		S[ns].nb = be32(e + 0x18);
 		S[ns].end = S[ns].start + S[ns].nb;
+		l_size += S[ns].nb;
 		if (S[ns].end > v || S[ns].end < S[ns].start)
 			S[ns].end = v;
 		if (S[ns].raid != 1)
@@ -373,6 +396,13 @@ static int analyse(int argc, char **argv, int k)
 	for (i = 1; i < ns; i++)
 		if (S[i].start < S[i - 1].end)
 			reason(2, "sections", "overlapping sections");
+	/* 0x100 = number of sections, 0x48 = sum of their declared sizes */
+	if ((unsigned)ns != nb_lun || l_size != be32(sb + 0x48))
+		reason(1, "inconsistent_superblock", "section count or total size differs from the header");
+	/* header 0x30 parity (mirror) and 0x32 base: relative channels (entry - 1) */
+	if (sb[0x30] > 10 || sb[0x32] > 10
+	    || (!fake && (sb[0x200 + 128 * (sb[0x30] + 1)] != 1 || sb[0x200 + 128 * (sb[0x32] + 1) + 1] != 1)))
+		reason(1, "inconsistent_superblock", "base/mirror in the header differ from the disk table");
 
 	/* disks: role, state in the reference table */
 	for (i = 0; i < nd; i++) {
@@ -405,7 +435,8 @@ static int analyse(int argc, char **argv, int k)
 		if (D[i].ref < 0)
 			continue;
 		st = be32(sb + 0x200 + 128 * D[i].channel + 0x10);
-		if (st != 1)
+		/* +0x14 "present": 0 once RAIDiator has taken the disk out */
+		if (st != 1 || be32(sb + 0x200 + 128 * D[i].channel + 0x14) != 1)
 			reason(1, "disk_not_online", "a disk is not \"online\" (rebuilding, spare or faulty)");
 	}
 	/* disk read in read-only mode: base if online, otherwise mirror if online */
@@ -471,6 +502,11 @@ static int analyse(int argc, char **argv, int k)
 	key_s("ID", buf);
 	key_n("CTIME", be32(sb + 0x18));
 	key_n("CLEAN", clean);
+	key_n("UTIME", utime);
+	key_n("ACTIVE_DISKS", active);
+	key_n("WORKING_DISKS", working);
+	key_n("FAILED_DISKS", failed);
+	key_n("SPARE_DISKS", spare);
 	key_n("NR_DISKS", nr_disks);
 	key_s("BASE", base >= 0 ? D[base].path : "");
 	key_s("MIRROR", mirror >= 0 ? D[mirror].path : "");
@@ -521,8 +557,16 @@ static int analyse(int argc, char **argv, int k)
 	}
 	if (json) {
 		printf("],\"reasons\":[");
-		for (i = 0; i < nr; i++)
-			printf("%s{\"code\":\"%s\",\"text\":\"%s\"}", i ? "," : "", r_code[i], r_text[i]);
+		for (i = 0; i < nr; i++) {
+			const char *c;
+			printf("%s{\"code\":\"%s\",\"text\":\"", i ? "," : "", r_code[i]);
+			for (c = r_text[i]; *c; c++) {	/* some texts quote words */
+				if (*c == '"')
+					putchar('\\');
+				putchar(*c);
+			}
+			printf("\"}");
+		}
 		printf("]}\n");
 	} else {
 		printf("XR_REASONS='");

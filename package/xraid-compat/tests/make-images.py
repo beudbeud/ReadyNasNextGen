@@ -8,7 +8,9 @@ mark at N-2, MBR on the base disk only, sections 0 (32, 4 096 000) and
 Nothing comes from a real disk: identifiers and dates are made up.
 
   make-images.py FOLDER SCENARIO [N]
-SCENARIO: clean | dirty | degraded | sync | different | md | big
+SCENARIO: clean | dirty | degraded | sync | different | md | big | reinstall
+          | counters | torn
+          (any other name: same as clean)
 Writes FOLDER/sda.img (mirror, SATA channel 0) and FOLDER/sdb.img (base,
 SATA channel 1), as on the Duo where the base was hde; "degraded" writes
 only sdb.img; "md" adds an md 1.2 superblock on sda.img (already migrated disk).
@@ -46,8 +48,9 @@ def superblock(n, v, sections, disks, clean=True, init_mark=0, this=1, mbr_table
     struct.pack_into(">II", sb, 0x14, 0x0A0B0C0D, 1200000000)    # made-up id and date
     struct.pack_into(">IIII", sb, 0x1C, 1, v, 2, 2)
     sb[0x30:0x34] = bytes([0, 1, 1, 0])     # parity = channel 0, LBA48, base = channel 1, no fake
+    struct.pack_into(">I", sb, 0x48, sum(nb for _, nb in sections))   # l_size
     struct.pack_into(">I", sb, 0x84, 1 if clean else 0)
-    struct.pack_into(">IIII", sb, 0x88, 2, 2, 0, 0)
+    struct.pack_into(">IIII", sb, 0x88, 2, 2, 0, 0)    # active, working, failed, spare
     struct.pack_into(">I", sb, 0x100, len(sections))
     for idx, (mirror, state) in disks.items():
         o = 0x200 + 128 * idx
@@ -70,6 +73,14 @@ def superblock(n, v, sections, disks, clean=True, init_mark=0, this=1, mbr_table
         struct.pack_into(">I", sb, o + 0x10, start)
         struct.pack_into(">I", sb, o + 0x18, nb)
     sb[0x1460:0x14E0] = sb[0x200 + 128 * this:0x280 + 128 * this]
+    # diskid: IDENTIFY of each member as RAIDiator stores it (big-endian words,
+    # strings in reading order), made-up model and serial numbers
+    for k in range(2):
+        o = 0x14E0 + 512 * k
+        struct.pack_into(">H", sb, o, 0x427A)
+        sb[o + 20:o + 40] = b"EXAMPLE-SERIAL-%04d " % k
+        sb[o + 54:o + 94] = b"EXAMPLE MODEL 750GB".ljust(40)
+        struct.pack_into(">Q", sb, o + 200, n)        # words 100-103: N
     return sb
 
 
@@ -109,8 +120,14 @@ def main():
                 write(f, 4096032, b"DIFFER")              # 1st sample of section 1
             sb = superblock(n, v, sections, disks, clean=(scen != "dirty"),
                             init_mark=(123456 if scen == "sync" else 0), this=channel, mbr_table=table)
+            if scen == "reinstall":
+                struct.pack_into(">I", sb, 0x80, 1)       # RAIDiator reinstall flag
+            if scen == "counters":
+                struct.pack_into(">III", sb, 0x88, 1, 1, 1)   # RAIDiator saw a failed disk
             for off in (4096, 4072, 4048, 4024):
                 write(f, n - off, sb)
+            if scen == "torn" and name == "sdb":
+                write(f, n - 4072, sb[:0x84] + b"\0\0\0\0" + sb[0x88:])   # copy updated, main not
             write(f, n - 2, b"WGam")
             if scen == "md" and name == "sda":
                 for off in (4096, 4072, 4048, 4024):      # nas-raid erases the X-RAID zone

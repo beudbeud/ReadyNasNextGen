@@ -247,16 +247,6 @@ dialog h3{margin:0 0 8px;font-size:16px}
   </section>
 </div>
 <div class="toast" id="toast"></div>
-<dialog id="wiz"><form method="dialog">
-  <h3 id="wizt"></h3>
-  <p class="small" id="wizw" style="color:var(--bad)"></p>
-  <div class="btns" id="wizd"></div>
-  <button class="b" type="button" id="wizp">Show the commands (dry run)</button>
-  <pre id="wizo" style="display:none"></pre>
-  <p><label><input type="checkbox" id="wizc"> I understand that the chosen disks will be erased and that going back to X-RAID and RAIDiator will no longer be possible.</label></p>
-  <p class="small"><span id="wizl"></span><br><input class="inp" id="wizi" autocomplete="off" spellcheck="false" style="width:100%"></p>
-  <div class="btns"><span class="sp"></span><button class="b" value="cancel">Cancel</button><button class="b danger" type="button" id="wizgo" disabled>Start</button></div>
-</form></dialog>
 <dialog id="xrwd"><form method="dialog">
 <h3>Allow writing on the X-RAID</h3>
 <p class="small" style="color:var(--bad)">Writing goes through fuse2fs on the ext3 file system with 16 KB blocks created by RAIDiator, every write going to both disks. This path has not been tested for long yet: a backup of /c is strongly recommended. The volume is unmounted and mounted again; SMB, NFS, DLNA, rsync and WebDAV are stopped meanwhile. The safeguards of nas-raid may keep it read-only.</p>
@@ -445,8 +435,6 @@ const I18N = {
   "reading the state of {0}…": ["lecture de l’état de {0}…", "lese Zustand von {0} …"],
   "failed": ["en panne", "ausgefallen"],
   "Fan stopped? {0} rpm": ["Ventilateur arrêté ? {0} tr/min", "Lüfter steht? {0} U/min"],
-  "Show the commands (dry run)": ["Afficher les commandes (essai à blanc)", "Befehle anzeigen (Probelauf)"],
-  "I understand that the chosen disks will be erased and that going back to X-RAID and RAIDiator will no longer be possible.": ["J’ai compris que les disques désignés seront effacés et que le retour au X-RAID et à RAIDiator ne sera plus possible.", "Mir ist klar, dass die gewählten Platten gelöscht werden und keine Rückkehr zu X-RAID und RAIDiator mehr möglich ist."],
   "Cancel": ["Annuler", "Abbrechen"],
   "Start": ["Lancer", "Starten"],
   "X-RAID, read and write": ["X-RAID, lecture et écriture", "X-RAID, Lesen und Schreiben"],
@@ -457,20 +445,32 @@ const I18N = {
   "in sync": ["synchronisée", "synchron"],
   "sync unfinished": ["synchronisation inachevée", "Synchronisation unvollständig"],
   "Mirror check": ["Vérification du miroir", "Spiegelprüfung"],
+  "Superblock": ["Superbloc", "Superblock"],
+  "clean": ["propre", "sauber"],
+  "in use or unclean shutdown": ["en cours d’utilisation ou arrêt brutal", "in Benutzung oder harter Stopp"],
+  "base": ["base", "Basis"],
+  "mirror": ["miroir", "Spiegel"],
+  "online": ["en ligne", "online"],
+  "faulty": ["en panne", "defekt"],
+  "ready": ["en reconstruction", "im Wiederaufbau"],
+  "spare": ["de réserve", "Reserve"],
+  "Disks": ["Disques", "Platten"],
+  "{0} working, {1} failed": ["{0} en service, {1} en panne", "{0} in Betrieb, {1} ausgefallen"],
+  "superblock writer (xraid-sb) missing: read-only only": ["outil d’écriture du superbloc (xraid-sb) absent : lecture seule uniquement", "Superblock-Schreiber (xraid-sb) fehlt: nur Lesen"],
+  "a superblock and its copy differ (interrupted update)": ["un superbloc et sa copie diffèrent (mise à jour interrompue)", "ein Superblock und seine Kopie unterscheiden sich (unterbrochene Aktualisierung)"],
+  "RAIDiator reinstall flag set: RAIDiator would reset the NAS at its next boot": ["drapeau de réinstallation RAIDiator posé : RAIDiator réinitialiserait le NAS à son prochain démarrage", "RAIDiator-Neuinstallationsflag gesetzt: RAIDiator würde das NAS beim nächsten Start zurücksetzen"],
+  "RAIDiator counters: a disk failed or is missing": ["compteurs RAIDiator : un disque est en panne ou absent", "RAIDiator-Zähler: eine Platte ist ausgefallen oder fehlt"],
+  "superblock inconsistent (sections, sizes or roles)": ["superbloc incohérent (sections, tailles ou rôles)", "Superblock unstimmig (Bereiche, Größen oder Rollen)"],
+  "the superblock could not be marked “in use”": ["le superbloc n’a pas pu être marqué « en cours d’utilisation »", "der Superblock konnte nicht als „in Benutzung“ markiert werden"],
   "never done": ["jamais faite", "nie"],
   "running {0} %": ["en cours {0} %", "läuft {0} %"],
   "identical on {0}": ["identique le {0}", "identisch am {0}"],
   "{0} zones differ": ["{0} zones différentes", "{0} Bereiche verschieden"],
   "read errors": ["erreurs de lecture", "Lesefehler"],
-  "Migration to md: {0}": ["Migration vers md : {0}", "Umstellung auf md: {0}"],
   "Check the mirror": ["Vérifier le miroir", "Spiegel prüfen"],
-  "Migrate to md": ["Migrer vers md", "Auf md umstellen"],
-  "Finish the migration": ["Terminer la migration", "Umstellung abschließen"],
-  "Create an md RAID": ["Créer un RAID md", "md-RAID anlegen"],
   "Storage log": ["Journal du stockage", "Speicherprotokoll"],
   "Type “{0}” to confirm:": ["Tapez « {0} » pour confirmer :", "„{0}“ eintippen zum Bestätigen:"],
   "Read both disks entirely and compare them (read-only, several hours)?": ["Lire tout le contenu des deux disques et les comparer (lecture seule, plusieurs heures) ?", "Beide Platten vollständig lesen und vergleichen (nur Lesen, mehrere Stunden)?"],
-  "The mirror disk leaves the X-RAID and is reformatted as md; the data is copied from the base disk, then checked. The base disk is only erased at “Finish the migration”.": ["Le disque miroir est retiré du X-RAID et reformaté en md ; les données sont recopiées depuis le disque base, puis vérifiées. Le disque base n’est effacé qu’à l’étape « Terminer la migration ».", "Die Spiegelplatte verlässt das X-RAID und wird als md formatiert; die Daten werden von der Basisplatte kopiert und geprüft. Die Basisplatte wird erst bei „Umstellung abschließen“ gelöscht."],
   "Services": ["Services", "Dienste"],
   "A service stopped here stays stopped after the NAS restarts.": ["Un service arrêté ici reste arrêté après un redémarrage du NAS.", "Ein hier gestoppter Dienst bleibt auch nach einem Neustart des NAS gestoppt."],
   "running": ["en marche", "läuft"],
@@ -499,8 +499,6 @@ const I18N = {
   "set the password again to enable WebDAV/rsync": ["mot de passe à redéfinir pour activer WebDAV/rsync", "Passwort neu setzen, um WebDAV/rsync zu aktivieren"],
   "active": ["actif", "aktiv"],
   "The same password opens WebDAV and rsync (personal folder /c/home/name and shares). An account created earlier must set its password again.": ["Le même mot de passe ouvre WebDAV et rsync (dossier personnel /c/home/nom et partages). Un compte créé avant doit redéfinir son mot de passe.", "Dasselbe Passwort öffnet WebDAV und rsync (persönlicher Ordner /c/home/name und Freigaben). Ein früher angelegtes Konto muss sein Passwort neu setzen."],
-  "The last X-RAID disk ({0}) is ERASED and joins the md (resync).": ["Le dernier disque X-RAID ({0}) est EFFACÉ et rejoint le md (resynchronisation).", "Die letzte X-RAID-Platte ({0}) wird GELÖSCHT und kommt ins md (Resynchronisation)."],
-  "ALL content of the ticked disks is ERASED (an X-RAID included); a new md RAID 1 is created.": ["TOUT le contenu des disques cochés est EFFACÉ (y compris un X-RAID) ; un RAID 1 md neuf est créé.", "Der GESAMTE Inhalt der gewählten Platten wird GELÖSCHT (auch ein X-RAID); ein neues md-RAID 1 wird angelegt."],
   "unknown superblock version (0.1.0 expected)": ["version de superbloc inconnue (attendu 0.1.0)", "unbekannte Superblock-Version (erwartet 0.1.0)"],
   "level field other than 1": ["champ level différent de 1", "Feld level ungleich 1"],
   "current superblock missing: reading the backup": ["superbloc courant absent : lecture du secours", "aktueller Superblock fehlt: Ersatzkopie wird gelesen"],
@@ -684,7 +682,7 @@ function render(s){
     $('#mdb').innerHTML = s.md.map(m=>`<button class="b" data-md="${esc(m.name)}">${esc(m.name)}</button>`).join('');
 }
 
-// Storage: X-RAID (compatibility) or md, mirror consistency, wizards (nas-raid)
+// Storage: X-RAID (compatibility), superblock state, mirror consistency (nas-raid); md disabled for now
 let stk = null;
 // reason codes of xraid-info (English base texts, translated by I18N)
 const XR = {version:'unknown superblock version (0.1.0 expected)', level:'level field other than 1',
@@ -699,15 +697,18 @@ const XR = {version:'unknown superblock version (0.1.0 expected)', level:'level 
   no_readable_disk:'no “online” disk to read', mbr_rebuilt:'base disk MBR missing: table taken from the superblock',
   no_partition:'no partition found on the base disk', partition_outside_section:'a partition goes beyond the sections (or the visible area)',
   read_error:'read error while sampling', mirror_differs:'blocks differ between the two disks at the same LBAs',
-  no_xraid:'no X-RAID superblock (WGao)'};
+  no_xraid:'no X-RAID superblock (WGao)', superblock_torn:'a superblock and its copy differ (interrupted update)',
+  reinstall_pending:'RAIDiator reinstall flag set: RAIDiator would reset the NAS at its next boot',
+  degraded:'RAIDiator counters: a disk failed or is missing', inconsistent_superblock:'superblock inconsistent (sections, sizes or roles)'};
 // reasons added by nas-raid
 const NR = {rw_disabled:'writing disabled (switch “Allow writing on the X-RAID”)', unclean_shutdown_linux:'unclean shutdown under Linux: check the mirror',
-  unclean_shutdown_verified:'unclean RAIDiator shutdown, mirror checked since', migration_in_progress:'migration to md in progress'};
+  unclean_shutdown_verified:'unclean RAIDiator shutdown, mirror checked since', migration_in_progress:'migration to md in progress',
+  no_sb_writer:'superblock writer (xraid-sb) missing: read-only only', sb_write_failed:'the superblock could not be marked “in use”'};
 const XRM = {'xraid-rw':'X-RAID, read and write', 'xraid-ro':'X-RAID, read-only', 'md':'md RAID', 'none':'no volume'};
 async function loadStk(d){
   try{ stk = d !== undefined ? d : await get('storage'); }catch(e){ return; }
   if(!stk || stk.mode==='absent'){ $('#xr').innerHTML=''; $('#xrb').innerHTML=''; return; }
-  const x = stk.xraid || {}, v = stk.verify || {}, m = stk.migration || {};
+  const x = stk.xraid || {}, v = stk.verify || {};
   const ok = stk.mode==='md' || stk.mode==='xraid-rw';
   let h = `<div class="row"><span>${t('Mode')}</span><b style="color:var(--${ok?'ok':'warn'})">${esc(t(XRM[stk.mode]||stk.mode))}</b></div>`;
   // reasons: xraid-info codes (English text, shown here in the page language), then the ones added by nas-raid
@@ -716,24 +717,28 @@ async function loadStk(d){
   // disk comparison, mirror_differs, only runs at a rw mount)
   if(stk.mode!=='md'){ const shown = (x.reasons||[]).map(r=>r.code);
     (stk.reasons||'').split(' ').filter(r=>NR[r] || (XR[r] && !shown.includes(r))).forEach(r=>{ h += `<div>· ${esc(t(NR[r] || XR[r]))}</div>`; }); }
+  // superblock as RAIDiator sees it: clean-stop bit, disks, counters
+  if(stk.mode!=='md' && x.version){
+    h += `<div class="row"><span>${t('Superblock')}</span><span style="color:var(--${x.clean?'ok':'warn'})">${esc(t(x.clean ? 'clean' : 'in use or unclean shutdown'))}</span></div>`;
+    (x.disks||[]).forEach(d=>{ h += `<div class="row"><span>${esc(t('Bay {0}', d.channel+1))} · ${esc(d.path)} · ${esc(t(d.role||'?'))}</span><span style="color:var(--${d.state==='online'?'ok':'bad'})">${esc(t(d.state||'?'))}</span></div>`; });
+    h += `<div class="row"><span>${t('Disks')}</span><span>${esc(t('{0} working, {1} failed', x.working_disks, x.failed_disks))}</span></div>`;
+  }
   if(stk.mode!=='md') (x.sections||[]).forEach((s,i)=>{ h += `<div class="row"><span>${t('Section {0}', i)}</span><span>${kb(s.sectors/2)} · ${s.init===0 ? t('sync unfinished') : t('in sync')}</span></div>`; });
   if(x.mirror || v.state!=='never'){
     const d = v.date ? new Date(v.date*1000).toLocaleDateString(LANG) : '';
     const vs = v.state==='running' ? t('running {0} %', v.progress ?? 0) : v.state==='ok' ? t('identical on {0}', d) : v.state==='differences' ? t('{0} zones differ', v.zones) : v.state==='errors' ? t('read errors') : t('never done');
     h += `<div class="row"><span>${t('Mirror check')}</span><span style="color:var(--${v.state==='ok'?'ok':v.state==='never'||v.state==='running'?'mute':'bad'})">${esc(vs)}</span></div>`;
   }
-  if(m.step) h += `<div>${esc(t('Migration to md: {0}', m.step + (m.copy!=null ? ' ('+m.copy+' %)' : '')))}</div>`;
   // writing switch (XRAID_RW in /etc/nas-raid.conf): X-RAID only; nas-raid has the last word
   if(stk.mode==='xraid-rw' || stk.mode==='xraid-ro'){
-    h += `<div class="row" style="margin-top:6px"><label><input type="checkbox" id="xrw" ${stk.xraid_rw==='yes'?'checked':''}> ${t('Allow writing on the X-RAID')}</label></div>`;
+    const nosb = stk.sb_writer!=='yes';	// no superblock writer: rw cannot be granted
+    h += `<div class="row" style="margin-top:6px"><label><input type="checkbox" id="xrw" ${stk.xraid_rw==='yes'?'checked':''}${nosb?' disabled':''}> ${t('Allow writing on the X-RAID')}</label></div>`;
+    if(nosb) h += `<div style="color:var(--warn)">${t('superblock writer (xraid-sb) missing: read-only only')}</div>`;
     if(stk.xraid_rw==='yes' && stk.mode==='xraid-ro') h += `<div style="color:var(--warn)">${t('writing requested, refused by the safeguards above')}</div>`;
   }
   $('#xr').innerHTML = h;
   const b = [];
   if(x.base && x.mirror && v.state!=='running') b.push(`<button class="b" data-x="verify">${t('Check the mirror')}</button>`);
-  if(stk.mode==='xraid-rw' && !m.step) b.push(`<button class="b danger" data-x="migrate">${t('Migrate to md')}</button>`);
-  if(m.step==='copy_verified') b.push(`<button class="b danger" data-x="finalize">${t('Finish the migration')}</button>`);
-  if(!stk.md && !m.step) b.push(`<button class="b danger" data-x="create">${t('Create an md RAID')}</button>`);
   b.push(`<button class="b" data-x="log">${t('Storage log')}</button>`);
   $('#xrb').innerHTML = b.join('');
 }
@@ -759,37 +764,10 @@ $('#xr').onchange = ev=>{
 $('#xrwc').onchange = xrwCheck; $('#xrwi').oninput = xrwCheck;
 $('#xrwgo').onclick = ()=>{ $('#xrwd').close(); xrwPost('on=1&confirm='+XRW_WORD+'&yes=1'); };
 
-// Wizard: dry run, tick box AND typed phrase (double confirmation)
-let wizOp = '', wizPhrase = () => '';
-function wizCheck(){ $('#wizgo').disabled = !($('#wizc').checked && $('#wizi').value.trim() === wizPhrase()); $('#wizl').textContent = t('Type “{0}” to confirm:', wizPhrase()); }
-function wizDisks(){ return [...document.querySelectorAll('#wizd input:checked')].map(i=>i.value); }
-function wizard(op, title, warn, phrase){
-  wizOp = op; wizPhrase = phrase;
-  $('#wizt').textContent = title; $('#wizw').textContent = warn;
-  $('#wizd').innerHTML = op==='create' ? (last ? last.disks : []).map(d=>`<label class="chip"><input type="checkbox" value="${esc(d.dev)}"> ${esc(t('Bay {0}', d.bay))} · ${esc(d.dev)} · ${d.gb} ${t('GB')}</label>`).join('') : '';
-  $('#wizo').style.display = 'none'; $('#wizc').checked = false; $('#wizi').value = '';
-  wizCheck(); $('#wiz').showModal();
-}
-function wizBody(extra){ return 'op='+wizOp+'&d='+encodeURIComponent(wizDisks().join(','))+(extra||''); }
-$('#wizd').onchange = wizCheck; $('#wizc').onchange = wizCheck; $('#wizi').oninput = wizCheck;
-$('#wizp').onclick = async ()=>{
-  const o = $('#wizo'); o.style.display = ''; o.textContent = t('loading…');
-  try{ const r = await fetch(API+'?a=raid_plan&l='+LANG, {method:'POST', headers:{'X-Diet':'1','Content-Type':'application/x-www-form-urlencoded'}, body: wizBody()}); o.textContent = await r.text(); }
-  catch(e){ o.textContent = t('Error: {0}', e.message); }
-};
-$('#wizgo').onclick = async ()=>{
-  $('#wizgo').disabled = true;
-  try{ const r = await post('raid_run', wizBody('&confirm='+encodeURIComponent($('#wizi').value.trim())+'&yes=1')); toast(r.msg); $('#wiz').close(); }
-  catch(e){ toast(t('Error: {0}', e.message)); wizCheck(); }
-  setTimeout(loadStk, 2000);
-};
 $('#xrb').onclick = async ev=>{
   const a = ev.target.dataset.x; if(!a) return;
   if(a==='verify'){ if(!confirm(t('Read both disks entirely and compare them (read-only, several hours)?'))) return;
     try{ toast((await post('raid_verify')).msg); }catch(e){ toast(t('Error: {0}', e.message)); } setTimeout(loadStk, 2000); }
-  else if(a==='migrate') wizard('migrate', t('Migrate to md'), t('The mirror disk leaves the X-RAID and is reformatted as md; the data is copied from the base disk, then checked. The base disk is only erased at “Finish the migration”.'), ()=>'MIGRATE');
-  else if(a==='finalize') wizard('finalize', t('Finish the migration'), t('The last X-RAID disk ({0}) is ERASED and joins the md (resync).', stk.migration.a), ()=>'ERASE '+stk.migration.a);
-  else if(a==='create') wizard('create', t('Create an md RAID'), t('ALL content of the ticked disks is ERASED (an X-RAID included); a new md RAID 1 is created.'), ()=>['ERASE', ...wizDisks()].join(' '));
   else if(a==='log'){ $('#logf').value = 'storage'; document.querySelector('nav button[data-p=log]').click(); }
 };
 

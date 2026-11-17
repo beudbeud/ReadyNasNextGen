@@ -18,7 +18,8 @@ check() {	# check "description" shell-condition
 }
 mkdir -p "$R/bin" "$R/proc" "$R/var/run" "$R/var/lib" "$R/etc/init.d"
 cc -O2 -Wall -Werror -o "$R/bin/xraid-info" "$SRC/xraid-info.c" || exit 1
-for s in clean big dirty degraded sync different md; do
+cc -O2 -Wall -Werror -o "$R/bin/xraid-sb.real" "$SRC/xraid-sb.c" || exit 1
+for s in clean big dirty degraded sync different md reinstall counters torn sbw; do
 	python3 "$HERE/make-images.py" "$T/$s" "$s" > /dev/null || exit 1
 done
 
@@ -43,42 +44,79 @@ check "JSON: degraded, reason missing_disk, reading from the base" "js 'j[\"mode
 "$R/bin/xraid-info" --samples 4 "$T"/dirty/*.img > "$T/dirty.txt"
 check "text: reason unclean_shutdown" "grep -q \"^XR_REASONS='unclean_shutdown'\" '$T/dirty.txt'"
 check "text: can be evaluated by sh" "(set -e; eval \"\$(cat '$T/dirty.txt')\"; [ \"\$XR_V\" = 8368128 ])"
+# superblock fields decoded per docs/XRAID-FORMAT.md
+reasons() { "$R/bin/xraid-info" "$T/$1"/*.img | sed -n "s/^XR_REASONS='\(.*\)'/\1/p"; }
+J=$("$R/bin/xraid-info" --json "$T"/clean/*.img)
+check "format: stale +8 watermark with initialized=1 stays rw" "[ \"\$(mode clean)\" = rw ] && js 'all(s[\"init\"]==1 and s[\"init_mark\"]!=0 for s in j[\"sections\"])'"
+check "format: counters and reinstall flag exported" "js 'j[\"utime\"]==0 and (j[\"active_disks\"],j[\"working_disks\"],j[\"failed_disks\"],j[\"spare_disks\"])==(2,2,0,0)'"
+check "format: reinstall flag (0x80) -> ro, reinstall_pending" "[ \"\$(reasons reinstall)\" = reinstall_pending ]"
+check "format: RAIDiator counters show a failed disk -> ro, degraded" "[ \"\$(reasons counters)\" = degraded ]"
+check "format: superblock and its copy differ -> ro, superblock_torn" "[ \"\$(reasons torn)\" = superblock_torn ]"
 "$R/bin/xraid-info" verify "$T"/clean/sdb.img "$T"/clean/sda.img > "$T/v1" 2>/dev/null; rc=$?
 check "verify: identical images -> code 0" "[ $rc = 0 ] && grep -q \"RESULT='identical'\" '$T/v1'"
 "$R/bin/xraid-info" verify "$T"/different/sdb.img "$T"/different/sda.img > "$T/v2" 2>/dev/null; rc=$?
 check "verify: one difference -> code 1, one zone" "[ $rc = 1 ] && grep -q 'DIFFERENT_ZONES=1' '$T/v2'"
 check "xraid-info opens nothing for writing (O_RDONLY only)" "! grep -q 'O_RDWR\|O_WRONLY' '$SRC/xraid-info.c'"
+
+# ---------- xraid-sb (superblock writer) on images ----------
+XS=$R/bin/xraid-sb.real
+D=$T/sbw; cp --sparse=always "$D/sda.img" "$T/ref-sda.img"; cp --sparse=always "$D/sdb.img" "$T/ref-sdb.img"
+sbd() { python3 "$HERE/sb.py" diff "$T/ref-$1.img" "$D/$1.img"; }	# offsets changed since the RAIDiator reference
+SEC="0x807,0x809,0x80a,0x80b,0x827,0x829,0x82a,0x82b"
+"$XS" dirty "$D/sda.img" "$D/sdb.img" > /dev/null
+check "xraid-sb dirty: only 0x84 bit 0 and inited/+8 of both sections change, 4 copies identical" "[ \"\$(sbd sda)\" = 0x87,$SEC ] && [ \"\$(sbd sdb)\" = 0x87,$SEC ]"
+check "xraid-sb dirty: xraid-info sees an unclean, unsynced X-RAID" "[ \"\$(reasons sbw)\" = 'unclean_shutdown sync_in_progress sync_in_progress' ]"
+h=$(md5sum "$D"/*.img); "$XS" dirty "$D/sda.img" "$D/sdb.img" > "$T/x1"
+check "xraid-sb: idempotent (second dirty: unchanged, nothing written)" "[ \"\$(md5sum '$D'/*.img)\" = \"$h\" ] && [ \$(grep -c unchanged '$T/x1') = 2 ]"
+"$XS" clean "$D/sda.img" "$D/sdb.img" > /dev/null
+check "xraid-sb clean: RAIDiator superblock back, stale +8 cleared, this_disk and diskid kept" "[ \"\$(sbd sda)\" = 0x809,0x80a,0x80b,0x829,0x82a,0x82b ] && [ \"\$(sbd sdb)\" = 0x809,0x80a,0x80b,0x829,0x82a,0x82b ] && [ -z \"\$(reasons sbw)\" ]"
+h=$(md5sum "$T"/torn/*.img); "$XS" dirty "$T/torn/sda.img" "$T/torn/sdb.img" 2> "$T/x2"; rc=$?
+check "xraid-sb: refuses a torn superblock (crash between two writes), nothing written" "[ $rc = 1 ] && grep -q 'interrupted update' '$T/x2' && [ \"\$(md5sum '$T'/torn/*.img)\" = \"$h\" ]"
+for c in counters reinstall; do
+	h=$(md5sum "$T/$c"/*.img); "$XS" dirty "$T/$c/sda.img" "$T/$c/sdb.img" 2>/dev/null; rc=$?
+	check "xraid-sb: refuses an inconsistent superblock ($c), nothing written" "[ $rc = 1 ] && [ \"\$(md5sum '$T/$c'/*.img)\" = \"$h\" ]"
+done
+cp --sparse=always "$T/ref-sda.img" "$T/f-sda.img"; cp --sparse=always "$T/ref-sdb.img" "$T/f-sdb.img"
+"$XS" fail "$T/f-sdb.img" > /dev/null
+F=$(python3 "$HERE/sb.py" diff "$T/ref-sdb.img" "$T/f-sdb.img")
+check "xraid-sb fail: on the survivor only ctime, counters, the failed disk state and the sections change" "python3 -c \"import sys; f=[int(x,16) for x in '$F'.split(',')]; ok=lambda o: 0x18<=o<0x1c or 0x88<=o<0x94 or 0x290<=o<0x294 or o in (0x804,0x807,0x824,0x827) or 0x808<o<0x80c or 0x828<o<0x82c; sys.exit(0 if 0x293 in f and all(map(ok,f)) else 1)\" && [ -z \"\$(python3 '$HERE/sb.py' diff '$T/ref-sda.img' '$T/f-sda.img')\" ]"
+J=$("$R/bin/xraid-info" --json "$T/f-sda.img" "$T/f-sdb.img")
+check "xraid-sb fail: mirror faulty, newest superblock wins, read from the base" "js 'j[\"mode\"]==\"ro\" and [d[\"state\"] for d in j[\"disks\"]]==[\"faulty\",\"online\"] and j[\"failed_disks\"]==1 and j[\"read_disk\"].endswith(\"f-sdb.img\")'"
 check "smart: clean refusal on an image (no SG_IO)" "! '$R/bin/xraid-info' smart '$T/clean/sda.img' 2>/dev/null"
 
 # ---------- nas-raid with simulated commands ----------
 stub() { printf '#!/bin/sh\necho "%s $*" >> "%s/cmd.log"\n%s\n' "$1" "$T" "${2:-}" > "$R/bin/$1"; chmod 755 "$R/bin/$1"; }
-for c in dmsetup lvm fuse2fs umount rsync partprobe logger mkfs.ext4 resize2fs; do stub $c; done
+for c in dmsetup lvm fuse2fs umount logger; do stub $c; done
 stub mdadm
 stub mount 'echo "/dev/x $3 ext4 rw 0 0" >> "'"$R"'/proc/mounts"'
 : > "$R/proc/mounts"
-printf 'Personalities : [raid1]\nmd11 : active raid1 dm-3[1] dm-2[0]\n      100 blocks [2/2] [UU]\n' > "$R/proc/mdstat"
+# md state seen by nas-raid: /proc/mdstat and sync_action, both legs healthy
+mdstat() { printf 'Personalities : [raid1]\nmd10 : active raid1 dm-1[1] dm-0[0]\n      100 blocks [2/2] [UU]\nmd11 : active raid1 dm-3[1] dm-2[0]\n      100 blocks [2/2] %s\n' "$1" > "$R/proc/mdstat"; }
+mdstat '[UU]'
+for i in 0 1; do mkdir -p "$R/sys/block/md1$i/md"; echo idle > "$R/sys/block/md1$i/md/sync_action"; done
 export NAS_RAID_ROOT=$R
-nr0() { NAS_RAID_DISKS="$DISKS" $SH "$SRC/nas-raid" "$@"; }
-# xraid-info wrapped: its arguments go to xi.log (sampling or not)
+# xraid-info and xraid-sb wrapped: their arguments go to xi.log / cmd.log
 mv "$R/bin/xraid-info" "$R/bin/xraid-info.real"
 printf '#!/bin/sh\necho "xraid-info $*" >> "%s/xi.log"\nexec "%s/bin/xraid-info.real" "$@"\n' "$T" "$R" > "$R/bin/xraid-info"; chmod 755 "$R/bin/xraid-info"
+printf '#!/bin/sh\necho "xraid-sb $*" >> "%s/cmd.log"\nexec "%s/bin/xraid-sb.real" "$@"\n' "$T" "$R" > "$R/bin/xraid-sb"; chmod 755 "$R/bin/xraid-sb"
 sampled() { grep -q -- '--samples [1-9]' "$T/xi.log"; }
-DISKS="$T/big/sda.img $T/big/sdb.img"; : > "$T/cmd.log"; : > "$T/xi.log"; nr0 mount 2>/dev/null >/dev/null
-check "XRAID_RW=no (default): read-only even when healthy" "grep -q 'xraid-ro rw_disabled' '$R/var/run/nas-raid.mode' && ! grep -q mdadm '$T/cmd.log'"
-check "read-only mount: no disk comparison (xraid-info --samples 0 only)" "grep -q -- '--samples 0' '$T/xi.log' && ! sampled"
-nr0 unmount 2>/dev/null >/dev/null
-echo XRAID_RW=yes > "$R/etc/nas-raid.conf"
 nr() { NAS_RAID_DISKS="$DISKS" $SH "$SRC/nas-raid" "$@"; }
 mode_of() { cut -d' ' -f1 "$R/var/run/nas-raid.mode"; }
+DISKS="$T/big/sda.img $T/big/sdb.img"; : > "$T/cmd.log"; : > "$T/xi.log"; nr mount 2>/dev/null >/dev/null
+check "XRAID_RW=no (default): read-only even when healthy" "grep -q 'xraid-ro rw_disabled' '$R/var/run/nas-raid.mode' && ! grep -q 'mdadm\|xraid-sb' '$T/cmd.log'"
+check "read-only mount: no disk comparison (xraid-info --samples 0 only)" "grep -q -- '--samples 0' '$T/xi.log' && ! sampled"
+nr unmount 2>/dev/null >/dev/null
+echo XRAID_RW=yes > "$R/etc/nas-raid.conf"
 # every dm table on an image must end before V (protected zone untouched)
 within_v() {
 	awk -v v="$1" '/^dmsetup create/ { for (i = 1; i <= NF; i++) if ($i == "linear" && $(i+1) ~ /\.img$/) { gsub(/'"'"'/, "", $(i+2)); if ($(i+2) + $(i-1) > v) bad = 1 } } END { exit bad }' "$T/cmd.log"
 }
 
-DISKS="$T/big/sda.img $T/big/sdb.img"
 : > "$T/cmd.log"; : > "$T/xi.log"; nr mount 2>/dev/null >/dev/null
 check "mount (clean): xraid-rw" "[ \"\$(mode_of)\" = xraid-rw ]"
 check "rw mount: fast analysis first, then comparison with SAMPLES (256)" "grep -n -- '--samples' '$T/xi.log' | sed -n '1p' | grep -q -- '--samples 0 ' && grep -q -- '--samples 256 ' '$T/xi.log'"
+check "rw mount: superblock marked dirty BEFORE the md is built" "grep -n 'xraid-sb dirty .*big/sdb.img .*big/sda.img\|mdadm --build' '$T/cmd.log' | head -n 1 | grep -q 'xraid-sb dirty'"
+check "rw mount: superblock on the disks is dirty (unclean, sections not in sync)" "[ \"\$(reasons big)\" = 'unclean_shutdown sync_in_progress sync_in_progress' ]"
 check "mount: mdadm --build RAID 1 without superblock, base first" "grep -q 'mdadm --build /dev/md11 --level=1 --raid-devices=2 --assume-clean /dev/mapper/xr-a-s1 /dev/mapper/xr-b-s1' '$T/cmd.log'"
 check "mount: p5 mapped onto md11 at 512008" "grep -q \"dmsetup create xr-p5 --table 0 1460504296 linear /dev/md11 512008\" '$T/cmd.log'"
 check "mount: no table beyond V" "within_v 1465128688"
@@ -87,68 +125,74 @@ check "mount: xraid-dirty mark set" "[ -e '$R/var/lib/nas-raid/xraid-dirty' ]"
 check "mount: never a direct write (dd)" "! grep -q '^dd' '$T/cmd.log'"
 echo "/dev/mapper/c-c /c fuse rw 0 0" > "$R/proc/mounts"
 nr unmount 2>/dev/null >/dev/null
-check "unmount: md stopped, mark removed" "grep -q 'mdadm --stop /dev/md11' '$T/cmd.log' && [ ! -e '$R/var/lib/nas-raid/xraid-dirty' ]"
-# power loss under Linux: the mark stays
-echo 1 > "$R/var/lib/nas-raid/xraid-dirty"; : > "$T/cmd.log"
-nr mount 2>/dev/null >/dev/null
-check "after power loss: read-only (unclean_shutdown_linux)" "grep -q 'xraid-ro unclean_shutdown_linux' '$R/var/run/nas-raid.mode'"
+check "clean unmount: md stopped, THEN superblock clean, mark removed" "grep -n 'mdadm --stop /dev/md11\|xraid-sb clean' '$T/cmd.log' | head -n 1 | grep -q 'mdadm --stop' && grep -q 'xraid-sb clean' '$T/cmd.log' && [ -z \"\$(reasons big)\" ] && [ ! -e '$R/var/lib/nas-raid/xraid-dirty' ]"
+# a repair still running at unmount: superblock left dirty
+nr mount 2>/dev/null >/dev/null; echo repair > "$R/sys/block/md11/md/sync_action"; : > "$T/cmd.log"
+nr unmount 2>/dev/null >/dev/null; echo idle > "$R/sys/block/md11/md/sync_action"
+check "unmount with a resync running: superblock and mark stay dirty" "! grep -q 'xraid-sb clean' '$T/cmd.log' && [ \"\$(reasons big)\" = 'unclean_shutdown sync_in_progress sync_in_progress' ] && [ -e '$R/var/lib/nas-raid/xraid-dirty' ]"
+# power loss under Linux: superblock dirty and mark: ro, then verify puts it back clean
+: > "$T/cmd.log"; nr mount 2>/dev/null >/dev/null
+check "after power loss: read-only (superblock unclean, sections not in sync)" "grep -qx 'xraid-ro unclean_shutdown sync_in_progress sync_in_progress' '$R/var/run/nas-raid.mode' && ! grep -q 'xraid-sb\|mdadm' '$T/cmd.log'"
 check "read-only: dm --readonly on the base, LVM read_only_volume_list, fuse2fs ro" "grep -q 'dmsetup create xr-p5 --readonly --table 0 1460504296 linear .*big/sdb.img 4608040' '$T/cmd.log' && grep -q 'read_only_volume_list' '$T/cmd.log' && grep -q 'fuse2fs -o ro,allow_other' '$T/cmd.log'"
-check "read-only: no md" "! grep -q 'mdadm' '$T/cmd.log'"
-DISKS="$T/clean/sda.img $T/clean/sdb.img"
-nr verify 2>/dev/null
-check "verify (clean): mark removed after full comparison" "[ ! -e '$R/var/lib/nas-raid/xraid-dirty' ] && grep -q '^ok ' '$R/var/lib/nas-raid/verify.state'"
+nr unmount 2>/dev/null >/dev/null
+# same on small images (a full verify of the 750 GB ones would take too long)
+DISKS="$T/clean/sda.img $T/clean/sdb.img"; nr mount 2>/dev/null >/dev/null
+echo repair > "$R/sys/block/md11/md/sync_action"; nr unmount 2>/dev/null >/dev/null; echo idle > "$R/sys/block/md11/md/sync_action"
+nr mount 2>/dev/null >/dev/null
+check "small images, dirty superblock left by Linux: read-only" "[ \"\$(mode_of)\" = xraid-ro ]"
+nr unmount 2>/dev/null >/dev/null; nr verify 2>/dev/null >/dev/null; nr mount 2>/dev/null >/dev/null
+check "verify after power loss: superblock clean again, mark removed, rw" "[ \"\$(mode_of)\" = xraid-rw ] && grep -q '^ok ' '$R/var/lib/nas-raid/verify.state'"
+# a leg fails while writing: watch records it on the survivor and goes read-only
+mdstat '[U_]'; : > "$T/cmd.log"
+nr watch 2>/dev/null >/dev/null; mdstat '[UU]'
+check "leg failure (mirror): xraid-sb fail on the base, then read-only" "grep -q 'xraid-sb fail .*clean/sdb.img' '$T/cmd.log' && [ \"\$(mode_of)\" = xraid-ro ] && ! grep -q 'xraid-sb clean' '$T/cmd.log'"
+J=$("$R/bin/xraid-info.real" --json "$T"/clean/*.img)
+check "leg failure: mirror recorded faulty, base keeps the volume" "js '[d[\"state\"] for d in j[\"disks\"]]==[\"faulty\",\"online\"] and j[\"read_disk\"].endswith(\"sdb.img\") and j[\"mode\"]==\"ro\"'"
+: > "$T/cmd.log"; nr watch 2>/dev/null >/dev/null
+check "watch: nothing to do on a read-only X-RAID" "[ ! -s '$T/cmd.log' ]"
+nr unmount 2>/dev/null >/dev/null
 # X-RAID shut down uncleanly under RAIDiator: ro, then rw after a successful verification
-DISKS="$T/dirty/sda.img $T/dirty/sdb.img"; rm -f "$R/var/lib/nas-raid/xraid-verified"
+DISKS="$T/dirty/sda.img $T/dirty/sdb.img"; rm -f "$R/var/lib/nas-raid/xraid-verified" "$R/var/lib/nas-raid/xraid-dirty"
 : > "$T/xi.log"; nr mount 2>/dev/null >/dev/null
 check "dirty superblock: read-only" "grep -q 'xraid-ro unclean_shutdown' '$R/var/run/nas-raid.mode'"
 check "read-only forced by another safeguard (XRAID_RW=yes): no comparison" "! sampled"
-nr verify 2>/dev/null; nr mount 2>/dev/null >/dev/null
-check "verified dirty superblock: rw (unclean_shutdown_verified)" "grep -q 'xraid-rw unclean_shutdown_verified' '$R/var/run/nas-raid.mode'"
-rm -f "$R/var/lib/nas-raid/xraid-dirty"
+nr unmount 2>/dev/null >/dev/null; nr verify 2>/dev/null >/dev/null; nr mount 2>/dev/null >/dev/null
+check "verified RAIDiator dirty superblock: put back clean, rw" "[ \"\$(mode_of)\" = xraid-rw ]"
+nr unmount 2>/dev/null >/dev/null
 DISKS="$T/degraded/sdb.img"; : > "$T/cmd.log"
 nr mount 2>/dev/null >/dev/null
-check "degraded: read-only on the present disk" "grep -q 'xraid-ro missing_disk' '$R/var/run/nas-raid.mode' && ! grep -q mdadm '$T/cmd.log'"
+check "missing disk at boot: read-only on the present disk, nothing written" "grep -q 'xraid-ro missing_disk' '$R/var/run/nas-raid.mode' && ! grep -q 'mdadm\|xraid-sb' '$T/cmd.log'"
+nr unmount 2>/dev/null >/dev/null
 DISKS="$T/different/sda.img $T/different/sdb.img"
 : > "$T/cmd.log"; : > "$T/xi.log"; nr mount 2>/dev/null >/dev/null
 check "different mirror: read-only" "grep -q 'xraid-ro mirror_differs' '$R/var/run/nas-raid.mode'"
-check "different mirror: found by the comparison before rw, no md assembled" "sampled && ! grep -q mdadm '$T/cmd.log'"
+check "different mirror: found by the comparison before rw, nothing written" "sampled && ! grep -q 'mdadm\|xraid-sb' '$T/cmd.log'"
 nr repair 2>/dev/null >/dev/null; rc=$?
 check "repair: refused without confirmation" "[ $rc != 0 ]"
+nr unmount 2>/dev/null >/dev/null
 DISKS="$T/sync/sda.img $T/sync/sdb.img"
 nr mount 2>/dev/null >/dev/null
 check "unfinished synchronisation: read-only" "grep -q 'xraid-ro sync_in_progress' '$R/var/run/nas-raid.mode'"
+nr unmount 2>/dev/null >/dev/null
+# without the writer: no rw
+python3 "$HERE/make-images.py" "$T/c2" clean > /dev/null; DISKS="$T/c2/sda.img $T/c2/sdb.img"; mv "$R/bin/xraid-sb" "$R/bin/xraid-sb.off"; : > "$T/cmd.log"
+nr mount 2>/dev/null >/dev/null; mv "$R/bin/xraid-sb.off" "$R/bin/xraid-sb"
+check "no superblock writer: read-only (no_sb_writer)" "grep -q 'xraid-ro no_sb_writer' '$R/var/run/nas-raid.mode' && ! grep -q mdadm '$T/cmd.log'"
+nr status --json > "$T/e0"
+check "status --json: valid, superblock writer reported" "python3 -c \"import json; j=json.load(open('$T/e0')); assert j['sb_writer']=='yes' and 'migration' not in j and 'relay' not in j\""
+nr unmount 2>/dev/null >/dev/null
 
-# ---------- migration and md ----------
-DISKS="$T/big/sda.img $T/big/sdb.img"; rm -f "$R/var/lib/nas-raid/verify.state"
-: > "$T/cmd.log"; nr migrate --confirm MIGRATE --yes > "$T/m0" 2>&1; rc=$?
-check "migrate: refused without full verification" "[ $rc != 0 ] && grep -q 'full verification' '$T/m0' && [ ! -s '$T/cmd.log' ]"
-echo "ok $(date +%s)" > "$R/var/lib/nas-raid/verify.state"
-nr migrate --confirm MIGRATE --yes > "$T/m1" 2>&1; rc=$?
-check "migrate: refused if SMART unreadable" "[ $rc != 0 ] && grep -q 'SMART unreadable' '$T/m1' && [ ! -s '$T/cmd.log' ]"
-echo "health=PASSED realloc=0 pending=3 uncorr=0 hours=1" > "$R/var/run/smart.sdb.img"
-echo "health=PASSED realloc=0 pending=0 uncorr=0 hours=1" > "$R/var/run/smart.sda.img"
-nr migrate --confirm MIGRATE --yes > "$T/m2" 2>&1; rc=$?
-check "migrate: refused if sectors are pending" "[ $rc != 0 ] && grep -q 'pending reallocation' '$T/m2'"
-echo "health=PASSED realloc=0 pending=0 uncorr=0 hours=1" > "$R/var/run/smart.sdb.img"
-nr migrate --yes > "$T/m3" 2>&1; rc=$?
-check "migrate: refused without the confirmation phrase" "[ $rc != 0 ] && grep -q \"confirmation required: --confirm 'MIGRATE' --yes\" '$T/m3' && [ ! -s '$T/cmd.log' ]"
-before=$(ls -l --time-style=+%s "$T"/big/*.img | md5sum)
-nr migrate --dry-run > "$T/m4" 2>&1; rc=$?
-check "migrate dry run: succeeds without running anything" "[ $rc = 0 ] && [ ! -s '$T/cmd.log' ] && [ \"\$(ls -l --time-style=+%s '$T'/big/*.img | md5sum)\" = '$before' ] && [ ! -e '$R/var/lib/nas-raid/migration' ]"
-check "migrate dry run: erases mirror sda, degraded md, ext4 4 KiB" "grep -q '^+ dd if=/dev/zero of=.*big/sda.img bs=512 seek=1465145072 count=4096' '$T/m4' && grep -q 'mdadm --create /dev/md/donnees .*sda.img missing' '$T/m4' && grep -q 'mkfs.ext4 -b 4096' '$T/m4'"
-check "migrate dry run: copy from the read-only X-RAID on sdb" "grep -q 'xr-p5 --readonly .*big/sdb.img 4608040' '$T/m4' && grep -q 'rsync -aH --numeric-ids --delete /c/ /mnt/md/' '$T/m4'"
-check "migrate dry run: never erases the base before --finalize" "! grep -q 'of=.*big/sdb.img' '$T/m4'"
-nr migrate --finalize --dry-run > "$T/m5" 2>&1
-check "finalize dry run: erases sdb then adds it to the md" "grep -q 'of=.*big/sdb.img bs=1048576' '$T/m5' && grep -q 'mdadm /dev/md/donnees --add .*big/sdb.img' '$T/m5'"
-nr create "$T/big/sda.img" "$T/big/sdb.img" --dry-run > "$T/c1" 2>&1
-check "create dry run: RAID 1 on both disks" "grep -q 'mdadm --create /dev/md/donnees .*sda.img .*sdb.img$' '$T/c1'"
-nr create /dev/sdz --confirm 'ERASE sdz' --yes > "$T/c2" 2>&1; rc=$?
-check "create: refuses a disk that is not SATA" "[ $rc != 0 ] && grep -q 'is not a SATA disk' '$T/c2'"
-nr grow --dry-run > "$T/g1" 2>&1
-check "grow dry run: md, pvresize, lvextend, resize2fs" "grep -q 'mdadm --grow /dev/md/donnees --size=max' '$T/g1' && grep -q 'pvresize' '$T/g1' && grep -q 'resize2fs /dev/mapper/donnees-c' '$T/g1'"
+# ---------- md: disabled for now ----------
+DISKS="$T/big/sda.img $T/big/sdb.img"
+for op in migrate create add grow; do
+	h=$(stat -c %Y.%s "$T"/big/*.img); : > "$T/cmd.log"
+	nr $op "$T/big/sda.img" --confirm x --yes > "$T/d-$op" 2>&1; rc=$?
+	check "md disabled: $op refused, nothing run" "[ $rc != 0 ] && grep -q 'md support is disabled for now: X-RAID only' '$T/d-$op' && grep -q WGam '$T/d-$op' && [ ! -s '$T/cmd.log' ] && [ \"\$(stat -c %Y.%s '$T'/big/*.img)\" = \"$h\" ]"
+done
+check "md disabled: --i-know-relay-will-break no longer exists" "! nr migrate --i-know-relay-will-break 2>&1 | grep -q 'md support'"
 DISKS="$T/md/sda.img $T/md/sdb.img"; : > "$T/cmd.log"
 nr mount 2>/dev/null >/dev/null
-check "md disk (already migrated): md assembly and ext4 on /c" "[ \"\$(mode_of)\" = md ] && grep -q 'mdadm --assemble --scan' '$T/cmd.log' && grep -q 'mount -t ext4 /dev/mapper/donnees-c /c' '$T/cmd.log'"
+check "existing md volume: still mounted on /c (read only path unchanged)" "[ \"\$(mode_of)\" = md ] && grep -q 'mdadm --assemble --scan' '$T/cmd.log' && grep -q 'mount -t ext4 /dev/mapper/donnees-c /c' '$T/cmd.log'"
 nr status --json --refresh > "$T/e1"
 check "status --json: valid, mode md" "python3 -c \"import json; j=json.load(open('$T/e1')); assert j['mode']=='md' and j['xraid']['mode']=='ro'\""
 

@@ -5,7 +5,7 @@
 #   POST ?a=spindown|ksmbd|nfsd|ntp|reboot|poweroff|config|share_add|share_del|share_set
 #        |user_set|user_del|nfs_add|nfs_del|sys_set|notify_test
 #        |svc_set|dlna_set|dlna_scan|rsync_pw|rsync_c
-#        |raid_verify|raid_plan|raid_run|xraid_rw   (X-Diet: 1 header required)
+#        |raid_verify|xraid_rw   (X-Diet: 1 header required)
 # Message language: &l=fr|de|en.
 # Testing on a PC: DIET_ROOT=/path/to/fake-root prefixes every file read or
 # written (/proc, /sys, /etc, /var) and puts $DIET_ROOT/bin first in PATH
@@ -261,7 +261,7 @@ config_set() {
   # apply: disk spin-down and fan control
   if [ "$SPINDOWN_MIN" -le 20 ]; then S=$((SPINDOWN_MIN * 12)); else S=$((240 + SPINDOWN_MIN / 30)); fi
   for d in $(disks); do hdparm -S $S /dev/$d >/dev/null 2>&1; done
-  "$INITD/S45fan" restart >/dev/null 2>&1
+  "$INITD/S03fan" restart >/dev/null 2>&1
   note "Hardware settings changed from the web interface"
   ok "$(tx "Saved and applied" "Enregistré et appliqué" "Gespeichert und angewendet")"
 }
@@ -846,39 +846,11 @@ rsync_pw() {
   ok "$(tx "rsync password saved" "Mot de passe rsync enregistré" "rsync-Passwort gespeichert")"
 }
 
-# --- Storage: X-RAID (compatibility) or md, through nas-raid (xraid-compat package) ---
+# --- Storage: X-RAID, through nas-raid (xraid-compat package); md disabled for now ---
 [ -n "$R" ] && export NAS_RAID_ROOT="$R"
 storage_get() {
   if command -v nas-raid >/dev/null 2>&1; then nas-raid status --json 2>/dev/null || echo '{"mode":"error"}'
   else echo '{"mode":"absent"}'; fi
-}
-
-# raid_plan: dry run (commands shown, nothing executed);
-# raid_run: background action, with the typed phrase (confirm) AND the
-# ticked box (yes=1); nas-raid refuses if the phrase is not the right one.
-raid_do() {
-  set -f
-  op=""; d=""; confirm=""; yes=""
-  for kv in $(echo "$BODY" | tr '&' ' '); do
-    k=${kv%%=*}; v=$(urldec "${kv#*=}")
-    case "$k" in op) op=$v;; d) d=$v;; confirm) confirm=$v;; yes) yes=$v;; esac
-  done
-  case "$op" in migrate|finalize|create|add|grow|repair) ;; *) fail "400 Bad Request" "$(tx "unknown operation" "opération inconnue" "unbekannter Vorgang")";; esac
-  ARGS=""
-  for x in $(echo "$d" | tr ',' ' '); do
-    disks | grep -qx "$x" || fail "400 Bad Request" "$(tx "unknown disk" "disque inconnu" "unbekannte Platte")"
-    ARGS="$ARGS /dev/$x"
-  done
-  case "$op:$ARGS" in create:|add:|add:*\ *\ *) fail "400 Bad Request" "$(tx "choose the disk(s)" "choisir le(s) disque(s)" "Platte(n) wählen")";; esac
-  if [ "$op" = finalize ]; then CMD="nas-raid migrate --finalize"; else CMD="nas-raid $op$ARGS"; fi
-  if [ "$1" = raid_plan ]; then
-    hdr 'text/plain; charset=utf-8'; $CMD --dry-run 2>&1; return
-  fi
-  case "$confirm" in ''|*[!A-Za-z0-9\ ._-]*) fail "400 Bad Request" "$(tx "confirmation phrase missing or invalid" "phrase de confirmation manquante ou invalide" "Bestätigungssatz fehlt oder ungültig")";; esac
-  [ "$yes" = 1 ] || fail "400 Bad Request" "$(tx "second confirmation missing" "seconde confirmation manquante" "zweite Bestätigung fehlt")"
-  note "Storage: nas-raid $op$ARGS started from the interface"
-  bg "$CMD --confirm '$confirm' --yes"
-  ok "$(tx "Started: follow the progress in the storage log" "Lancé : suivre l’avancement dans le journal du stockage" "Gestartet: Fortschritt im Speicherprotokoll")"
 }
 
 # xraid_rw: "allow writing on the X-RAID" switch. on=1 needs the typed word
@@ -1059,7 +1031,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
       command -v nas-raid >/dev/null 2>&1 || fail "404 Not Found" "nas-raid ?"
       bg "nas-raid verify"; note "Storage: mirror check started"
       ok "$(tx "Check started (several hours, read-only)" "Vérification lancée (plusieurs heures, disques en lecture seule)" "Prüfung gestartet (mehrere Stunden, nur Lesen)")" ;;
-    raid_plan|raid_run) raid_do "$A" ;;
+    raid_plan|raid_run)	# md wizards (migrate, create...): disabled for now, docs/XRAID-MIGRATION.md
+      fail "409 Conflict" "$(tx "md support is disabled for now: X-RAID only" "md désactivé pour l’instant : X-RAID seulement" "md vorerst deaktiviert: nur X-RAID")" ;;
     xraid_rw) xraid_rw ;;
     *) fail "400 Bad Request" "$(tx "unknown action" "action inconnue" "unbekannte Aktion")" ;;
   esac
