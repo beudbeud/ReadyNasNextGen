@@ -1,0 +1,20 @@
+sparc: default ELF page size of 16 KiB (ReadyNAS Duo v1 kernel)
+
+The Padre kernel uses 16 KiB pages (4 hardware entries of 4 KiB, like the
+stock 2.6.17 kernel). Link with max-page-size and common-page-size 0x4000
+by default: PT_LOAD segments stay congruent modulo the page size, with
+less padding than the stock 0x10000, and RELRO ends on a page boundary.
+
+--- a/bfd/elf32-sparc.c
++++ b/bfd/elf32-sparc.c
+@@ -222,8 +222,8 @@
+ #define ELF_TARGET_ID	SPARC_ELF_DATA
+ #define ELF_MACHINE_CODE EM_SPARC
+ #define ELF_MACHINE_ALT1 EM_SPARC32PLUS
+-#define ELF_MAXPAGESIZE 0x10000
+-#define ELF_COMMONPAGESIZE 0x2000
++#define ELF_MAXPAGESIZE 0x4000
++#define ELF_COMMONPAGESIZE 0x4000
+ 
+ #define bfd_elf32_bfd_merge_private_bfd_data \
+ 					elf32_sparc_merge_private_bfd_data

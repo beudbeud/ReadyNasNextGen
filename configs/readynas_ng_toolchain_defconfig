@@ -2,6 +2,9 @@
 # readynas_ng_defconfig, without packages nor kernel. Result: relocatable
 # SDK archive published in the GitHub releases and used by
 # readynas_ng_rapide_defconfig.
+# From r3: links with 16 KiB pages by default (patches/binutils/0001:
+# max-page-size = common-page-size = 0x4000, the Padre kernel page size)
+# and carries the uClibc longjmp fix (patches/uclibc/0002).
 BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_READYNAS_NG_PATH)/board/readynas-duo-v1/patches"
 BR2_sparc=y
 BR2_sparc_v7=y
