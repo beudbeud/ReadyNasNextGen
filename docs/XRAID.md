@@ -157,7 +157,7 @@ nothing is written.
 | Section that is not a mirror (NV+ RAID 4) | read-only |
 | **Mismatched samples** at the same LBAs (compared only before a rw mount, §2.1) | read-only (`mirror_differs`) |
 | Partition that overflows the sections or V | read-only |
-| Crash **under Linux** (marker `/var/lib/nas-raid/xraid-dirty` left behind) | read-only, until a successful full check |
+| Crash **under Linux** (marker `/var/lib/nas-raid/xraid-dirty` left behind) | read-only, until a successful full check or quick check (§5.1) |
 | A leg fails while writing | failure recorded on the survivor, read-only (§2.2) |
 
 Always: `xraid-info` opens the disks read-only only; the protected area is only
@@ -175,7 +175,8 @@ Only one `nas-raid` action at a time (lock).
 
 - **No partial resynchronisation**: a power cut during a write leaves the
   superblock "in use" (and the `xraid-dirty` marker on the USB stick): read-only
-  until `nas-raid verify` (several hours) puts it back clean, or RAIDiator
+  until `nas-raid verify` (several hours) puts it back clean (or a quick
+  check, §5.1, accepted with its residual risk), or RAIDiator
   copies the whole sections base → mirror at its next start (as it does after
   its own crashes). There is no write-intent bitmap, in RAIDiator either.
 - The superblock writes have only been tried on disk images (§9 lists the
@@ -213,6 +214,86 @@ Only one `nas-raid` action at a time (lock).
   runs `repair` on each md: the base is copied to the mirror where they
   differ. Then `nas-raid verify`, then reboot.
 
+### 5.1 Quick check
+
+`nas-raid quick-verify` (or "Quick check" in DIET) compares base and mirror in
+1 to 3 minutes instead of 10–12 hours, where a power cut in the middle of a
+write most likely leaves them different (`xraid-info quick BASE MIRROR`,
+read-only; `--list` prints the ranges without comparing them):
+
+| Category | What | Located by |
+|---|---|---|
+| `partition` | EBRs of the extended partition (the MBR exists on the base only) | MBR, EBR chain |
+| `lvm` | start of `p5` up to `pe_start`: LVM label and metadata | `LABELONE` label (`pe_start`) |
+| `superblock` | ext3 superblock + group descriptors, and their backups (groups 0, 1, powers of 3, 5, 7) | ext3 superblock |
+| `bitmap` | block and inode bitmaps of every group | group descriptors |
+| `inode_table` | inode table blocks holding at least one inode in use on either disk (inode bitmaps OR'd; capped at 256 MiB, the rest left to the samples) | inode bitmaps |
+| `journal` | the ext3 journal (inode 8), data and indirect blocks | inode 8, `i_block` (direct, IND, DIND, TIND) |
+| `sample` | `QUICK_SAMPLES` (512) random 64 KiB blocks per section, new positions at each run (seed printed) | — |
+
+for both file systems: the system one (`p1`, section 0) and the data one (LV
+`c`). The data volume is located in C, without LVM tools (nothing is needed
+from the running system, it works mounted or not): LVM label on `p5` →
+metadata text (circular buffer) → the PV whose `id` is the label's UUID →
+`extent_size` and the linear segments of LV `c` (`start_extent`,
+`extent_count`, `stripes = [ "pvN", pe ]`) → disk LBA =
+`p5 + pe_start + pe × extent_size + offset`, the same on both disks. Every
+range is clipped to the sections, sorted by LBA (one pass per disk), read in
+1 MiB pieces; a mismatch is read again three times (write in progress) like
+`verify`. Output: bytes compared and differing pieces per category, the
+differing LBAs with their category and file system, notes. Exit code: 0
+identical, 1 differences, 2 read errors, 3 identical but **incomplete** (a
+file system, the LVM metadata or a journal could not be located: extent-mapped
+journal, segment on another PV, unknown format).
+
+**What it guarantees**: the file system structure is consistent between the
+disks: superblocks, descriptors, bitmaps, in-use inodes and the whole journal
+(where ext3 writes every metadata change first), plus LVM and the partition
+table. **What it does not**: file *data* blocks are not journaled (ext3
+`data=ordered`): a file being written at the time of the cut can differ
+between the disks outside the compared areas, and only the samples may see it
+(on the test images a difference placed in a free data block is not found by
+the quick check, and found by `verify`). Directory blocks are not compared
+either (they are journaled, so a torn update shows in the journal). After an
+accepted quick check such a block would read differently depending on the
+disk; `verify` then `repair` remove that risk.
+
+Decision (`nas-raid quick-verify`, same lock and log as `verify`; state in
+`/var/lib/nas-raid/quick.state`, result JSON in `quick.res`, progress in
+`quick.progress`, all in `nas-raid status --json` under `quick`):
+
+- no difference, superblock **clean** (bit 0 of 0x84 at 1, sections inited),
+  only the Linux `xraid-dirty` marker left: the marker is removed (logged),
+  writing allowed at the next mount. The superblock is not touched.
+- no difference, superblock **unclean** (real crash, or RAIDiator stopped
+  uncleanly): nothing is lifted; state `confirm` and a token
+  `/var/run/quick.ok` (superblock ID and date) valid for this boot only: it disappears at any
+  mount/remount and any read-write assembly. `nas-raid quick-accept --confirm
+  ACCEPT --yes` (DIET: dialog with a box to tick and the word `ACCEPT`) then
+  does exactly what a successful `verify` does (marker removed,
+  `xraid-verified`, `xraid-sb clean`), and only if the superblock has not
+  changed, the reasons are only `unclean_shutdown`/`sync_in_progress` and
+  nothing is assembled for writing. This is a **residual risk accepted by the
+  administrator** (see above), logged as such.
+- a difference: nothing is lifted, state `differences` (reason
+  `mirror_differs` at the next rw attempt): repair needed as today (§5).
+- `incomplete` or `errors`: nothing is lifted.
+- the X-RAID mounted read-write: the result is informative, nothing is lifted.
+
+**Volume and duration on the NAS** (750 GB disks, estimates: the
+geometry of the data volume was not read on the NAS; `xraid-info quick
+--list` gives the exact list). LV `c` ≈ 697 GiB = 45.7 M blocks of 16 KiB,
+131,072 blocks per group → ~350 groups. Journal: mke2fs gives a 32,768-block
+journal to a volume this size = **512 MiB** (64 MiB for the 2 GB `p1`);
+bitmaps 350 × 32 KiB = 11 MiB; superblock/descriptor copies ~20 × 32 KiB;
+inode tables in use: a few MiB for some tens of thousands of files (capped at
+256 MiB); samples 2 × 512 × 64 KiB = 64 MiB. In all ~0.6–0.9 GiB per disk.
+Measured rates: sequential ~35 MB/s for both disks together (full verify:
+2 × 700 GB in 10–12 h), random 64 KiB samples ~70 ms each (256 per section:
+35 s). Journals ~35–40 s, bitmaps and inode tables (one seek per group,
+adjacent ranges) ~25–40 s, samples ~70 s: **about 2–2.5 minutes**.
+`QUICK_SAMPLES` in `/etc/nas-raid.conf` trades samples against time (256: −35 s).
+
 ## 6. md: disabled for now; replacement and expansion
 
 `nas-raid migrate`, `create`, `add` and `grow` are refused ("md support is
@@ -239,13 +320,14 @@ The "Storage /c" card shows the mode (X-RAID read-write, X-RAID
 read-only, md RAID), the reasons for a read-only mount, the superblock (clean,
 or in use / unclean shutdown), each disk (bay, role, online/faulty/ready), the
 RAIDiator counters, the state of each section and the last mirror check. Buttons:
-"Check the mirror" and "Storage log" (no md action: §6). In X-RAID mode, the "Allow writing on the
+"Check the mirror", "Quick check" (§5.1: state, progress, result, and
+"Accept the quick check…" when it is offered) and "Storage log" (no md action: §6). In X-RAID mode, the "Allow writing on the
 X-RAID" switch (disabled when `xraid-sb` is missing) writes `XRAID_RW` (enabling: warning, checkbox and
 the word `WRITE`), stops the services that use `/c` for the time of a
 `nas-raid remount`, then restarts them; if a safeguard refuses, the card stays
 read-only with the reason (docs/DIET.md). API: `GET ?a=storage` (`nas-raid status
 --json`, without disk access: result cached at mount time), `POST
-?a=raid_verify|xraid_rw` (`raid_plan`/`raid_run`: 409, md disabled), log `?a=log&f=storage`.
+?a=raid_verify|raid_quick|raid_quick_accept|xraid_rw` (`raid_quick_accept`: `confirm=ACCEPT&yes=1`) (`raid_plan`/`raid_run`: 409, md disabled), log `?a=log&f=storage`.
 
 ## 8. Tests on a PC (no NAS, no root)
 
@@ -321,9 +403,9 @@ after each one, read the four copies back with `dd` as above and compare with
 
 | File | Purpose |
 |---|---|
-| `package/xraid-compat/src/xraid-info.c` | analysis, full check, SMART (read-only) |
+| `package/xraid-compat/src/xraid-info.c` | analysis, full and quick check, SMART (read-only) |
 | `package/xraid-compat/src/xraid-sb.c` | superblock updates: dirty, clean, fail (the only writer of the protected area) |
-| `package/xraid-compat/src/nas-raid` | mount, unmount, watch, check, repair |
+| `package/xraid-compat/src/nas-raid` | mount, unmount, watch, check, quick check, repair |
 | `package/xraid-compat/src/S35storage` | boot, shutdown, watch every 30 s |
 | `package/xraid-compat/tests/` | fake images and tests |
 | `/etc/nas-raid.conf` (on the NAS, optional) | `XRAID_RW`, `SAMPLES`, `EXT4_OPTS`… (variables at the top of `nas-raid`) |

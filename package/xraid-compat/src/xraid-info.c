@@ -16,6 +16,13 @@
  *   xraid-info verify [--json] [--zone MIB] DISK_A DISK_B
  *        compares the whole content of the sections of both disks
  *        (read-only); exit code 0 = identical, 1 = differences, 2 = errors.
+ *   xraid-info quick [--json] [--samples K] [--seed S] [--list] BASE MIRROR
+ *        quick check (1 to 3 minutes on the NAS): compares the areas a power
+ *        cut while writing most likely leaves different (ext3 journals and
+ *        metadata of p1 and of the LV "c", LVM metadata, EBRs) plus K random
+ *        64 KiB blocks per section; --list prints the ranges without reading
+ *        the mirror's data. Exit 0 = identical, 1 = differences, 2 = errors,
+ *        3 = identical but incomplete (a file system was not located).
  *   xraid-info smart [--json] DISK
  *        SMART through ATA PASS-THROUGH (SG_IO): health, reallocated,
  *        pending, uncorrectable sectors, hours (format of /var/run/smart.sdX).
@@ -32,6 +39,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <scsi/sg.h>
@@ -218,7 +226,9 @@ static void reason(int severity, const char *code, const char *text)
 		block_all = 1;
 }
 
-/* partitions from an MBR; EBRs read from the read disk */
+/* partitions from an MBR; EBRs read from the read disk (their LBAs kept in ebr_lba) */
+static unsigned ebr_lba[64];
+static int nebr;
 static int read_parts(const unsigned char *mbr, int fd, struct part *p)
 {
 	int i, n = 0;
@@ -243,6 +253,8 @@ static int read_parts(const unsigned char *mbr, int fd, struct part *p)
 		while (ebr && guard++ < 64 && read_at(fd, (u64)ebr * 512, b, 512) == 0
 		       && b[510] == 0x55 && b[511] == 0xAA) {
 			const unsigned char *e = b + 0x1BE;
+			if (nebr < 64)
+				ebr_lba[nebr++] = ebr;
 			if (e[4] && le32(e + 12) && n < MAXP) {
 				p[n].num = num; p[n].start = ebr + le32(e + 8);
 				p[n].nb = le32(e + 12); p[n].type = e[4];
@@ -579,6 +591,25 @@ static int analyse(int argc, char **argv, int k)
 	return 0;
 }
 
+/* sections in use, bounded by V (verify, quick); returns their number */
+static int load_sections(const unsigned char *sb, struct section *S)
+{
+	unsigned v = be32(sb + 0x20);
+	int i, ns = 0;
+	for (i = 0; i < 7; i++) {
+		const unsigned char *e = sb + 0x800 + 32 * i;
+		if (!e[6])
+			continue;
+		S[ns].start = be32(e + 0x10);
+		S[ns].end = S[ns].start + be32(e + 0x18);
+		if (S[ns].end > v || S[ns].end < S[ns].start)
+			S[ns].end = v;
+		if (S[ns].end > S[ns].start)
+			ns++;
+	}
+	return ns;
+}
+
 /* ---------- full mirror verification (read-only) ---------- */
 static int verify(int argc, char **argv, unsigned zone_mib)
 {
@@ -586,8 +617,7 @@ static int verify(int argc, char **argv, unsigned zone_mib)
 	struct section S[7];
 	const unsigned char *sb;
 	unsigned char *a, *b;
-	unsigned v;
-	int i, ns = 0, errors = 0;
+	int i, ns, errors = 0;
 	u64 total = 0, done = 0, zones = 0, first_diff = 0;
 	const unsigned block = 1024 * 1024;
 	unsigned pct = 101;
@@ -601,18 +631,9 @@ static int verify(int argc, char **argv, unsigned zone_mib)
 	if (A.ref < 0 && B.ref < 0)
 		die("no X-RAID superblock");
 	sb = A.ref >= 0 ? A.sb[A.ref] : B.sb[B.ref];
-	v = be32(sb + 0x20);
-	for (i = 0; i < 7; i++) {
-		const unsigned char *e = sb + 0x800 + 32 * i;
-		if (!e[6])
-			continue;
-		S[ns].start = be32(e + 0x10);
-		S[ns].end = S[ns].start + be32(e + 0x18);
-		if (S[ns].end > v || S[ns].end < S[ns].start)
-			S[ns].end = v;
-		if (S[ns].end > S[ns].start)
-			total += S[ns].end - S[ns].start, ns++;
-	}
+	ns = load_sections(sb, S);
+	for (i = 0; i < ns; i++)
+		total += S[i].end - S[i].start;
 	if (!zone_mib)
 		zone_mib = 64;
 	a = malloc(block);
@@ -669,6 +690,570 @@ static int verify(int argc, char **argv, unsigned zone_mib)
 	key_n("READ_ERRORS", (u64)errors);
 	if (json) printf("}\n");
 	return errors ? 2 : zones ? 1 : 0;
+}
+
+/* ---------- quick check: the areas a power cut most likely leaves different ----------
+ * Ranges (disk LBAs, clipped to the sections) compared base / mirror:
+ *   partition  EBRs of the extended partition (the MBR is on the base only)
+ *   lvm        start of p5 up to pe_start: LVM label and metadata
+ *   superblock ext3 superblock and group descriptors, and their backups
+ *   bitmap     block and inode bitmaps of every group
+ *   inode_table inode table blocks holding an inode in use (either disk)
+ *   journal    the ext3 journal (inode 8) and its indirect blocks
+ *   sample     random 64 KiB blocks over the whole sections
+ * for the system file system (p1, section 0) and the data one (LV "c" in the
+ * LVM group on p5, located through the LVM text metadata). Structures are read
+ * on the first disk (the base). File data outside these areas is only covered
+ * by the samples. Exit: 0 identical, 1 differences, 2 errors, 3 identical but
+ * incomplete (a file system or its journal could not be located). */
+enum { C_PART, C_LVM, C_SB, C_BITMAP, C_ITABLE, C_JOURNAL, C_SAMPLE, NCAT };
+static const char *CAT[NCAT] = { "partition", "lvm", "superblock", "bitmap", "inode_table", "journal", "sample" };
+static const char *FSN[3] = { "-", "system", "data" };
+#define XR_LV "c"			/* RAIDiator's logical volume */
+#define ITABLE_MAX (256ULL << 20)	/* ponytail: inode tables beyond this are left to the samples */
+
+struct rng { u64 lba, n; int cat, fs; };
+static struct rng *rg;
+static int nrg, rg_cap;
+static struct section QS[7];
+static int qns;
+static u64 unmapped, itable_bytes, itable_skipped;
+static const char *notes[16];
+static int nnotes, incomplete;
+
+static void note(int fatal, const char *s)
+{
+	if (nnotes < 16)
+		notes[nnotes++] = s;
+	incomplete |= fatal;
+}
+
+static u64 le64(const unsigned char *p) { return (u64)le32(p + 4) << 32 | le32(p); }
+static unsigned le16(const unsigned char *p) { return (unsigned)p[1] << 8 | p[0]; }
+
+/* adds [lba, lba+n) clipped to the sections; merges with the previous one when contiguous */
+static void add(int cat, int fs, u64 lba, u64 n)
+{
+	int i;
+	for (i = 0; i < qns; i++) {
+		u64 a = lba > QS[i].start ? lba : QS[i].start, b = lba + n < QS[i].end ? lba + n : QS[i].end;
+		struct rng *l = nrg ? &rg[nrg - 1] : NULL;
+		if (a >= b)
+			continue;
+		if (l && l->cat == cat && l->fs == fs && l->lba + l->n == a && cat != C_SAMPLE) {
+			l->n += b - a;
+			continue;
+		}
+		if (nrg == rg_cap) {
+			rg_cap = rg_cap ? 2 * rg_cap : 1024;
+			rg = realloc(rg, rg_cap * sizeof(*rg));
+			if (!rg)
+				die("out of memory");
+		}
+		rg[nrg].lba = a; rg[nrg].n = b - a; rg[nrg].cat = cat; rg[nrg].fs = fs;
+		nrg++;
+	}
+}
+
+/* a volume: a partition (nseg < 0) or a linear LV on the PV of a partition */
+struct vol {
+	u64 part, pe, ext;		/* sectors: partition start, pe_start, extent size */
+	int nseg, fs;
+	struct { u64 le, n, pe; } seg[32];
+};
+
+/* disk byte of volume byte off, *len cut to what is contiguous; -1 if unmapped */
+static u64 vmap(const struct vol *v, u64 off, u64 *len)
+{
+	int i;
+	if (v->nseg < 0)
+		return v->part * 512 + off;
+	for (i = 0; i < v->nseg; i++) {
+		u64 a = v->seg[i].le * v->ext * 512, b = a + v->seg[i].n * v->ext * 512;
+		if (off >= a && off < b) {
+			if (*len > b - off)
+				*len = b - off;
+			return (v->part + v->pe + v->seg[i].pe * v->ext) * 512 + off - a;
+		}
+	}
+	for (i = 0; i < v->nseg; i++) {	/* unmapped up to the next segment */
+		u64 a = v->seg[i].le * v->ext * 512;
+		if (a > off && *len > a - off)
+			*len = a - off;
+	}
+	return (u64)-1;
+}
+
+static int vread(int fd, const struct vol *v, u64 off, void *buf, u64 len)
+{
+	while (len) {
+		u64 l = len, d = vmap(v, off, &l);
+		if (d == (u64)-1 || read_at(fd, d, buf, (size_t)l))
+			return -1;
+		buf = (char *)buf + l; off += l; len -= l;
+	}
+	return 0;
+}
+
+static void vadd(int cat, const struct vol *v, u64 off, u64 len)
+{
+	while (len) {
+		u64 l = len, d = vmap(v, off, &l);
+		if (d == (u64)-1)
+			unmapped += l;
+		else
+			add(cat, v->fs, d / 512, (d % 512 + l + 511) / 512);
+		off += l; len -= l;
+	}
+}
+
+/* ext3 journal (or any indirect-mapped inode): data and indirect blocks */
+static u64 jleft;
+static void jwalk(int fd, const struct vol *v, unsigned bs, unsigned blk, int level)
+{
+	unsigned char *b;
+	unsigned i;
+	if (!blk || !jleft)
+		return;
+	vadd(C_JOURNAL, v, (u64)blk * bs, bs);
+	if (!level) {
+		jleft--;
+		return;
+	}
+	b = malloc(bs);
+	if (!b || vread(fd, v, (u64)blk * bs, b, bs))
+		die("cannot read an indirect block of the journal");
+	for (i = 0; i < bs / 4 && jleft; i++)
+		jwalk(fd, v, bs, le32(b + 4 * i), level - 1);
+	free(b);
+}
+
+static int backup_group(unsigned g, int sparse)
+{
+	unsigned p;
+	if (g <= 1 || !sparse)
+		return 1;
+	for (p = 3; p <= 7; p += 2) {
+		u64 x = p;
+		while (x < g)
+			x *= p;
+		if (x == g)
+			return 1;
+	}
+	return 0;
+}
+
+/* ext3 metadata ranges of a volume; fa = base (structures), fb = mirror */
+static void ext3_ranges(int fa, int fb, const struct vol *v, const char *what)
+{
+	unsigned char s[1024], ino[1024], *gdt, *ba, *bb;
+	unsigned bs, bpg, ipg, isz, ds, first, ng, gdtb, g, j, k, ipb, jino, flags;
+	u64 blocks;
+	static char msg[2][96];
+	char *m = msg[v->fs - 1];
+
+	if (vread(fa, v, 1024, s, 1024) || le16(s + 0x38) != 0xEF53 || le32(s + 0x18) > 6) {
+		snprintf(m, 96, "%s: no ext3 superblock found", what);
+		note(1, m);
+		return;
+	}
+	bs = 1024u << le32(s + 0x18);
+	blocks = le32(s + 4);
+	first = le32(s + 0x14);
+	bpg = le32(s + 0x20);
+	ipg = le32(s + 0x28);
+	isz = le32(s + 0x4C) ? le16(s + 0x58) : 128;
+	ds = (le32(s + 0x60) & 0x80) && le16(s + 0xFE) >= 32 ? le16(s + 0xFE) : 32;
+	if (!bpg || !ipg || isz < 128 || isz > 1024 || isz > bs || ipg % (bs / isz) || blocks <= first) {
+		snprintf(m, 96, "%s: inconsistent ext3 superblock", what);
+		note(1, m);
+		return;
+	}
+	ng = (unsigned)((blocks - first + bpg - 1) / bpg);
+	gdtb = (unsigned)(((u64)ng * ds + bs - 1) / bs);
+	ipb = bs / isz;
+	gdt = malloc((size_t)gdtb * bs);
+	ba = malloc(bs);
+	bb = malloc(bs);
+	if (!gdt || !ba || !bb)
+		die("out of memory");
+	if (vread(fa, v, (u64)(first + 1) * bs, gdt, (u64)gdtb * bs))
+		die("%s: cannot read the group descriptors", what);
+	for (g = 0; g < ng; g++) {
+		const unsigned char *d = gdt + (size_t)g * ds;
+		unsigned it = le32(d + 8), ib = le32(d + 4);
+		if (backup_group(g, le32(s + 0x64) & 1))
+			vadd(C_SB, v, ((u64)g * bpg + first) * bs, (u64)(1 + gdtb) * bs);
+		vadd(C_BITMAP, v, (u64)le32(d) * bs, bs);
+		vadd(C_BITMAP, v, (u64)ib * bs, bs);
+		/* inode table: the blocks holding an inode in use on either disk */
+		if (vread(fa, v, (u64)ib * bs, ba, bs) || vread(fb, v, (u64)ib * bs, bb, bs))
+			die("%s: cannot read an inode bitmap", what);
+		for (j = 0; j < ipg / ipb; j++) {
+			int used = 0;
+			for (k = j * ipb; k < (j + 1) * ipb && !used; k++)
+				used = (ba[k / 8] | bb[k / 8]) >> (k % 8) & 1;
+			if (!used)
+				continue;
+			if (itable_bytes + bs > ITABLE_MAX) {
+				itable_skipped += bs;
+				continue;
+			}
+			itable_bytes += bs;
+			vadd(C_ITABLE, v, (u64)(it + j) * bs, bs);
+		}
+	}
+	/* journal: has_journal, inode s_journal_inum, indirect blocks (ext3) */
+	jino = le32(s + 0xE0);
+	if (!(le32(s + 0x5C) & 4) || !jino || jino > ng * ipg) {
+		snprintf(m, 96, "%s: no internal journal", what);
+		note(1, m);
+	} else {
+		const unsigned char *d = gdt + (size_t)((jino - 1) / ipg) * ds;
+		if (vread(fa, v, (u64)le32(d + 8) * bs + (u64)((jino - 1) % ipg) * isz, ino, isz))
+			die("%s: cannot read the journal inode", what);
+		flags = le32(ino + 0x20);
+		jleft = le32(ino + 4) / bs;
+		if (flags & 0x80000) {	/* ponytail: extent-mapped journal (ext4) not walked */
+			snprintf(m, 96, "%s: extent-mapped journal not supported", what);
+			note(1, m);
+		} else {
+			for (k = 0; k < 12; k++)
+				jwalk(fa, v, bs, le32(ino + 0x28 + 4 * k), 0);
+			for (k = 0; k < 3; k++)
+				jwalk(fa, v, bs, le32(ino + 0x28 + 4 * (12 + k)), k + 1);
+			if (jleft) {
+				snprintf(m, 96, "%s: journal shorter than its size", what);
+				note(1, m);
+			}
+		}
+	}
+	free(gdt); free(ba); free(bb);
+}
+
+/* LVM text metadata: end of the block opened at p ('{'), or NULL */
+static const char *blk_end(const char *p, const char *e)
+{
+	int d = 0;
+	for (; p < e; p++) {
+		if (*p == '"') {
+			for (p++; p < e && *p != '"'; p++)
+				if (*p == '\\')
+					p++;
+		} else if (*p == '#') {
+			while (p < e && *p != '\n')
+				p++;
+		} else if (*p == '{')
+			d++;
+		else if (*p == '}' && !--d)
+			return p;
+	}
+	return NULL;
+}
+
+static int wordc(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' || c == '+'; }
+
+/* at this level of [p, e): block "name {" (blk: points at '{'; name NULL = the
+ * first block, *nm gets its name) or value of "name =" (points after '=') */
+static const char *lv_find(const char *p, const char *e, const char *name, int blk, char *nm)
+{
+	while (p < e) {
+		if (*p == '#') {
+			while (p < e && *p != '\n')
+				p++;
+		} else if (*p == '"') {
+			for (p++; p < e && *p != '"'; p++)
+				if (*p == '\\')
+					p++;
+			p++;
+		} else if (wordc(*p)) {
+			const char *w = p, *q;
+			int match;
+			while (p < e && wordc(*p))
+				p++;
+			for (q = p; q < e && (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r'); q++)
+				;
+			match = name ? (size_t)(p - w) == strlen(name) && !memcmp(w, name, (size_t)(p - w)) : 1;
+			if (q < e && *q == '{') {
+				if (blk && match) {
+					if (nm)
+						snprintf(nm, 64, "%.*s", (int)(p - w), w);
+					return q;
+				}
+				p = blk_end(q, e);
+				if (!p)
+					return NULL;
+				p++;
+			} else if (q < e && *q == '=' && !blk && match) {
+				for (q++; q < e && (*q == ' ' || *q == '\t'); q++)
+					;
+				return q;
+			}
+		} else
+			p++;
+	}
+	return NULL;
+}
+
+static u64 lv_num(const char *p, const char *e, const char *name, int *bad)
+{
+	const char *v = lv_find(p, e, name, 0, NULL);
+	if (!v || *v < '0' || *v > '9') {
+		*bad = 1;
+		return 0;
+	}
+	return strtoull(v, NULL, 10);
+}
+
+/* LV "c" on the PV of partition p5 (lba): label, metadata area, text */
+static int lvm_vol(int fd, u64 part, u64 psize, struct vol *v)
+{
+	unsigned char s[512], m[512];
+	const unsigned char *d;
+	char id[40], nm[64], pvname[64] = "", *t;
+	const char *e, *vg, *ve, *x, *xe, *lv, *le;
+	u64 mda, mdasz, off, size, first;
+	int i, k, bad = 0;
+
+	for (i = 0; i < 4; i++)
+		if (!read_at(fd, (part + i) * 512, s, 512) && !memcmp(s, "LABELONE", 8) && !memcmp(s + 24, "LVM2 001", 8))
+			break;
+	if (i == 4 || le32(s + 20) != 32)
+		return -1;
+	/* pv_header at +32: uuid[32], device size, data areas, 0, metadata areas, 0 */
+	snprintf(id, sizeof(id), "%.6s-%.4s-%.4s-%.4s-%.4s-%.4s-%.6s", s + 32, s + 38, s + 42, s + 46, s + 50, s + 54, s + 58);
+	d = s + 32 + 40;
+	v->pe = le64(d) / 512;
+	while (le64(d) && d < s + 480)
+		d += 16;
+	d += 16;
+	mda = le64(d); mdasz = le64(d + 8);
+	if (!mda || mdasz < 1024 || mda + mdasz > psize * 512 || read_at(fd, part * 512 + mda, m, 512)
+	    || memcmp(m + 4, " LVM2 x[5A%r0N*>", 16))
+		return -1;
+	off = le64(m + 40); size = le64(m + 48);	/* raw_locn[0], relative to the area */
+	if (off < 512 || off >= mdasz || !size || size > mdasz - 512)
+		return -1;
+	t = malloc(size + 1);
+	if (!t)
+		die("out of memory");
+	first = size < mdasz - off ? size : mdasz - off;	/* circular buffer */
+	if (read_at(fd, part * 512 + mda + off, t, first)
+	    || (first < size && read_at(fd, part * 512 + mda + 512, t + first, size - first))) {
+		free(t);
+		return -1;
+	}
+	t[size] = 0;
+	e = t + strlen(t);
+	vg = lv_find(t, e, NULL, 1, NULL);
+	ve = vg ? blk_end(vg, e) : NULL;
+	if (!ve)
+		goto bad;
+	v->ext = lv_num(vg + 1, ve, "extent_size", &bad);
+	/* our PV: the one whose id is the label's uuid */
+	x = lv_find(vg + 1, ve, "physical_volumes", 1, NULL);
+	xe = x ? blk_end(x, ve) : NULL;
+	for (x = x ? x + 1 : NULL; x && xe && (x = lv_find(x, xe, NULL, 1, nm)); x = blk_end(x, xe) + 1) {
+		const char *pe = blk_end(x, xe), *q = pe ? lv_find(x + 1, pe, "id", 0, NULL) : NULL;
+		if (q && *q == '"' && !strncmp(q + 1, id, strlen(id)) && q[1 + strlen(id)] == '"') {
+			snprintf(pvname, sizeof(pvname), "%s", nm);
+			break;
+		}
+		if (!pe)
+			break;
+	}
+	x = lv_find(vg + 1, ve, "logical_volumes", 1, NULL);
+	xe = x ? blk_end(x, ve) : NULL;
+	lv = xe ? lv_find(x + 1, xe, XR_LV, 1, NULL) : NULL;
+	le = lv ? blk_end(lv, xe) : NULL;
+	if (!le || !*pvname || bad || !v->ext)
+		goto bad;
+	v->nseg = 0;
+	for (k = 1; k <= 32; k++) {
+		const char *sg, *se, *q;
+		char segn[16], pv[64];
+		unsigned long long pe;
+		snprintf(segn, sizeof(segn), "segment%d", k);
+		sg = lv_find(lv + 1, le, segn, 1, NULL);
+		se = sg ? blk_end(sg, le) : NULL;
+		if (!se)
+			break;
+		q = lv_find(sg + 1, se, "type", 0, NULL);
+		if (!q || strncmp(q, "\"striped\"", 9) || lv_num(sg + 1, se, "stripe_count", &bad) != 1)
+			goto bad;
+		q = lv_find(sg + 1, se, "stripes", 0, NULL);
+		if (!q || sscanf(q, "[ \"%63[^\"]\" , %llu", pv, &pe) != 2)
+			goto bad;
+		if (strcmp(pv, pvname)) {	/* on another PV: left to the samples */
+			note(1, "data: part of the volume is on another PV");
+			continue;
+		}
+		v->seg[v->nseg].le = lv_num(sg + 1, se, "start_extent", &bad);
+		v->seg[v->nseg].n = lv_num(sg + 1, se, "extent_count", &bad);
+		v->seg[v->nseg].pe = pe;
+		v->nseg++;
+	}
+	if (bad || !v->nseg)
+		goto bad;
+	free(t);
+	return 0;
+bad:
+	free(t);
+	return -1;
+}
+
+static int rng_cmp(const void *a, const void *b)
+{
+	const struct rng *x = a, *y = b;
+	return x->lba < y->lba ? -1 : x->lba > y->lba;
+}
+
+static int quick(int argc, char **argv, int k, unsigned long long seed, int list)
+{
+	static struct disk A, B;
+	static struct part P[MAXP];
+	static unsigned char a[1 << 20], b[1 << 20];
+	struct vol sys, dat;
+	u64 bytes[NCAT] = { 0 }, total = 0, done = 0, x;
+	int diffs[NCAT] = { 0 }, np, i, j, errors = 0, nd = 0, ndiff = 0;
+	unsigned pct = 101;
+	struct { int cat, fs; u64 lba; } zone[32];
+
+	if (argc != 2)
+		die("quick: two disks expected (base, then mirror)");
+	open_disk(&A, argv[0]);
+	open_disk(&B, argv[1]);
+	read_disk(&A);
+	read_disk(&B);
+	if (A.ref < 0)
+		die("no X-RAID superblock on the base disk");
+	if (!A.mbr_ok)
+		die("the first disk has no MBR: give the base disk first");
+	qns = load_sections(A.sb[A.ref], QS);
+	np = read_parts(A.mbr, A.fd, P);
+
+	for (i = 0; i < nebr; i++)
+		add(C_PART, 0, ebr_lba[i], 1);
+	memset(&sys, 0, sizeof(sys));
+	memset(&dat, 0, sizeof(dat));
+	sys.nseg = -1; sys.fs = 1; dat.fs = 2;
+	for (i = 0; i < np && !sys.part; i++)
+		if (P[i].num == 1)
+			sys.part = P[i].start;
+	if (sys.part)
+		ext3_ranges(A.fd, B.fd, &sys, "system");
+	else
+		note(1, "system: no partition 1");
+	for (i = 0; i < np && !dat.part; i++)
+		if (P[i].type == 0x8e) {
+			dat.part = P[i].start;
+			if (lvm_vol(A.fd, P[i].start, P[i].nb, &dat) == 0) {
+				add(C_LVM, 0, P[i].start, dat.pe);
+				ext3_ranges(A.fd, B.fd, &dat, "data");
+			} else {
+				add(C_LVM, 0, P[i].start, 2048);	/* label and usual metadata area */
+				note(1, "data: LVM metadata or LV \"" XR_LV "\" not understood");
+			}
+		}
+	if (!dat.part)
+		note(1, "data: no LVM partition");
+	if (unmapped)
+		note(1, "data: part of the file system is outside the LVM segments");
+	if (itable_skipped)
+		note(0, "inode tables: in-use blocks beyond 256 MiB left to the samples");
+	/* random 64 KiB samples, aligned, over each section */
+	if (!seed)
+		seed = (unsigned long long)time(NULL) ^ (unsigned long long)getpid() << 32;
+	x = seed;
+	for (i = 0; i < qns; i++) {
+		u64 lg = QS[i].end - QS[i].start;
+		if (lg < SAMPLE_LEN / 512)
+			continue;
+		for (j = 0; j < k; j++) {
+			x ^= x << 13; x ^= x >> 7; x ^= x << 17;	/* xorshift64 */
+			add(C_SAMPLE, 0, QS[i].start + x % (lg / (SAMPLE_LEN / 512)) * (SAMPLE_LEN / 512), SAMPLE_LEN / 512);
+		}
+	}
+	qsort(rg, (size_t)nrg, sizeof(*rg), rng_cmp);	/* one pass over each disk */
+	for (i = 0; i < nrg; i++)
+		total += rg[i].n;
+	if (list) {
+		for (i = 0; i < nrg; i++)
+			printf("%s %s %llu %llu\n", CAT[rg[i].cat], FSN[rg[i].fs], rg[i].lba, rg[i].n);
+		return 0;
+	}
+
+	for (i = 0; i < nrg; i++) {
+		u64 lba = rg[i].lba, end = rg[i].lba + rg[i].n;
+		bytes[rg[i].cat] += rg[i].n * 512;
+		while (lba < end) {
+			u64 n = end - lba > sizeof(a) / 512 ? sizeof(a) / 512 : end - lba;
+			size_t len = (size_t)n * 512, o = 0;
+			int attempt, d = 1;
+			/* a difference may come from a write in progress: read again 3 times */
+			for (attempt = 0; attempt < 3 && d; attempt++) {
+				if (attempt)
+					sleep(1);
+				if (read_at(A.fd, lba * 512, a, len) || read_at(B.fd, lba * 512, b, len)) {
+					fprintf(stderr, "read error near LBA %llu\n", lba);
+					errors++;
+					d = 0;
+					break;
+				}
+				d = memcmp(a, b, len) != 0;
+			}
+			if (d) {
+				while (o < len && a[o] == b[o])
+					o++;
+				diffs[rg[i].cat]++;
+				ndiff++;
+				if (nd < 32) {
+					zone[nd].cat = rg[i].cat; zone[nd].fs = rg[i].fs; zone[nd].lba = lba + o / 512;
+					nd++;
+				}
+			}
+			lba += n;
+			done += n;
+			if (done * 100 / total != pct) {
+				pct = (unsigned)(done * 100 / total);
+				fprintf(stderr, "progress %u%%\n", pct);
+			}
+		}
+	}
+
+	first = 1;
+	if (json) printf("{");
+	key_s("RESULT", errors ? "errors" : ndiff ? "differences" : incomplete ? "incomplete" : "identical");
+	key_n("COMPLETE", !incomplete);
+	key_n("SEED", seed);
+	key_n("BYTES", total * 512);
+	key_n("DIFFERENCES", (u64)ndiff);
+	key_n("READ_ERRORS", (u64)errors);
+	if (json) {
+		printf(",\"categories\":[");
+		for (i = 0; i < NCAT; i++)
+			printf("%s{\"name\":\"%s\",\"bytes\":%llu,\"differences\":%d}", i ? "," : "", CAT[i], bytes[i], diffs[i]);
+		printf("],\"zones\":[");
+		for (i = 0; i < nd; i++)
+			printf("%s{\"category\":\"%s\",\"fs\":\"%s\",\"lba\":%llu}", i ? "," : "", CAT[zone[i].cat], FSN[zone[i].fs], zone[i].lba);
+		printf("],\"notes\":[");
+		for (i = 0; i < nnotes; i++) {
+			const char *c;
+			printf("%s\"", i ? "," : "");
+			for (c = notes[i]; *c; c++)
+				printf(*c == '"' || *c == '\\' ? "\\%c" : "%c", *c);
+			putchar('"');
+		}
+		printf("]}\n");
+	} else {
+		for (i = 0; i < NCAT; i++)	/* bytes compared, differing chunks */
+			printf("XR_CAT_%s='%llu %d'\n", CAT[i], bytes[i], diffs[i]);
+		for (i = 0; i < nd; i++)
+			printf("# difference %s %s LBA %llu\n", CAT[zone[i].cat], FSN[zone[i].fs], zone[i].lba);
+		for (i = 0; i < nnotes; i++)
+			printf("# note: %s\n", notes[i]);
+	}
+	return errors ? 2 : ndiff ? 1 : incomplete ? 3 : 0;
 }
 
 /* ---------- SMART through ATA PASS-THROUGH (16), without smartctl ---------- */
@@ -744,18 +1329,23 @@ static int smart(const char *path)
 
 int main(int argc, char **argv)
 {
-	int k = 0;
+	int k = 0, list = 0;
 	unsigned zone = 0;
+	unsigned long long seed = 0;
 	const char *cmd = "analyse";
 
 	argc--, argv++;
-	if (argc && (!strcmp(argv[0], "verify") || !strcmp(argv[0], "smart")))
+	if (argc && (!strcmp(argv[0], "verify") || !strcmp(argv[0], "smart") || !strcmp(argv[0], "quick")))
 		cmd = argv[0], argc--, argv++;
 	while (argc && argv[0][0] == '-' && argv[0][1] == '-') {
 		if (!strcmp(argv[0], "--json"))
 			json = 1;
 		else if (!strcmp(argv[0], "--samples") && argc > 1)
 			k = atoi(argv[1]), argc--, argv++;
+		else if (!strcmp(argv[0], "--seed") && argc > 1)
+			seed = strtoull(argv[1], NULL, 0), argc--, argv++;
+		else if (!strcmp(argv[0], "--list"))
+			list = 1;
 		else if (!strcmp(argv[0], "--zone") && argc > 1)
 			zone = (unsigned)atoi(argv[1]), argc--, argv++;
 		else
@@ -766,6 +1356,8 @@ int main(int argc, char **argv)
 		die("--samples: 0..100000");
 	if (!strcmp(cmd, "verify"))
 		return verify(argc, argv, zone);
+	if (!strcmp(cmd, "quick"))
+		return quick(argc, argv, k, seed, list);
 	if (!strcmp(cmd, "smart")) {
 		if (argc != 1)
 			die("smart: one disk");

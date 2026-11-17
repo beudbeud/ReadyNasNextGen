@@ -19,7 +19,7 @@ check() {	# check "description" shell-condition
 mkdir -p "$R/bin" "$R/proc" "$R/var/run" "$R/var/lib" "$R/etc/init.d"
 cc -O2 -Wall -Werror -o "$R/bin/xraid-info" "$SRC/xraid-info.c" || exit 1
 cc -O2 -Wall -Werror -o "$R/bin/xraid-sb.real" "$SRC/xraid-sb.c" || exit 1
-for s in clean big dirty degraded sync different md reinstall counters torn sbw; do
+for s in clean big dirty degraded sync different md reinstall counters torn sbw fs fsdirty; do
 	python3 "$HERE/make-images.py" "$T/$s" "$s" > /dev/null || exit 1
 done
 
@@ -55,6 +55,29 @@ check "format: superblock and its copy differ -> ro, superblock_torn" "[ \"\$(re
 check "verify: identical images -> code 0" "[ $rc = 0 ] && grep -q \"RESULT='identical'\" '$T/v1'"
 "$R/bin/xraid-info" verify "$T"/different/sdb.img "$T"/different/sda.img > "$T/v2" 2>/dev/null; rc=$?
 check "verify: one difference -> code 1, one zone" "[ $rc = 1 ] && grep -q 'DIFFERENT_ZONES=1' '$T/v2'"
+# ---------- quick check: ext3 (16 KiB blocks) in LVM in X-RAID (make-images.py fs) ----------
+q() { "$R/bin/xraid-info" quick --json --seed 7 "$@" 2>/dev/null; }
+jtotal() { LC_ALL=C debugfs -R 'stat <8>' "$T/fs/$1.fs" 2>/dev/null | sed -n 's/^TOTAL: //p'; }
+J=$(q --samples 64 "$T"/fs/sdb.img "$T"/fs/sda.img); rc=$?
+check "quick: identical images -> code 0, complete, valid JSON" "[ $rc = 0 ] && js 'j[\"result\"]==\"identical\" and j[\"complete\"]==1'"
+cat_b() { python3 -c "import json,sys; j=json.loads(sys.argv[1]); print([c['bytes'] for c in j['categories'] if c['name']==sys.argv[2]][0])" "$J" "$1"; }
+check "quick: both journals located (inode 8, indirect blocks, as debugfs counts them)" "[ \"\$(cat_b journal)\" = \$(( (\$(jtotal system) + \$(jtotal data)) * 16384 )) ]"
+"$R/bin/xraid-info" quick --list --samples 0 "$T"/fs/sdb.img "$T"/fs/sda.img > "$T/qlist"
+check "quick --list: data journal = debugfs block count, LVM area = pe_start, 1 EBR" "[ \$(awk '\$1==\"journal\" && \$2==\"data\" { n += \$4 } END { print n }' '$T/qlist') = \$((\$(jtotal data) * 32)) ] && grep -qx 'lvm - 4608040 384' '$T/qlist' && grep -qx 'partition - 4608032 1' '$T/qlist'"
+check "quick: superblocks, bitmaps and in-use inode tables of both file systems listed" "for c in superblock bitmap inode_table; do grep -q \"^\$c system \" '$T/qlist' && grep -q \"^\$c data \" '$T/qlist' || exit 1; done"
+for w in journal:journal:data sysjournal:journal:system bitmap:bitmap:data itable:inode_table:data lvm:lvm:-; do
+	set -- $(echo $w | tr : ' ')
+	python3 "$HERE/make-images.py" "$T/q-$1" fs > /dev/null; lba=$(python3 "$HERE/make-images.py" "$T/q-$1" poke $1)
+	J=$(q --samples 0 "$T/q-$1"/sdb.img "$T/q-$1"/sda.img); rc=$?
+	check "quick: a difference in the $1 area is found (code 1, zone $2/$3, its LBA)" "[ $rc = 1 ] && js 'j[\"zones\"]==[{\"category\":\"$2\",\"fs\":\"$3\",\"lba\":$lba}]'"
+done
+# file data outside the targeted areas: only the samples can see it (documented limit)
+python3 "$HERE/make-images.py" "$T/q-data" fs > /dev/null; python3 "$HERE/make-images.py" "$T/q-data" poke data > /dev/null
+J=$(q --samples 0 "$T"/q-data/sdb.img "$T"/q-data/sda.img); rc=$?
+"$R/bin/xraid-info" verify "$T"/q-data/sdb.img "$T"/q-data/sda.img > /dev/null 2>&1; rc2=$?
+check "quick: a difference in unsampled file data is NOT found (limit); the full verify finds it" "[ $rc = 0 ] && [ $rc2 = 1 ]"
+J=$(q --samples 8 "$T"/clean/sdb.img "$T"/clean/sda.img); rc=$?
+check "quick: no ext3/LVM found -> code 3 (incomplete), notes say why" "[ $rc = 3 ] && js 'j[\"result\"]==\"incomplete\" and j[\"complete\"]==0 and len(j[\"notes\"])>=2'"
 check "xraid-info opens nothing for writing (O_RDONLY only)" "! grep -q 'O_RDWR\|O_WRONLY' '$SRC/xraid-info.c'"
 
 # ---------- xraid-sb (superblock writer) on images ----------
@@ -158,6 +181,42 @@ check "read-only forced by another safeguard (XRAID_RW=yes): no comparison" "! s
 nr unmount 2>/dev/null >/dev/null; nr verify 2>/dev/null >/dev/null; nr mount 2>/dev/null >/dev/null
 check "verified RAIDiator dirty superblock: put back clean, rw" "[ \"\$(mode_of)\" = xraid-rw ]"
 nr unmount 2>/dev/null >/dev/null
+# quick check: clean superblock, only the Linux mark left -> the mark is lifted
+S=$R/var/lib/nas-raid
+DISKS="$T/fs/sda.img $T/fs/sdb.img"; date +%s > "$S/xraid-dirty"; : > "$T/cmd.log"
+nr mount 2>/dev/null >/dev/null
+check "quick-verify setup: clean superblock + xraid-dirty mark -> read-only" "grep -q 'xraid-ro unclean_shutdown_linux' '$R/var/run/nas-raid.mode'"
+nr quick-verify 2>/dev/null >/dev/null; rc=$?
+check "quick-verify, clean superblock, no difference: mark lifted, state ok, superblock untouched" "[ $rc = 0 ] && [ ! -e '$S/xraid-dirty' ] && grep -q '^ok ' '$S/quick.state' && ! grep -q 'xraid-sb' '$T/cmd.log' && grep -q 'xraid-dirty mark removed' '$S/log'"
+nr status --json > "$T/e2"
+check "status --json: quick result (state, categories, accept 0)" "python3 -c \"import json; q=json.load(open('$T/e2'))['quick']; assert q['state']=='ok' and q['accept']==0 and q['result']['complete']==1 and len(q['result']['categories'])==7\""
+nr unmount 2>/dev/null >/dev/null; nr mount 2>/dev/null >/dev/null
+check "after the quick check: rw allowed" "[ \"\$(mode_of)\" = xraid-rw ]"
+nr unmount 2>/dev/null >/dev/null
+# unclean superblock (real crash) -> nothing lifted without an explicit confirmation
+DISKS="$T/fsdirty/sda.img $T/fsdirty/sdb.img"; date +%s > "$S/xraid-dirty"; rm -f "$S/xraid-verified"
+nr mount 2>/dev/null >/dev/null; : > "$T/cmd.log"
+nr quick-verify 2>/dev/null >/dev/null; rc=$?
+check "quick-verify, unclean superblock: no difference, but nothing lifted (state confirm)" "[ $rc = 0 ] && grep -q '^confirm ' '$S/quick.state' && [ -e '$S/xraid-dirty' ] && ! grep -q 'xraid-sb' '$T/cmd.log' && [ \"\$(reasons fsdirty)\" = unclean_shutdown ]"
+nr quick-accept 2>/dev/null >/dev/null; rc=$?
+nr quick-accept --confirm accept --yes 2>/dev/null >/dev/null; rc2=$?
+check "quick-accept: refused without the word ACCEPT and --yes, nothing changed" "[ $rc != 0 ] && [ $rc2 != 0 ] && [ -e '$S/xraid-dirty' ] && ! grep -q 'xraid-sb' '$T/cmd.log'"
+nr status --json > "$T/e3"
+check "status --json: accept offered" "python3 -c \"import json; q=json.load(open('$T/e3'))['quick']; assert q['state']=='confirm' and q['accept']==1\""
+nr unmount 2>/dev/null >/dev/null; nr mount 2>/dev/null >/dev/null
+nr quick-accept --confirm ACCEPT --yes 2>/dev/null >/dev/null; rc=$?
+check "quick-accept: refused after a (re)mount (token valid for one boot, before any mount)" "[ $rc != 0 ] && [ -e '$S/xraid-dirty' ]"
+nr quick-verify 2>/dev/null >/dev/null; : > "$T/cmd.log"
+nr quick-accept --confirm ACCEPT --yes 2>/dev/null >/dev/null; rc=$?
+check "quick-accept confirmed: mark removed, superblock clean (as verify), state accepted" "[ $rc = 0 ] && [ ! -e '$S/xraid-dirty' ] && grep -q 'xraid-sb clean' '$T/cmd.log' && [ -z \"\$(reasons fsdirty)\" ] && grep -q '^accepted ' '$S/quick.state'"
+nr unmount 2>/dev/null >/dev/null
+# a difference in the journal: nothing lifted, repair needed
+python3 "$HERE/make-images.py" "$T/qd" fsdirty > /dev/null; python3 "$HERE/make-images.py" "$T/qd" poke journal > /dev/null
+DISKS="$T/qd/sda.img $T/qd/sdb.img"; date +%s > "$S/xraid-dirty"
+nr mount 2>/dev/null >/dev/null; nr quick-verify 2>/dev/null >/dev/null; rc=$?
+nr quick-accept --confirm ACCEPT --yes 2>/dev/null >/dev/null; rc2=$?
+check "quick-verify, difference in the journal: code 1, state differences, mark kept, accept refused" "[ $rc = 1 ] && grep -q '^differences ' '$S/quick.state' && [ -e '$S/xraid-dirty' ] && [ $rc2 != 0 ]"
+nr unmount 2>/dev/null >/dev/null; rm -f "$S/xraid-dirty"
 DISKS="$T/degraded/sdb.img"; : > "$T/cmd.log"
 nr mount 2>/dev/null >/dev/null
 check "missing disk at boot: read-only on the present disk, nothing written" "grep -q 'xraid-ro missing_disk' '$R/var/run/nas-raid.mode' && ! grep -q 'mdadm\|xraid-sb' '$T/cmd.log'"

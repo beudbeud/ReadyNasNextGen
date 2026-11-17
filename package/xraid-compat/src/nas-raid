@@ -11,12 +11,18 @@
 #   nas-raid remount                       X-RAID only: unmount then mount (after a
 #                                          change of XRAID_RW); refused if /c is busy
 #   nas-raid verify                        compares the two X-RAID disks (long)
+#   nas-raid quick-verify                  quick check (1-3 min): journals, file system
+#                                          and LVM metadata, random samples; lifts the
+#                                          xraid-dirty mark if the superblock is clean
+#   nas-raid quick-accept                  after a quick check without difference on
+#                                          an unclean superblock: accepted as a full
+#                                          check would be (--confirm ACCEPT --yes)
 #   nas-raid repair                        copies the base onto the mirror (md repair)
 #   nas-raid watch                         read-write X-RAID: a failed leg is recorded
 #                                          in the superblock, /c goes read-only (S35storage)
 #   nas-raid migrate|create|add|grow       refused: md support is disabled for now
 # Options: --dry-run (prints the commands without doing anything),
-#          --confirm PHRASE and --yes (double confirmation of repair).
+#          --confirm PHRASE and --yes (double confirmation of repair, quick-accept).
 #
 # X-RAID compatibility: never an md superblock; the protected zone (end of
 # disk, beyond V) is only written by xraid-sb, superblock copies only: "dirty"
@@ -46,6 +52,7 @@ XRAID_LV=c
 EXT4_OPTS=noatime			# options of the kernel mount of /c
 XRAID_RW=no				# "yes": X-RAID writable if all safeguards pass
 SAMPLES=256				# 64 KiB blocks compared per section before a rw mount (0 = none)
+QUICK_SAMPLES=512			# random 64 KiB blocks per section in quick-verify (~70 ms each on the NAS)
 [ -r "$R/etc/nas-raid.conf" ] && . "$R/etc/nas-raid.conf"
 
 LVM_XR="devices { filter = [ \"a|^/dev/mapper/xr-p|\", \"r|.*|\" ] use_devicesfile = 0 } global { metadata_read_only = 1 }"
@@ -163,6 +170,7 @@ assemble_xraid() {	# $1 = rw | ro
 	m=$1; i=0
 	[ -n "$DRY_RUN" ] || mkdir -p "$MOUNTPOINT"
 	if [ $m = rw ]; then
+		[ -n "$DRY_RUN" ] || rm -f "$QUICK_OK"
 		write "$DIRTY" "$(date +%s)"; [ -n "$DRY_RUN" ] || sync
 		while [ $i -lt "$XR_NR_SECTIONS" ]; do
 			eval "set -- \$XR_S$i"
@@ -268,6 +276,7 @@ current_mode() { read -r CURRENT_MODE _ 2>/dev/null < "$RUN/nas-raid.mode" || CU
 # cannot harm anything): first a fast analysis without samples; the comparison
 # runs only if rw is still possible (all other safeguards passed, XRAID_RW=yes).
 do_mount() {
+	[ -n "$DRY_RUN" ] || rm -f "$QUICK_OK"
 	SMP=0; analyse
 	write "$RUN/xraid.json" "$(xraid-info --json $(disks) 2>/dev/null || echo null)"
 	if [ "${XR_MD:-}" = 1 ]; then	# volume made by an earlier version: mounted as it is
@@ -349,6 +358,14 @@ watch() {
 	services start
 }
 
+# consistent mirror, nothing assembled for writing: the marks can go; the
+# superblock is put back "clean" (xraid-sb refuses unless both disks are online
+# and their superblocks agree)
+mark_consistent() {
+	rm -f "$DIRTY"; echo "$XR_ID $XR_CTIME" > "$VERIFIED"
+	x_ xraid-sb clean "$XR_BASE" "$XR_MIRROR"
+}
+
 # ---------- full mirror verification (read-only) ----------
 verify() {
 	analyse
@@ -364,14 +381,65 @@ verify() {
 	log "verification: $r ($(grep -c '^# difference' "$STATE/verify.res") differing zones)"
 	current_mode
 	if [ $r = ok ] && [ "$CURRENT_MODE" != xraid-rw ]; then
-		# consistent mirror, nothing assembled for writing: the marks can go;
-		# the superblock is put back "clean" (xraid-sb refuses unless both
-		# disks are online and their superblocks agree)
-		rm -f "$DIRTY"; echo "$XR_ID $XR_CTIME" > "$VERIFIED"
-		x_ xraid-sb clean "$XR_BASE" "$XR_MIRROR"
+		mark_consistent
 		log "consistent mirror: writing allowed at next mount"
 	fi
 	return $rc
+}
+
+# ---------- quick check (read-only, docs/XRAID.md "Quick check") ----------
+# xraid-info quick compares the ext3 journals and metadata, the LVM metadata,
+# the EBRs and QUICK_SAMPLES random blocks per section. Decision when nothing
+# differs and nothing is assembled for writing:
+# - superblock clean (only the Linux xraid-dirty mark left): the mark goes;
+# - superblock unclean (real crash): nothing is lifted; state "confirm" and a
+#   token for this boot ($QUICK_OK, in /var/run): "quick-accept" can then do
+#   what a successful full verify does, with an explicit confirmation.
+QUICK_OK=$RUN/quick.ok
+quick_verify() {
+	analyse
+	[ -n "$XR_BASE" ] && [ -n "$XR_MIRROR" ] || die "both X-RAID disks are needed ($XR_REASONS)"
+	if [ -n "$DRY_RUN" ]; then x xraid-info quick --json --samples "$QUICK_SAMPLES" "$XR_BASE" "$XR_MIRROR"; return 0; fi
+	mkdir -p "$STATE" "$RUN"; rm -f "$QUICK_OK"
+	echo "running $(date +%s)" > "$STATE/quick.state"
+	log "quick mirror check: $XR_BASE / $XR_MIRROR ($QUICK_SAMPLES samples per section)"
+	xraid-info quick --json --samples "$QUICK_SAMPLES" "$XR_BASE" "$XR_MIRROR" > "$STATE/quick.tmp" 2> "$STATE/quick.progress"
+	rc=$?
+	mv "$STATE/quick.tmp" "$STATE/quick.res"
+	current_mode
+	case $rc in
+	0)	if [ "$CURRENT_MODE" = xraid-rw ]; then r=ok	# writes in progress: nothing lifted
+		elif [ "$XR_CLEAN" = 1 ] && [ "${XR_REASONS#*sync_in_progress}" = "$XR_REASONS" ]; then
+			r=ok
+			[ -e "$DIRTY" ] && { rm -f "$DIRTY"; log "quick check: clean superblock, xraid-dirty mark removed: writing allowed at next mount"; }
+		else
+			r=confirm; echo "$XR_ID $XR_CTIME" > "$QUICK_OK"
+			log "quick check: no difference, but the superblock records an unclean shutdown: nothing lifted (nas-raid quick-accept, or a full verify)"
+		fi ;;
+	1) r=differences ;;
+	3) r=incomplete ;;
+	*) r=errors ;;
+	esac
+	echo "$r $(date +%s)" > "$STATE/quick.state"
+	log "quick check: $r ($(sed -n 's/.*"bytes":\([0-9]*\),"differences":\([0-9]*\),.*/\1 bytes compared, \2 differences/p' "$STATE/quick.res"))"
+	return $rc
+}
+
+quick_accept() {
+	analyse
+	read -r st _ 2>/dev/null < "$STATE/quick.state" || st=none
+	[ "$st" = confirm ] && [ -r "$QUICK_OK" ] || die "quick-accept: only after a quick check, during this boot, that found no difference on an unclean superblock (state: $st)"
+	[ "$(cat "$QUICK_OK")" = "$XR_ID $XR_CTIME" ] || die "the superblock changed since the quick check: run it again"
+	for r in $XR_REASONS; do
+		case "$r" in unclean_shutdown|sync_in_progress) ;; *) die "quick-accept impossible: $r";; esac
+	done
+	current_mode
+	[ "$CURRENT_MODE" != xraid-rw ] || die "quick-accept: the X-RAID is assembled for writing"
+	confirm ACCEPT "The quick check compared only the journals, the metadata and samples: file data written at the time of the crash may still differ between the disks (residual risk). The superblock is put back clean as after a full check."
+	[ -n "$DRY_RUN" ] && return 0
+	mark_consistent; rm -f "$QUICK_OK"
+	echo "accepted $(date +%s)" > "$STATE/quick.state"
+	log "quick check accepted by the administrator (residual risk): writing allowed at next mount"
 }
 
 confirm() {	# $1 = expected phrase, $2 = what is going to happen
@@ -426,17 +494,23 @@ status() {
 	read -r v vd 2>/dev/null < "$STATE/verify.state" || { v=never; vd=0; }
 	prog=$(tail -n 1 "$STATE/verify.progress" 2>/dev/null | sed -n 's/progress \([0-9]*\)%/\1/p')
 	zones=$(grep -c '^# difference' "$STATE/verify.res" 2>/dev/null); zones=${zones:-0}
+	read -r q qd 2>/dev/null < "$STATE/quick.state" || { q=never; qd=0; }
+	qprog=$(tail -n 1 "$STATE/quick.progress" 2>/dev/null | sed -n 's/progress \([0-9]*\)%/\1/p')
+	qres=null; [ "$q" != running ] && [ -s "$STATE/quick.res" ] && qres=$(cat "$STATE/quick.res")
+	[ "$q" = confirm ] && [ -e "$QUICK_OK" ] && qok=1 || qok=0
 	[ -e "$DIRTY" ] && dirty=1 || dirty=0
 	command -v xraid-sb >/dev/null 2>&1 && sbw=yes || sbw=no
 	if [ -n "$JSON" ]; then
 		case $XRAID_RW in yes) xrw=yes;; *) xrw=no;; esac
 		printf '{"mode":"%s","reasons":"%s","xraid_rw":"%s","sb_writer":"%s","dirty":%d,"verify":{"state":"%s","date":%s,"progress":%s,"zones":%s},' \
 			"$m" "$reasons" "$xrw" "$sbw" "$dirty" "$v" "${vd:-0}" "${prog:-null}" "$zones"
+		printf '"quick":{"state":"%s","date":%s,"progress":%s,"accept":%d,"result":%s},' "$q" "${qd:-0}" "${qprog:-null}" "$qok" "$qres"
 		printf '"md":%s,"xraid":%s}\n' "$([ -e "$MD" ] && echo 1 || echo 0)" "$xr"
 	else
 		echo "mode: $m${reasons:+ ($reasons)}"
 		echo "unfinished write mark: $dirty; superblock writer: $sbw"
 		echo "verification: $v $( [ "$vd" != 0 ] && date -d "@$vd" '+%F %T' 2>/dev/null)${prog:+ ($prog %)} differing zones: $zones"
+		echo "quick check: $q $( [ "$qd" != 0 ] && date -d "@$qd" '+%F %T' 2>/dev/null)${qprog:+ ($qprog %)}"
 		SMP=0; analyse
 		echo "X-RAID: $XR_MODE${XR_REASONS:+ ($XR_REASONS)} base=${XR_BASE:--} mirror=${XR_MIRROR:--} clean=${XR_CLEAN:-?}"
 	fi
@@ -456,6 +530,8 @@ mount) lock; legacy_state; do_mount ;;
 unmount) lock; legacy_state; do_unmount ;;
 remount) lock; legacy_state; do_remount ;;
 verify) lock; legacy_state; verify ;;
+quick-verify) lock; legacy_state; quick_verify ;;
+quick-accept) lock; legacy_state; quick_accept ;;
 repair) lock; legacy_state; repair ;;
 watch) watch ;;
 migrate|create|add|grow) md_disabled ;;
