@@ -92,6 +92,25 @@ fi
 [ "$bad" = 0 ] || exit 1
 echo "   rootfs: $n ELF files, none; PT_LOAD aligned on 16 KiB"
 
+# Nothing of the build PC in what is shipped: no absolute path of the repository
+# or of the output directory (__FILE__, configure command lines), no
+# "user@host" of the builder (kernel banner: KBUILD_BUILD_USER/HOST, set in
+# external.mk). Fixed strings only (grep -F), long enough not to match by chance.
+echo "-- build PC traces (paths, user@host) in the kernel, the initramfs and the rootfs"
+HOSTN=$(uname -n)
+set -- "$(cd "$HERE/../.." && pwd -P)/" "$(cd "$BASE_DIR" && pwd -P)/" "$(id -un)@$HOSTN" "@$HOSTN)"
+INITRAMFS=$(ls "$BUILD_DIR"/linux-*/usr/initramfs_data.cpio 2>/dev/null | head -n 1)	# xz in the kernel
+for f in "$B/vmlinux.bin" ${INITRAMFS:+"$INITRAMFS"} "$B/rootfs.tar"; do
+	for p; do
+		grep -aqF -- "$p" "$f" || continue
+		echo "ERROR: \"$p\" found in $f:"
+		strings -a "$f" | grep -F -- "$p" | cut -c1-160 | head -n 3
+		bad=1
+	done
+done
+[ "$bad" = 0 ] || exit 1
+echo "   none (kernel${INITRAMFS:+, initramfs}, rootfs.tar)"
+
 # Encrypted copy for "tftp <MAC> <NAS-IP> <PC-IP> vmlinux.k3 0x80004000"
 # (iboot decrypts with -k3 any file received by TFTP)
 TOOL="$HERE/readynas_crypto"

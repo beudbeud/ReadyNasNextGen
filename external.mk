@@ -1,5 +1,21 @@
 include $(sort $(wildcard $(BR2_EXTERNAL_READYNAS_NG_PATH)/package/*/*.mk))
 
+# Nothing of the build PC in the images (checked by board/readynas-duo-v1/post-image.sh).
+# BR2_REPRODUCIBLE would set the kernel user/host and a -ffile-prefix-map, but it
+# also changes the toolchain wrapper (everything rebuilt, ccache missed), removes
+# the build-ids, dates every file and the kernel with the last commit, and
+# leaves the ffmpeg configure line as it is: these three settings are enough.
+# - kernel banner: "(readynasng@build)" instead of the builder's user@host
+LINUX_MAKE_ENV += KBUILD_BUILD_USER=readynasng KBUILD_BUILD_HOST=build
+# - sqlite3 shell: assert() messages carry __FILE__ (absolute path of shell.c)
+SQLITE_CFLAGS += -ffile-prefix-map=$(BASE_DIR)/=
+# - ffmpeg: av*_configuration() return the configure command line, full of
+#   absolute paths of output/ (cross-prefix, sysroot, pkg-config): made relative
+define READYNAS_NG_FFMPEG_NO_PATHS
+	sed -i '/^#define FFMPEG_CONFIGURATION /s|$(BASE_DIR)/||g' $(@D)/config.h
+endef
+FFMPEG_POST_CONFIGURE_HOOKS += READYNAS_NG_FFMPEG_NO_PATHS
+
 # Minimal initramfs built into the kernel (CONFIG_INITRAMFS_SOURCE =
 # usr/padre-initramfs.list, see board/readynas-duo-v1/linux-padre-nas.fragment):
 # /init comes from board/.../initramfs, the binaries (static busybox, tests)

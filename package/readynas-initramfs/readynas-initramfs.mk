@@ -41,6 +41,9 @@ define READYNAS_INITRAMFS_INSTALL_IMAGES_CMDS
 		$(INSTALL) -m 0755 $(@D)/padre-$$p \
 			$(BINARIES_DIR)/readynas-initramfs/$$p || exit 1; \
 	done
+	# the tests are linked with the prebuilt toolchain's libgcc: without
+	# stripping, its debug data names the toolchain build folder
+	$(TARGET_CROSS)strip $(addprefix $(BINARIES_DIR)/readynas-initramfs/,windows load float)
 endef
 
 $(eval $(generic-package))
