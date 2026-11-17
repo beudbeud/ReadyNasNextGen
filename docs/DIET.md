@@ -1,231 +1,231 @@
-# DIET sur Linux 6.18
+# DIET on Linux 6.18
 
-Le tableau de bord web DIET (projet
-[ReadyNASDuoSparc](https://github.com/mfe-/ReadyNASDuoSparc), système 2.6.17) est
-porté sur le système 6.18 : c'est le paquet `package/diet`, activé dans
-`readynas_ng_defconfig` et `readynas_ng_rapide_defconfig`. Les sources sont
-dans `package/diet/src/`, rangées comme sur le système cible.
+The DIET web dashboard (project
+[ReadyNASDuoSparc](https://github.com/mfe-/ReadyNASDuoSparc), 2.6.17 system) is
+ported to the 6.18 system: it is the `package/diet` package, enabled in
+`readynas_ng_defconfig` and `readynas_ng_rapide_defconfig`. The sources are
+in `package/diet/src/`, laid out as on the target system.
 
-## Origine et licence
+## Origin and licence
 
-- **DIET** a été écrit par **davemmi** pour le ReadyNAS NV+ v1 et publié dans le dépôt
-  [mfe-/ReadyNASDuoSparc](https://github.com/mfe-/ReadyNASDuoSparc)
+- **DIET** was written by **davemmi** for the ReadyNAS NV+ v1 and published in the
+  [mfe-/ReadyNASDuoSparc](https://github.com/mfe-/ReadyNASDuoSparc) repository
   ([PR #15](https://github.com/mfe-/ReadyNASDuoSparc/pull/15)).
-- Le support du ReadyNAS Duo v1 (X-RAID, langues, notifications…) vient de
+- ReadyNAS Duo v1 support (X-RAID, languages, notifications…) comes from
   [mfe-/ReadyNASDuoSparc#16](https://github.com/mfe-/ReadyNASDuoSparc/pull/16).
-- `package/diet/src/` est dérivé de ce code (interface, API, scripts), adapté ici à Linux 6.18.
-- **Licence** : le dépôt d'origine ne déclare **aucune licence** à ce jour. Le code dérivé de
-  DIET n'est donc **pas** couvert par la GPL-2.0 de ce dépôt ; il reste soumis aux droits de son
-  auteur. Une licence sera indiquée ici dès que le projet d'origine en aura une.
+- `package/diet/src/` is derived from this code (interface, API, scripts), adapted here to Linux 6.18.
+- **Licence**: the original repository declares **no licence** so far. The code derived from
+  DIET is therefore **not** covered by this repository's GPL-2.0; it remains subject to its
+  author's rights. A licence will be stated here as soon as the original project has one.
 
-## Mise en route sur le NAS
+## Getting started on the NAS
 
-1. Au premier démarrage, `S50lighttpd` crée un certificat HTTPS auto-signé
-   (ECDSA P-256, 10 ans, nom d'hôte et adresse d'eth0). Aucune clé n'est dans
-   l'image. Après un changement de nom ou d'adresse :
-   `/etc/init.d/S50lighttpd newcert` puis `restart`.
-2. En SSH, lancer `diet-webpass` (utilisateur `admin` par défaut) pour
-   choisir le mot de passe de l'interface (`/etc/lighttpd/htpasswd`). Sans
-   ce fichier, tout accès est refusé.
-3. Ouvrir `https://<adresse du NAS>/` (le port 80 redirige vers HTTPS).
-   L'accès est limité aux réseaux privés.
+1. At first boot, `S50lighttpd` creates a self-signed HTTPS certificate
+   (ECDSA P-256, 10 years, host name and eth0 address). No key is in the
+   image. After a name or address change:
+   `/etc/init.d/S50lighttpd newcert` then `restart`.
+2. Over SSH, run `diet-webpass` (user `admin` by default) to
+   choose the interface password (`/etc/lighttpd/htpasswd`). Without
+   this file, all access is refused.
+3. Open `https://<NAS address>/` (port 80 redirects to HTTPS).
+   Access is limited to private networks.
 
-## Ce qui change par rapport à l'ancien DIET
+## What changes compared with the old DIET
 
-| Sujet | Ancien DIET (2.6.17) | DIET sur 6.18 |
+| Topic | Old DIET (2.6.17) | DIET on 6.18 |
 |---|---|---|
-| Serveur web | busybox httpd derrière lighttpd statique | lighttpd seul : TLS mbedTLS, `mod_auth` (htpasswd SHA-512), `mod_cgi` |
-| Partages | Samba 3.6, `smb.conf` + `shares.conf`, `smbpasswd` | ksmbd : `/etc/ksmbd/ksmbd.conf`, `ksmbd.adduser` (mot de passe sur l'entrée standard), `ksmbd.control -r` |
-| NFS | programmes RAIDiator en chroot (`diet-nfs`) | nfsd du noyau + nfs-utils 2.x : l'interface édite `/etc/exports` et lance `exportfs -ra` |
-| Stockage | X-RAID (`/proc/xraid`), LVM `/dev/c/c` | md (`/proc/mdstat`, `mdadm --detail`), `df /c`, disques libata `sda`/`sdb` (baie = port ata) ; X-RAID existant et bascule vers md par `nas-raid` (docs/XRAID.md) |
-| Températures | `smartctl` toutes les 5 min | drivetemp (`/sys/block/sdX/device/hwmon/*/temp1_input`) ; `smartctl` utilisé seulement s'il est présent |
-| Ventilateur | régulé par `diet-hwmon` | régulé par `padre-fan` (S45fan) ; l'interface affiche son état (`/var/run/fan.state`) et modifie `/etc/fan.conf` (courbe, période, seuils), puis relance le service |
-| `diet-hwmon` | régulation, SMART, historique, alertes, arrêt d'urgence | surveillance seule : historique, SMART si présent, alertes Telegram. L'arrêt d'urgence est fait par `padre-fan` |
-| Bouton d'alimentation | `diet-hotplug` (`/proc/sys/kernel/hotplug`) | `/sbin/hotplug` → `diet-hotplug` (CONFIG_UEVENT_HELPER) : maintenu 3 s = extinction |
-| Réseau | `/etc/diet-net.conf` + `S41diet-net` | `/etc/network/interfaces` (ifupdown de busybox), appliqué au prochain démarrage |
-| Heure | `ntpd -q` au démarrage | `ntpd` en tâche de fond + bouton « Mettre l'heure à jour » |
-| Journal | `/var/log/boot.log` | `/var/log/diet.log`, `/var/log/messages` (syslog), `dmesg` |
+| Web server | busybox httpd behind a static lighttpd | lighttpd alone: mbedTLS TLS, `mod_auth` (SHA-512 htpasswd), `mod_cgi` |
+| Shares | Samba 3.6, `smb.conf` + `shares.conf`, `smbpasswd` | ksmbd: `/etc/ksmbd/ksmbd.conf`, `ksmbd.adduser` (password on standard input), `ksmbd.control -r` |
+| NFS | RAIDiator programs in a chroot (`diet-nfs`) | kernel nfsd + nfs-utils 2.x: the interface edits `/etc/exports` and runs `exportfs -ra` |
+| Storage | X-RAID (`/proc/xraid`), LVM `/dev/c/c` | md (`/proc/mdstat`, `mdadm --detail`), `df /c`, libata disks `sda`/`sdb` (bay = ata port); existing X-RAID and switch to md through `nas-raid` (docs/XRAID.md) |
+| Temperatures | `smartctl` every 5 min | drivetemp (`/sys/block/sdX/device/hwmon/*/temp1_input`); `smartctl` used only if present |
+| Fan | controlled by `diet-hwmon` | controlled by `padre-fan` (S45fan); the interface shows its state (`/var/run/fan.state`) and edits `/etc/fan.conf` (curve, period, thresholds), then restarts the service |
+| `diet-hwmon` | control, SMART, history, alerts, emergency shutdown | monitoring only: history, SMART if present, Telegram alerts. The emergency shutdown is done by `padre-fan` |
+| Power button | `diet-hotplug` (`/proc/sys/kernel/hotplug`) | `/sbin/hotplug` → `diet-hotplug` (CONFIG_UEVENT_HELPER): held 3 s = power off |
+| Network | `/etc/diet-net.conf` + `S41diet-net` | `/etc/network/interfaces` (busybox ifupdown), applied at next boot |
+| Time | `ntpd -q` at boot | `ntpd` in the background + "Update the time" button |
+| Log | `/var/log/boot.log` | `/var/log/diet.log`, `/var/log/messages` (syslog), `dmesg` |
 
-Ce qui est conservé : les mêmes onglets, les langues fr/de/en (page et
-messages, `/etc/diet-lang`), les notifications Telegram (jeton et
-identifiant saisis dans l'interface, enregistrés dans `/etc/diet-notify.conf`
-sur le NAS, jamais dans l'image), la veille des disques, les voyants
-(baies, alimentation), l'extinction et le redémarrage, `diet-status` en
+What is kept: the same tabs, the fr/de/en languages (page and
+messages, `/etc/diet-lang`), Telegram notifications (token and
+ID entered in the interface, stored in `/etc/diet-notify.conf`
+on the NAS, never in the image), disk standby, LEDs
+(bays, power), power off and reboot, `diet-status` on the
 console.
 
-Retiré : tout ce qui est propre à X-RAID, Samba 3.6, RAIDiator
-(`zu-raidiator`, `init-weiche`, `install-weiche`), la flash, l'écran LCD
-(absent du Duo), `rsyncd`, LVM et `diet-import`.
+Removed: everything specific to X-RAID, Samba 3.6, RAIDiator
+(`zu-raidiator`, `init-weiche`, `install-weiche`), the flash, the LCD screen
+(not on the Duo), `rsyncd`, LVM and `diet-import`.
 
 ## Services
 
-Carte « Services » de l'onglet Partages (API : `GET ?a=services`,
-`POST ?a=svc_set|dlna_set|dlna_scan|rsync_pw|rsync_c`, en-tête `X-Diet` obligatoire).
+"Services" card of the Shares tab (API: `GET ?a=services`,
+`POST ?a=svc_set|dlna_set|dlna_scan|rsync_pw|rsync_c`, `X-Diet` header required).
 
-| Service | Ce que règle l'interface | Fichiers |
+| Service | What the interface sets | Files |
 |---|---|---|
-| MiniDLNA | marche/arrêt ; nom affiché (`friendly_name`) ; dossiers (`media_dir`, un par ligne, préfixe facultatif `A,` `V,` `P,`, dossiers existants sous `/c`, lettres, chiffres, espace, `-` et `_`, sans lien qui sorte de `/c`) ; « Réindexer » (`S60minidlnad force-reload` = `minidlnad -R`) | `/etc/minidlna.conf` (copie `.bak`), base dans `/var/lib/minidlna` |
-| Avahi | marche/arrêt ; le nom annoncé (`<nom>.local`) suit le nom du NAS (avahi est relancé quand il change) | `/etc/avahi/services/*.service` |
-| rsync | marche/arrêt ; comptes des utilisateurs (voir plus bas) ; module `[c]` de l'administrateur (tout `/c`, en root, compte `sauvegarde`) **seulement s'il est coché** (`RSYNC_C=1`), avec son mot de passe et la commande `rsync -av dossier/ sauvegarde@<nom>.local::c/sauvegardes/` | `/etc/rsyncd.conf` (généré), `/etc/rsyncd.secrets` (600) |
-| WebDAV | marche/arrêt de l'instance `S51webdav` ; adresses `https://<nom>.local/webdav/<utilisateur>/` et `/webdav/<partage>/` | `/etc/lighttpd/webdav.conf` (généré), `/etc/lighttpd/htpasswd-users` |
+| MiniDLNA | on/off; displayed name (`friendly_name`); folders (`media_dir`, one per line, optional prefix `A,` `V,` `P,`, existing folders under `/c`, letters, digits, space, `-` and `_`, no link that leaves `/c`); "Rescan" (`S60minidlnad force-reload` = `minidlnad -R`) | `/etc/minidlna.conf` (`.bak` copy), database in `/var/lib/minidlna` |
+| Avahi | on/off; the announced name (`<name>.local`) follows the NAS name (avahi is restarted when it changes) | `/etc/avahi/services/*.service` |
+| rsync | on/off; user accounts (see below); administrator module `[c]` (all of `/c`, as root, account `sauvegarde`) **only if checked** (`RSYNC_C=1`), with its password and the command `rsync -av folder/ sauvegarde@<name>.local::c/backups/` | `/etc/rsyncd.conf` (generated), `/etc/rsyncd.secrets` (600) |
+| WebDAV | on/off of the `S51webdav` instance; addresses `https://<name>.local/webdav/<user>/` and `/webdav/<share>/` | `/etc/lighttpd/webdav.conf` (generated), `/etc/lighttpd/htpasswd-users` |
 
-État : en marche ou arrêté ; pour MiniDLNA, nombre de fichiers indexés
-(audio, vidéo, images) lu sur sa page d'état `http://127.0.0.1:8200/status` (pas de
-`sqlite3` sur le NAS) et taille de `files.db`.
+State: running or stopped; for MiniDLNA, the number of indexed files
+(audio, video, images) read from its status page `http://127.0.0.1:8200/status` (no
+`sqlite3` on the NAS) and the size of `files.db`.
 
-Persistance : `SVC_MINIDLNA`, `SVC_AVAHI`, `SVC_RSYNC`, `SVC_WEBDAV` dans
-`/etc/diet.conf` (`0` = arrêté, `1` ou absent = en marche). `S50avahi-daemon`,
-`S60minidlnad` (qui remplacent ceux de Buildroot), `S61rsyncd` (dans
-`board/readynas-duo-v1/rootfs-overlay/etc/init.d/`) et `S51webdav` (paquet
-diet) ne démarrent pas un service à `0`. Un service arrêté perd aussi son
-annonce Avahi (`rsync.service`, `webdav.service` renommés en `.service.off`,
-puis `avahi-daemon -r`).
+Persistence: `SVC_MINIDLNA`, `SVC_AVAHI`, `SVC_RSYNC`, `SVC_WEBDAV` in
+`/etc/diet.conf` (`0` = stopped, `1` or missing = running). `S50avahi-daemon`,
+`S60minidlnad` (which replace the Buildroot ones), `S61rsyncd` (in
+`board/readynas-duo-v1/rootfs-overlay/etc/init.d/`) and `S51webdav` (diet
+package) do not start a service set to `0`. A stopped service also loses its
+Avahi announcement (`rsync.service`, `webdav.service` renamed to `.service.off`,
+then `avahi-daemon -r`).
 
-### WebDAV et rsync : les comptes locaux
+### WebDAV and rsync: local accounts
 
-Les utilisateurs de l'onglet Partages ont un seul mot de passe pour SMB,
-WebDAV et rsync. Quand l'API crée un compte ou change son mot de passe
-(`user_set`, mot de passe dans le corps du POST), elle l'écrit en une fois :
-ksmbd (`ksmbd.adduser`, entrée standard), `/etc/lighttpd/htpasswd-users`
-(crypt SHA-512 par `mkpasswd`, `root:nas` 640, distinct de
-`/etc/lighttpd/htpasswd` de l'interface) et `/etc/rsyncd.secrets`
-(`root` 600). `user_del` retire le compte partout (son dossier est gardé).
-Jamais de mot de passe dans l'URL, les journaux ni l'image. Un compte créé
-avant cette version n'a ni WebDAV ni rsync : l'interface affiche « mot de
-passe à redéfinir pour activer WebDAV/rsync ».
+The users of the Shares tab have a single password for SMB,
+WebDAV and rsync. When the API creates an account or changes its password
+(`user_set`, password in the POST body), it writes it in one go:
+ksmbd (`ksmbd.adduser`, standard input), `/etc/lighttpd/htpasswd-users`
+(SHA-512 crypt through `mkpasswd`, `root:nas` 640, separate from the
+interface's `/etc/lighttpd/htpasswd`) and `/etc/rsyncd.secrets`
+(`root` 600). `user_del` removes the account everywhere (its folder is kept).
+Never a password in the URL, the logs or the image. An account created
+before this version has neither WebDAV nor rsync: the interface shows "set
+the password again to enable WebDAV/rsync".
 
-Après chaque changement d'utilisateur ou de partage, l'API régénère :
+After each user or share change, the API regenerates:
 
-- `/etc/rsyncd.conf` : un module `[<nom>]` par utilisateur (`path =
-  /c/home/<nom>`, `uid`/`gid = <nom>`, `auth users = <nom>`,
-  `munge symlinks`), un module par partage en écriture (`uid = nas`,
-  `gid = users`, `auth users` = tous les comptes ; un partage qui porte le
-  nom d'un utilisateur n'a pas de module), et `[c]` seulement si
-  `RSYNC_C=1`. Exemple : `rsync -av dossier/ <nom>@<nas>.local::<nom>/`.
-- `/etc/lighttpd/webdav.conf`, vérifié par `lighttpd -tt` avant d'être mis en
-  place (sinon l'ancien est gardé et le message le dit), puis `S51webdav
-  restart`. C'est une **seconde instance lighttpd** sous l'utilisateur
-  système `nas` (créé par `DIET_USERS` dans `diet.mk`), sur
-  `127.0.0.1:8081`, avec `umask 002` et `server.follow-symlink = "disable"`.
-  Le lighttpd principal (root, HTTPS) lui relaie `/webdav` (`mod_proxy`,
-  corps transmis au fil de l'eau) et ne demande pas le compte de
-  l'interface sur ce chemin ; l'instance WebDAV authentifie :
-  `/webdav/<nom>/` = dossier personnel, `"require" => "user=<nom>"` ;
-  `/webdav/<partage>/` = partage, tout compte local (`valid-user`), en
-  lecture seule si le partage l'est ; tout le reste est refusé.
-  L'administrateur de l'interface n'a pas d'accès WebDAV. `mod_webdav` ne
-  soumet pas l'en-tête `Destination` (COPY/MOVE) à `mod_auth` : chaque bloc
-  refuse une destination hors de son propre espace, ou avec `..` ou
-  `%2e`/`%2f`. `mod_extforward` (relais de confiance 127.0.0.1) rend le
-  schéma `https` à l'instance pour que la `Destination` corresponde.
-  Le lighttpd de l'interface n'est jamais rechargé pour WebDAV.
+- `/etc/rsyncd.conf`: one `[<name>]` module per user (`path =
+  /c/home/<name>`, `uid`/`gid = <name>`, `auth users = <name>`,
+  `munge symlinks`), one module per writable share (`uid = nas`,
+  `gid = users`, `auth users` = all accounts; a share that has the
+  name of a user has no module), and `[c]` only if
+  `RSYNC_C=1`. Example: `rsync -av folder/ <name>@<nas>.local::<name>/`.
+- `/etc/lighttpd/webdav.conf`, checked by `lighttpd -tt` before being put in
+  place (otherwise the old one is kept and the message says so), then `S51webdav
+  restart`. It is a **second lighttpd instance** running as the system user
+  `nas` (created by `DIET_USERS` in `diet.mk`), on
+  `127.0.0.1:8081`, with `umask 002` and `server.follow-symlink = "disable"`.
+  The main lighttpd (root, HTTPS) forwards `/webdav` to it (`mod_proxy`,
+  body streamed) and does not ask for the interface account on this path;
+  the WebDAV instance authenticates:
+  `/webdav/<name>/` = home folder, `"require" => "user=<name>"`;
+  `/webdav/<share>/` = share, any local account (`valid-user`),
+  read-only if the share is; everything else is refused.
+  The interface administrator has no WebDAV access. `mod_webdav` does not
+  submit the `Destination` header (COPY/MOVE) to `mod_auth`: each block
+  refuses a destination outside its own space, or with `..` or
+  `%2e`/`%2f`. `mod_extforward` (trusted proxy 127.0.0.1) gives the
+  `https` scheme back to the instance so that the `Destination` matches.
+  The interface lighttpd is never reloaded for WebDAV.
 
-Modèle de droits sur `/c` :
+Permission model on `/c`:
 
-| Dossier | Propriétaire, mode | Qui écrit |
+| Folder | Owner, mode | Who writes |
 |---|---|---|
 | `/c/home` | `root:root` 755 | — |
-| `/c/home/<nom>` | `<nom>:<nom>` 2770 | `<nom>` (SMB, rsync), `nas` (WebDAV) : le groupe personnel `<nom>` (groupe principal du compte) a pour seul autre membre `nas` ; setgid + umask 002 : les fichiers WebDAV sont `nas:<nom>` 664, modifiables par `<nom>` ; les autres comptes n'y entrent pas |
-| `/c/<partage>` (créé par l'interface) | `root:users` 2777, sans bit collant | tout le monde (SMB invité ou compte, WebDAV `nas`, rsync `nas`) : espace commun ; ksmbd force 0666/0777 |
+| `/c/home/<name>` | `<name>:<name>` 2770 | `<name>` (SMB, rsync), `nas` (WebDAV): the personal group `<name>` (primary group of the account) has `nas` as its only other member; setgid + umask 002: WebDAV files are `nas:<name>` 664, writable by `<name>`; other accounts cannot enter |
+| `/c/<share>` (created by the interface) | `root:users` 2777, no sticky bit | everyone (SMB guest or account, WebDAV `nas`, rsync `nas`): common space; ksmbd forces 0666/0777 |
 
-Un partage créé avant (`nobody` 1777, bit collant) reste tel quel : un compte
-ne peut alors pas effacer les fichiers d'un autre ; pour l'aligner :
-`chown root:users /c/<partage> && chmod 2777 /c/<partage>`.
-Un nouveau compte a pour groupe principal son groupe personnel (même numéro
-que son uid si libre) ; un compte créé avant y passe quand son mot de passe
-est redéfini. Noms refusés : ceux d'un groupe système (`audio`, `video`,
+A share created earlier (`nobody` 1777, sticky bit) stays as it is: an account
+then cannot delete another account's files; to align it:
+`chown root:users /c/<share> && chmod 2777 /c/<share>`.
+A new account has its personal group as primary group (same number
+as its uid if free); an account created earlier switches to it when its password
+is set again. Refused names: those of a system group (`audio`, `video`,
 `users`…), `sauvegarde`, `nas`, `c`, `home`, `webdav`, `root`.
 
-## Stockage : écriture sur le X-RAID
+## Storage: writing to the X-RAID
 
-La carte « Stockage /c » montre, en mode X-RAID seulement (pas en md),
-l'interrupteur « Autoriser l'écriture sur le X-RAID », coché si `XRAID_RW=yes`
-dans `/etc/nas-raid.conf` (champ `xraid_rw` de `GET ?a=storage`).
+The "Storage /c" card shows, in X-RAID mode only (not in md),
+the "Allow writing on the X-RAID" switch, checked if `XRAID_RW=yes`
+in `/etc/nas-raid.conf` (`xraid_rw` field of `GET ?a=storage`).
 
-- **Activer** : dialogue d'avertissement (écriture par fuse2fs sur l'ext3 à
-  blocs de 16 Ko de RAIDiator, sauvegarde recommandée), case à cocher **et**
-  mot `WRITE` à taper ; `POST ?a=xraid_rw` avec `on=1&confirm=WRITE&yes=1`.
-- **Désactiver** : simple confirmation, `on=0`.
-- L'API écrit `XRAID_RW=yes|no` dans `/etc/nas-raid.conf` (autres lignes
-  gardées, fichier temporaire puis `mv`, copie `.bak`), arrête WebDAV, rsync,
-  MiniDLNA, NFS et ksmbd, lance `nas-raid remount`, puis relance ces services
-  (leurs scripts respectent `SVC_*=0`).
-- `nas-raid remount` démonte d'abord `/c` seul : si un fichier y est encore
-  ouvert (`umount` refusé), rien n'est défait, le volume reste monté tel quel,
-  l'ancien réglage est remis et l'API répond 409. Ce refus a été préféré à un
-  démontage forcé.
-- Les garde-fous de nas-raid décident : si le volume reste en lecture seule
-  (arrêt non propre, miroir différent…), la réponse et la carte donnent le mode
-  et la raison (« écriture demandée, refusée par les garde-fous »).
-- Le remontage est fait pendant la requête (lecture des échantillons des deux
-  disques, démarrage de fuse2fs) : quelques dizaines de secondes sur le NAS.
+- **Enable**: warning dialog (writing through fuse2fs to the RAIDiator ext3 with
+  16 KB blocks, backup recommended), checkbox **and**
+  the word `WRITE` to type; `POST ?a=xraid_rw` with `on=1&confirm=WRITE&yes=1`.
+- **Disable**: simple confirmation, `on=0`.
+- The API writes `XRAID_RW=yes|no` to `/etc/nas-raid.conf` (other lines
+  kept, temporary file then `mv`, `.bak` copy), stops WebDAV, rsync,
+  MiniDLNA, NFS and ksmbd, runs `nas-raid remount`, then restarts these services
+  (their scripts respect `SVC_*=0`).
+- `nas-raid remount` first unmounts `/c` alone: if a file is still
+  open there (`umount` refused), nothing is undone, the volume stays mounted as it is,
+  the old setting is restored and the API answers 409. This refusal was preferred to a
+  forced unmount.
+- The nas-raid safeguards decide: if the volume stays read-only
+  (unclean shutdown, mismatched mirror…), the response and the card give the mode
+  and the reason ("writing requested, refused by the safeguards").
+- The remount is done during the request (reading the samples of both
+  disks, starting fuse2fs): a few tens of seconds on the NAS.
 
-## Rapidité : collecteur et cache
+## Speed: collector and cache
 
-Lancer un programme coûte ~60 ms sur ce SPARC et les flottants sont émulés par
-le noyau. Donc :
+Starting a program costs ~60 ms on this SPARC and floating point is emulated by
+the kernel. So:
 
-- **Collecteur** : `S95diet` lance l'API elle-même en tâche de fond
-  (`DIET_COLLECT=1 /www/cgi-bin/api`, pid dans `/var/run/diet/pid`). Elle écrit
-  les réponses JSON prêtes dans `/var/run/diet/<clé>.json` (fichier temporaire
-  puis `mv`) : `status` toutes les 5 s et le reste (`storage services shares nfs
-  sys users config`) toutes les 60 s quand l'interface est ouverte (requête vue
-  depuis moins de 2 min) ; sinon 60 s et 5 min. `all.json` = état + stockage +
-  historique, lu en une requête au chargement de la page.
-- **Lecture** : en tête de l'API, avant le reste du script, un GET de ces clés
-  fait `exec cat` du fichier si le collecteur tourne (commandes internes du
-  shell seulement). Sans collecteur ou sans fichier : calcul direct, comme avant.
-- **Réveil** : FIFO `/var/run/diet/wake` (attente par `read -t`, sans
-  processus). La lecture y écrit `seen` quand le collecteur est au repos (pas de
-  fichier `active`) ; un POST réussi vide le cache, pose `invalid` (un calcul
-  commencé avant est jeté) et écrit `all` : tout est recalculé aussitôt.
-- **Calcul** : `/proc`, `/sys` et les fichiers de configuration sont lus par le
-  shell (`read`, développements de variables, `$((…))` en entiers 64 bits) :
-  `status` lance 2 programmes (`ifconfig`, `df`) au lieu d'une soixantaine ;
-  pas de `printf %f` ni de calcul dans awk.
-- **busybox** : `FEATURE_SH_STANDALONE`, `FEATURE_PREFER_APPLETS` et
-  `FEATURE_SH_NOFORK` (dans `DIET_BUSYBOX_CONFIG_FIXUPS`) : ash lance ses applets
-  sans les chercher dans le `PATH` et les applets « nofork » (`cat`, `echo`,
-  `printf`, `test`…) sans créer de processus. Un programme de même nom qu'un
-  applet n'est lancé que par son chemin complet.
+- **Collector**: `S95diet` starts the API itself in the background
+  (`DIET_COLLECT=1 /www/cgi-bin/api`, pid in `/var/run/diet/pid`). It writes
+  ready JSON responses to `/var/run/diet/<key>.json` (temporary file
+  then `mv`): `status` every 5 s and the rest (`storage services shares nfs
+  sys users config`) every 60 s when the interface is open (request seen
+  less than 2 min ago); otherwise 60 s and 5 min. `all.json` = status + storage +
+  history, read in one request when the page loads.
+- **Read**: at the top of the API, before the rest of the script, a GET of these keys
+  does `exec cat` of the file if the collector is running (shell built-in commands
+  only). Without a collector or without a file: direct computation, as before.
+- **Wake-up**: FIFO `/var/run/diet/wake` (wait through `read -t`, no
+  process). The read path writes `seen` to it when the collector is idle (no
+  `active` file); a successful POST clears the cache, sets `invalid` (a computation
+  started earlier is discarded) and writes `all`: everything is recomputed at once.
+- **Computation**: `/proc`, `/sys` and the configuration files are read by the
+  shell (`read`, variable expansions, `$((…))` in 64-bit integers):
+  `status` starts 2 programs (`ifconfig`, `df`) instead of about sixty;
+  no `printf %f` and no computation in awk.
+- **busybox**: `FEATURE_SH_STANDALONE`, `FEATURE_PREFER_APPLETS` and
+  `FEATURE_SH_NOFORK` (in `DIET_BUSYBOX_CONFIG_FIXUPS`): ash starts its applets
+  without searching the `PATH`, and the "nofork" applets (`cat`, `echo`,
+  `printf`, `test`…) without creating a process. A program with the same name as an
+  applet is only started through its full path.
 
-`/etc/init.d/S95diet restart-collector` relance le collecteur.
+`/etc/init.d/S95diet restart-collector` restarts the collector.
 
-## Paquets et applets utilisés
+## Packages and applets used
 
-lighttpd (avec mbedTLS ; seuls `gen_key` et `cert_write` sont gardés parmi
-les programmes de mbedTLS), ksmbd-tools, nfs-utils, mdadm. Le paquet active
-dans busybox `ntpd` et le wget HTTPS (Telegram). Le reste est busybox
+lighttpd (with mbedTLS; only `gen_key` and `cert_write` are kept among
+the mbedTLS programs), ksmbd-tools, nfs-utils, mdadm. The package enables
+`ntpd` and HTTPS wget (Telegram) in busybox. The rest is busybox
 (`sh`, `awk`, `sed`, `hdparm`, `mkpasswd`, `start-stop-daemon`…).
-`smartctl` n'est pas dans l'image : smartmontools demande une chaîne C++,
-que ni la chaîne interne ni la chaîne précompilée n'ont.
+`smartctl` is not in the image: smartmontools needs a C++ toolchain,
+which neither the internal toolchain nor the prebuilt toolchain has.
 
-## Essai sur le PC
+## Test on the PC
 
     sh package/diet/tests/test-api.sh
 
-crée une racine factice (`DIET_ROOT`) avec `/proc`, `/sys` et `/etc`
-simulés (RAID1 sain puis dégradé, drivetemp, ksmbd.conf, exports), remplace
-les commandes du NAS par des scripts qui notent leurs arguments, appelle
-l'API comme le ferait lighttpd et vérifie le JSON et les fichiers écrits.
-`--serve` lance l'interface sur http://127.0.0.1:8080/ avec ces données
-(busybox httpd de l'hôte).
+creates a fake root (`DIET_ROOT`) with simulated `/proc`, `/sys` and `/etc`
+(healthy then degraded RAID1, drivetemp, ksmbd.conf, exports), replaces
+the NAS commands with scripts that record their arguments, calls
+the API as lighttpd would and checks the JSON and the written files.
+`--serve` starts the interface on http://127.0.0.1:8080/ with this data
+(busybox httpd of the host).
 
-## Limites connues
+## Known limits
 
-- L'API tourne en root (comme l'ancien DIET) : protégée par le mot de
-  passe, le filtre des réseaux privés et l'en-tête `X-Diet` contre le CSRF.
-- Le wget de busybox ne vérifie pas le certificat de Telegram.
-- WebDAV : les fichiers sont créés par `nas` (pas par le compte qui se
-  connecte) ; COPY/MOVE seulement à l'intérieur d'un même espace (dossier
-  personnel ou partage) ; un client sur le NAS lui-même (127.0.0.1) ne peut
-  pas faire de MOVE/COPY (schéma non transmis) ; la base des verrous est
-  `/var/lib/lighttpd-webdav/webdav.db`. Le module rsync `[c]` (sur demande)
-  écrit en root. Les dossiers
-  MiniDLNA aux noms accentués ne sont pas acceptés par l'interface (les
-  écrire à la main dans `/etc/minidlna.conf`) ; le nombre de fichiers
-  indexés dépend du format de la page d'état de minidlnad.
-- `/c` est monté par `S35storage` (paquet xraid-compat, docs/XRAID.md) :
-  X-RAID existant (lecture seule par défaut, écriture par l'interrupteur de
-  la carte Stockage) ou md. Sans volume monté,
-  l'interface ne crée pas de partage et affiche « non monté ».
+- The API runs as root (like the old DIET): protected by the
+  password, the private network filter and the `X-Diet` header against CSRF.
+- busybox wget does not check the Telegram certificate.
+- WebDAV: files are created by `nas` (not by the account that
+  connects); COPY/MOVE only inside the same space (home
+  folder or share); a client on the NAS itself (127.0.0.1) cannot
+  do MOVE/COPY (scheme not forwarded); the lock database is
+  `/var/lib/lighttpd-webdav/webdav.db`. The rsync module `[c]` (on request)
+  writes as root. MiniDLNA folders
+  with accented names are not accepted by the interface (write
+  them by hand in `/etc/minidlna.conf`); the number of indexed files
+  depends on the format of the minidlnad status page.
+- `/c` is mounted by `S35storage` (xraid-compat package, docs/XRAID.md):
+  existing X-RAID (read-only by default, writing through the switch of
+  the Storage card) or md. Without a mounted volume,
+  the interface does not create shares and shows "not mounted".

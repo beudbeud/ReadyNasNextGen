@@ -27,7 +27,7 @@ touching the original firmware.
 - A **USB stick** of at least 1 GB, plugged into the NAS.
 - A **3.3 V USB-to-serial adapter** connected to the NAS internal serial header (9600 baud).
 - A **Linux PC** on the same network, with Docker (TFTP server) and what is needed to build
-  the system (see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#construire), ~15 GB free).
+  the system (see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#build), ~15 GB free).
 
 ## Installation
 
@@ -92,7 +92,7 @@ makes the NAS unusable without recovery hardware.
 
 ## Further reading
 
-The detailed documentation is in French:
+Detailed documentation:
 
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md): build, toolchain, detailed porting status,
   kernel parameters, source tree.
@@ -108,7 +108,7 @@ The detailed documentation is in French:
 - Web interface: derived from [DIET](https://github.com/mfe-/ReadyNASDuoSparc) by davemmi
   (Duo v1 support: [mfe-/ReadyNASDuoSparc#16](https://github.com/mfe-/ReadyNASDuoSparc/pull/16)).
   The original repository declares no licence, so this code is **not** under this repository's
-  GPL-2.0 (see [docs/DIET.md](docs/DIET.md#origine-et-licence)).
+  GPL-2.0 (see [docs/DIET.md](docs/DIET.md#origin-and-licence)).
 - `readynas_crypto`: GPL-2.0+ (Henrik Nordström); `des.c`: LGPL-2.1 (Christophe Devine).
 - Buildroot, Linux and the built packages keep their own licences.
 

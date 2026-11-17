@@ -1,158 +1,157 @@
-# Développement
+# Development
 
-Notes techniques pour construire, déboguer et faire évoluer ReadyNasNextGen. Pour
-l'utilisation du NAS, voir le [README](../README.md).
+Technical notes to build, debug and extend ReadyNasNextGen. For using the NAS, see the
+[README](../README.md).
 
-Le noyau est un portage du sparc32 de Linux vers la plateforme Padre, écrit d'après les sources
-GPL du noyau 2.6.17 publiées par NETGEAR (voir [FEASIBILITY.md](../FEASIBILITY.md)).
+The kernel is a port of Linux sparc32 to the Padre platform, written from the GPL sources of
+the 2.6.17 kernel published by NETGEAR (see [FEASIBILITY.md](../FEASIBILITY.md)).
 
-Matériel : SoC **Infrant IT3107 « Padre »**, SPARC v8 sans FPU dont la division signée
-(`sdiv`) est fausse, MMU propre à Infrant, 256 Mo de DDR, USB par un VIA VT6212 (EHCI) en PCI,
-deux disques SATA.
+Hardware: **Infrant IT3107 "Padre"** SoC, a SPARC v8 without FPU whose signed division
+(`sdiv`) is wrong, an Infrant-specific MMU, 256 MB of DDR, USB through a VIA VT6212 (EHCI) on PCI,
+two SATA disks.
 
-## État détaillé
+## Detailed status
 
-| Élément | État |
+| Item | Status |
 |---|---|
-| Démarrage par iboot + TFTP, console série ttyS1 (9600 bauds) | marche |
-| MMU, antémémoires, interruptions, minuterie, sommeil/réveil des tâches | marche |
-| Émulation FPU (le Padre n'en a pas) : programmes en flottant matériel, `printf("%f")`, awk | marche (fmovs/fnegs/fabss corrigés dans `math-emu/math_32.c` : le Padre émule tout, y compris ces copies) |
-| initramfs intégré, `/init`, busybox, fork/exec, fautes de page | marche |
-| Disques SATA (libata, PIO ; DMA par le coprocesseur LP en option) | détectés |
-| Ethernet, voyants, bouton, ventilateur/température (`drivers/platform/padre`) | portés, à valider |
-| USB EHCI (VIA VT6212) | marche : arbitrage AHB du 2.6.17 rétabli ; le VT6212 ne relit jamais le lien horizontal du QH de tête une fois réécrit par le CPU, un QH factice permanent suit donc la tête et les vrais QH sont chaînés après lui |
-| Démarrage sur la clé USB (`/rootfs-6.18`), console `quiet` | marche : racine atteinte vers 3 s après le lancement du noyau |
-| Programmes dynamiques (ld-uClibc) | marche : ld.so exécute `flush` après avoir réécrit la PLT (patch uClibc), le noyau traite ce `flush` (écriture de l'antémémoire D, invalidation de la I) |
-| Accès entiers non alignés en espace utilisateur | émulés par le noyau (`user_unaligned_trap`, `unaligned_32.c`), comme le 2.6.17 et sparc64 ; le sparc32 d'origine envoyait SIGBUS. Les 10 premiers sont notés dans `dmesg` (`padre: emulated unaligned access, …`) |
-| Horloge matérielle (Dallas DS1337, I2C 0x68) | marche : `padre_rtc` (`/dev/rtc0`), heure reprise au démarrage (`RTC_HCTOSYS`), réécrite après NTP (`S41time`, `hwclock -w`, et `RTC_SYSTOHC`) ; les 16 registres sont affichés dans `dmesg` au démarrage |
-| LVM (lvm2 2.03.31) | marche : `board/readynas-duo-v1/patches/lvm2/` aligne sur 8 octets la liste de `dm_task_get_device_list()` (`dev_t` de 64 bits : SIGBUS de `lvm pvs` sur SPARC) |
-| ksmbd, NFS v3/v4, mdadm, fuse2fs (ext3 X-RAID à blocs de 16 Ko) | construits, non testés |
-| Tableau de bord web [DIET](#tableau-de-bord-web-diet) (lighttpd HTTPS) | porté, testé en simulation |
+| Boot through iboot + TFTP, serial console ttyS1 (9600 baud) | works |
+| MMU, caches, interrupts, timer, task sleep/wakeup | works |
+| FPU emulation (the Padre has none): hardware floating-point programs, `printf("%f")`, awk | works (fmovs/fnegs/fabss fixed in `math-emu/math_32.c`: the Padre emulates everything, including these copies) |
+| Built-in initramfs, `/init`, busybox, fork/exec, page faults | works |
+| SATA disks (libata, PIO; optional DMA through the LP coprocessor) | detected |
+| Ethernet, LEDs, button, fan/temperature (`drivers/platform/padre`) | ported, to be validated |
+| USB EHCI (VIA VT6212) | works: AHB arbitration from 2.6.17 restored; the VT6212 never re-reads the horizontal link of the head QH once the CPU has rewritten it, so a permanent dummy QH follows the head and the real QHs are chained after it |
+| Boot from the USB stick (`/rootfs-6.18`), `quiet` console | works: root reached about 3 s after the kernel starts |
+| Dynamic programs (ld-uClibc) | works: ld.so runs `flush` after rewriting the PLT (uClibc patch), the kernel handles this `flush` (D-cache write-back, I-cache invalidation) |
+| Unaligned integer accesses in user space | emulated by the kernel (`user_unaligned_trap`, `unaligned_32.c`), like 2.6.17 and sparc64; the original sparc32 sent SIGBUS. The first 10 are logged in `dmesg` (`padre: emulated unaligned access, …`) |
+| Hardware clock (Dallas DS1337, I2C 0x68) | works: `padre_rtc` (`/dev/rtc0`), time read at boot (`RTC_HCTOSYS`), written back after NTP (`S41time`, `hwclock -w`, and `RTC_SYSTOHC`); the 16 registers are shown in `dmesg` at boot |
+| LVM (lvm2 2.03.31) | works: `board/readynas-duo-v1/patches/lvm2/` aligns the `dm_task_get_device_list()` list on 8 bytes (64-bit `dev_t`: SIGBUS from `lvm pvs` on SPARC) |
+| ksmbd, NFS v3/v4, mdadm, fuse2fs (X-RAID ext3 with 16 KB blocks) | built, not tested |
+| [DIET](DIET.md) web dashboard (lighttpd HTTPS) | ported, tested in simulation |
 
-## Construire
+## Build
 
-Prérequis (machine Linux) : ceux de Buildroot — `git make gcc g++ patch perl python3 rsync
-cpio unzip bc file wget curl xz` — et ~15 Go libres. Buildroot est un **sous-module git**
-(dépôt officiel `https://gitlab.com/buildroot.org/buildroot.git`, tag 2026.08.1) :
+Prerequisites (Linux machine): those of Buildroot — `git make gcc g++ patch perl python3 rsync
+cpio unzip bc file wget curl xz` — and ~15 GB free. Buildroot is a **git submodule**
+(official repository `https://gitlab.com/buildroot.org/buildroot.git`, tag 2026.08.1):
 
 ```sh
 git clone --recursive https://github.com/beudbeud/ReadyNasNextGen.git
-cd ReadyNasNextGen        # (déjà cloné sans --recursive : git submodule update --init)
-make            # applique patches/buildroot/, charge le defconfig, construit tout (~1 h la 1re fois)
-make prepare    # seulement la préparation (Buildroot patché + output/.config)
+cd ReadyNasNextGen        # (already cloned without --recursive: git submodule update --init)
+make            # applies patches/buildroot/, loads the defconfig, builds everything (~1 h the 1st time)
+make prepare    # preparation only (patched Buildroot + output/.config)
 make menuconfig / make linux-menuconfig / make linux-rebuild / make clean / make distclean
-make JOBS=4     # limite le parallélisme (défaut : nombre de processeurs)
+make JOBS=4     # limits parallelism (default: number of processors)
 make ccache-stats
-make buildroot-reset      # remet buildroot/ à l'état du tag (retire nos patchs)
+make buildroot-reset      # resets buildroot/ to the tag state (removes our patches)
 ```
 
-Le sous-module reste propre dans git : `patches/buildroot/*.patch` (variante SPARC v7) est
-appliqué dans l'arbre de travail au moment du build, une seule fois (`git apply --reverse
---check`) ; `.gitmodules` déclare `ignore = dirty`.
+The submodule stays clean in git: `patches/buildroot/*.patch` (SPARC v7 variant) is applied to
+the working tree at build time, only once (`git apply --reverse --check`); `.gitmodules`
+declares `ignore = dirty`.
 
-La construction est parallèle au niveau Buildroot (`BR2_PER_PACKAGE_DIRECTORIES=y`, `make
--j$(JOBS)`) et utilise **ccache** (`BR2_CCACHE=y`) avec un cache hors du dépôt,
-`~/.buildroot-ccache` par défaut (`BR2_CCACHE_DIR`) : une reconstruction après `make clean` est
-nettement plus rapide.
+The build is parallel at the Buildroot level (`BR2_PER_PACKAGE_DIRECTORIES=y`, `make
+-j$(JOBS)`) and uses **ccache** (`BR2_CCACHE=y`) with a cache outside the repository,
+`~/.buildroot-ccache` by default (`BR2_CCACHE_DIR`): a rebuild after `make clean` is much
+faster.
 
-Résultat dans `output/images/` :
+Output in `output/images/`:
 
-* `vmlinux.bin` : noyau brut lié à 0x8000_4000, avec l'initramfs intégré ;
-* `vmlinux.k3` : le même, chiffré pour iboot (`readynas_crypto -k3`, construit pendant
-  `post-image.sh`) ;
-* `rootfs.tar` : le système, à extraire dans `/rootfs-6.18` d'une partition ext3/ext4 d'une clé USB
-  (l'initramfs cherche ce dossier et y bascule).
+* `vmlinux.bin`: raw kernel linked at 0x8000_4000, with the built-in initramfs;
+* `vmlinux.k3`: the same, encrypted for iboot (`readynas_crypto -k3`, built during
+  `post-image.sh`);
+* `rootfs.tar`: the system, to extract into `/rootfs-6.18` on an ext3/ext4 partition of a USB
+  stick (the initramfs looks for this directory and switches to it).
 
-`post-image.sh` vérifie aussi l'adresse de chargement, l'absence de `sdiv`/`sdivcc`/`casa` dans le
-noyau, le système et l'initramfs, et qu'aucune instruction flottante n'est exécutée par le chemin
-d'émulation FPU du noyau, et que la ligne de commande intégrée fait moins de 256 caractères.
+`post-image.sh` also checks the load address, the absence of `sdiv`/`sdivcc`/`casa` in the
+kernel, the system and the initramfs, that no floating-point instruction is executed by the
+kernel FPU emulation path, and that the built-in command line is shorter than 256 characters.
 
-La chaîne applique `board/readynas-duo-v1/patches/uclibc/` : `flush` après chaque réécriture
-d'instructions par ld-uClibc (PLT), sans quoi l'antémémoire d'instructions du Padre exécutait
-l'ancienne PLT (segfaults dans `_dl_linux_resolver`).
+The toolchain applies `board/readynas-duo-v1/patches/uclibc/`: `flush` after each instruction
+rewrite by ld-uClibc (PLT). Without it, the Padre instruction cache ran the old PLT (segfaults
+in `_dl_linux_resolver`).
 
-### Chaîne précompilée (construction rapide)
+### Prebuilt toolchain (fast build)
 
-La chaîne précompilée est publiée dans la release GitHub
+The prebuilt toolchain is published in the GitHub release
 [`toolchain-v7-2026.08.1-r2`](https://github.com/beudbeud/ReadyNasNextGen/releases/tag/toolchain-v7-2026.08.1-r2),
-avec ses sources (legal-info) pour la conformité GPL/LGPL et les sommes SHA256 :
+with its sources (legal-info) for GPL/LGPL compliance and the SHA256 sums:
 
 ```sh
-make rapide               # télécharge la chaîne depuis la release, puis construit le système
+make rapide               # downloads the toolchain from the release, then builds the system
 ```
 
-Sans elle, `make` reconstruit tout, chaîne comprise (~1 h la première fois, bien moins ensuite
-grâce à ccache).
+Without it, `make` rebuilds everything, toolchain included (~1 h the first time, much less
+afterwards thanks to ccache).
 
-La chaîne (SPARC v7, uClibc-ng 1.0.59 avec NPTL et WCHAR, gcc 15.3, binutils 2.45.1, en-têtes
-Linux 6.18.63, sans C++) se reconstruit sous forme de SDK Buildroot relocalisable :
+The toolchain (SPARC v7, uClibc-ng 1.0.59 with NPTL and WCHAR, gcc 15.3, binutils 2.45.1, Linux
+6.18.63 headers, no C++) can be rebuilt as a relocatable Buildroot SDK:
 
 ```sh
-make toolchain-sdk        # release/ : SDK .tar.xz, archive legal-info (sources + licences), SHA256SUMS
+make toolchain-sdk        # release/: SDK .tar.xz, legal-info archive (sources + licences), SHA256SUMS
 make rapide TOOLCHAIN_ARCHIVE=release/sparc-v7-readynas-linux-uclibc_sdk-buildroot-2026.08.1.tar.xz
 ```
 
-`make rapide` construit le même système avec cette chaîne (`readynas_ng_rapide_defconfig`,
-sortie dans `output-rapide/`) ; avec `TOOLCHAIN_ARCHIVE`, il utilise une archive locale au lieu de
-la release. Le SDK sert aussi seul : l'extraire, lancer
-`./relocate-sdk.sh`, puis utiliser `bin/sparc-buildroot-linux-uclibc-gcc` (le C produit appelle
-`.div`/`.udiv` au lieu de `sdiv`). L'archive legal-info contient les sources de gcc, binutils,
-uClibc-ng, des en-têtes Linux et des outils hôtes avec leurs correctifs, plus
-`buildroot-patches/` (notre patch v7 de Buildroot).
+`make rapide` builds the same system with this toolchain (`readynas_ng_rapide_defconfig`,
+output in `output-rapide/`); with `TOOLCHAIN_ARCHIVE`, it uses a local archive instead of the
+release. The SDK can also be used on its own: extract it, run
+`./relocate-sdk.sh`, then use `bin/sparc-buildroot-linux-uclibc-gcc` (the generated C calls
+`.div`/`.udiv` instead of `sdiv`). The legal-info archive contains the sources of gcc, binutils,
+uClibc-ng, the Linux headers and the host tools with their patches, plus
+`buildroot-patches/` (our v7 patch for Buildroot).
 
-## Paramètres du noyau (ligne de commande intégrée, `board/readynas-duo-v1/linux-padre.config`)
+## Kernel parameters (built-in command line, `board/readynas-duo-v1/linux-padre.config`)
 
-| Paramètre | Rôle |
+| Parameter | Purpose |
 |---|---|
-| `padre.disable=a,b` | ne pas lancer certains pilotes Padre : `i2c`, `rtc`, `led`, `hwmon`, `gmac`, `sata`, `dma`, `pci` (mise au point) |
-| `padre_sata.dma=0/1` | DMA disque par le coprocesseur LP (0 = PIO, défaut) |
-| `padre.trace_fault=N` | affiche les N premières fautes de page utilisateur |
-| `padre.trace_tick=1` | état du tic dans `/proc/padre_tick` et lignes `[pulse]`/`[watchdog]` sur la console (défaut 0) |
-| `padre_mm.flush=1/2/0` | traitement de l'instruction `flush` : 1 (défaut) antémémoire D entière + I ; 2 ligne D visée seulement ; 0 sautée (diagnostic). Aussi à chaud : `/sys/module/padre_mm/parameters/flush` |
-| `padre.pcibus=<hex>`, `padre.pcifeat=<hex>`, `padre.pciswap=<hex>`, `padre.ahbarb=<n>` | réglages du pont PCI (défauts du 2.6.17) |
-| `tests=1` | `/init` lance d'abord les essais de l'initramfs (`float` t1–t11, `windows`, `load`, sommeil) |
-| `rootdev=/dev/sdXN`, `rootdir=/autre` | `/init` : partition racine sans recherche, dossier autre que `/rootfs-6.18` |
-| `padre_hwmon.setpoint=N`, `padre_sata.read_only=1` | consigne du ventilateur au démarrage (0–255, défaut 80) ; refus de toute écriture sur les disques SATA |
+| `padre.disable=a,b` | do not start some Padre drivers: `i2c`, `rtc`, `led`, `hwmon`, `gmac`, `sata`, `dma`, `pci` (debugging) |
+| `padre_sata.dma=0/1` | disk DMA through the LP coprocessor (0 = PIO, default) |
+| `padre.trace_fault=N` | shows the first N user page faults |
+| `padre.trace_tick=1` | tick state in `/proc/padre_tick` and `[pulse]`/`[watchdog]` lines on the console (default 0) |
+| `padre_mm.flush=1/2/0` | handling of the `flush` instruction: 1 (default) whole D-cache + I; 2 targeted D line only; 0 skipped (diagnostics). Also at runtime: `/sys/module/padre_mm/parameters/flush` |
+| `padre.pcibus=<hex>`, `padre.pcifeat=<hex>`, `padre.pciswap=<hex>`, `padre.ahbarb=<n>` | PCI bridge settings (2.6.17 defaults) |
+| `tests=1` | `/init` first runs the initramfs tests (`float` t1–t11, `windows`, `load`, sleep) |
+| `rootdev=/dev/sdXN`, `rootdir=/other` | `/init`: root partition without searching, directory other than `/rootfs-6.18` |
+| `padre_hwmon.setpoint=N`, `padre_sata.read_only=1` | fan setpoint at boot (0–255, default 80); refuse any write to the SATA disks |
 
-Défaut : `console=ttyS1,9600 quiet panic=10` (journal complet dans `dmesg`).
+Default: `console=ttyS1,9600 quiet panic=10` (full log in `dmesg`).
 
-Essais à la console (paquet `readynas-tests`, dans `/usr/bin`) : `test-flush with` (antémémoire I
-après réécriture de code, 0 erreur attendue ; `without` doit en montrer), `test-fp-s`, `test-fp-d`,
-`test-fp-n` (émulation FPU en statique, dynamique PIE, dynamique non PIE), `test-align` (accès
-non alignés émulés, alignement de `malloc`), `test-ldso 200`
-(programmes dynamiques en boucle, 0 échec et 0 segfault ld-uClibc attendus).
+Console tests (`readynas-tests` package, in `/usr/bin`): `test-flush with` (I-cache after code
+rewrite, 0 errors expected; `without` must show some), `test-fp-s`, `test-fp-d`,
+`test-fp-n` (FPU emulation in static, dynamic PIE, dynamic non-PIE), `test-align` (emulated
+unaligned accesses, `malloc` alignment), `test-ldso 200`
+(dynamic programs in a loop, 0 failures and 0 ld-uClibc segfaults expected).
 
-## Tableau de bord : essais sur le PC
+## Dashboard: tests on the PC
 
 ```sh
-sh package/diet/tests/test-api.sh              # tests de l'API
-sh package/diet/tests/test-api.sh --serve      # interface sur http://127.0.0.1:8080/
+sh package/diet/tests/test-api.sh              # API tests
+sh package/diet/tests/test-api.sh --serve      # interface on http://127.0.0.1:8080/
 ```
 
-## Arborescence
+## Source tree
 
 ```
-Makefile                         préparation de Buildroot + passage des cibles
-buildroot/                       sous-module : Buildroot 2026.08.1 (dépôt officiel)
-patches/buildroot/               variante SPARC v7 pour Buildroot (BR2_sparc_v7)
-external.desc, Config.in, external.mk   arbre externe Buildroot (BR2_EXTERNAL = racine du dépôt)
-configs/readynas_ng_defconfig            système complet, chaîne construite
-configs/readynas_ng_rapide_defconfig     même système, chaîne précompilée (make rapide)
-configs/readynas_ng_toolchain_defconfig  chaîne seule (make toolchain-sdk)
-package/readynas-initramfs/      busybox statique sans flottant + tests, pour l'initramfs
-package/readynas-tests/          essais du portage dans le rootfs (test-flush, test-fp-*, test-align, test-ldso)
-package/diet/                    tableau de bord web DIET porté sur 6.18 (+ tests/test-api.sh)
-docs/DIET.md                     ce qui change par rapport à DIET
+Makefile                         Buildroot preparation + target passthrough
+buildroot/                       submodule: Buildroot 2026.08.1 (official repository)
+patches/buildroot/               SPARC v7 variant for Buildroot (BR2_sparc_v7)
+external.desc, Config.in, external.mk   Buildroot external tree (BR2_EXTERNAL = repository root)
+configs/readynas_ng_defconfig            full system, toolchain built
+configs/readynas_ng_rapide_defconfig     same system, prebuilt toolchain (make rapide)
+configs/readynas_ng_toolchain_defconfig  toolchain only (make toolchain-sdk)
+package/readynas-initramfs/      static busybox without floating point + tests, for the initramfs
+package/readynas-tests/          port tests in the rootfs (test-flush, test-fp-*, test-align, test-ldso)
+package/diet/                    DIET web dashboard ported to 6.18 (+ tests/test-api.sh)
+docs/DIET.md                     what changes compared with DIET
 board/readynas-duo-v1/
   linux-padre.config, linux-padre-nas.fragment
-  patches/linux/                 plateforme Padre pour Linux 6.18.63 (arch/sparc, pilotes)
-  patches/e2fsprogs/             fuse2fs avec uClibc-ng
-  patches/uclibc/                flush après réécriture de la PLT par ld-uClibc
-  patches/lvm2/                  alignement de la liste des périphériques dm (libdm)
-  initramfs/                     /init, `list` (gen_init_cpio), sources des tests
-  rootfs-overlay/                ksmbd, NFS, régulation du ventilateur
-  readynas_crypto/               outil de chiffrement iboot (GPL), compilé par post-image.sh
+  patches/linux/                 Padre platform for Linux 6.18.63 (arch/sparc, drivers)
+  patches/e2fsprogs/             fuse2fs with uClibc-ng
+  patches/uclibc/                flush after the PLT rewrite by ld-uClibc
+  patches/lvm2/                  alignment of the dm device list (libdm)
+  initramfs/                     /init, `list` (gen_init_cpio), test sources
+  rootfs-overlay/                ksmbd, NFS, fan control
+  readynas_crypto/               iboot encryption tool (GPL), compiled by post-image.sh
   post-image.sh
-tools/                           iboot-cmd.py (console série), tftp-server.sh
+tools/                           iboot-cmd.py (serial console), tftp-server.sh
 ```
-
