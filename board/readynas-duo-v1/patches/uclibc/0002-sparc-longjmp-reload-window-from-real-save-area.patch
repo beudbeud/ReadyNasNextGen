@@ -1,0 +1,69 @@
+sparc: __longjmp: reload the target window from its real save area
+
+The slow path (target frame far away) flushed the register windows, then
+reloaded the setjmp caller's window from JB_SP and patched its saved %fp
+at JB_SP + 0x48, which is not the %fp slot (offset 56). When the setjmp
+caller lowers %sp after setjmp (alloca, VLA), its window is flushed below
+JB_SP and the save area at JB_SP holds a stale %fp/%i7 (often overwritten
+by the argument home slots of its callees): the longjmp returns into a
+wrong frame. Busybox hits this in run_nofork_applet (VLA tmp_argv) as soon
+as a NOFORK applet dies (e.g. "dirname" with no argument): segfault in
+memcpy at G + 0x1724.
+
+Walk the flushed frame chain (bounded by the target) to find the frame
+whose saved %fp is the target and reload the window from there; fall back
+to JB_SP with the %fp slot (56) set.
+
+--- a/libc/sysdeps/linux/sparc/__longjmp.S
++++ b/libc/sysdeps/linux/sparc/__longjmp.S
+@@ -19,7 +19,6 @@
+ 
+ #define ENV(base,reg) [%base + (reg * 4)]
+ #define ST_FLUSH_WINDOWS 3
+-#define RW_FP [%fp + 0x48]
+ 
+ .global __longjmp
+ .type   __longjmp,%function
+@@ -63,12 +62,37 @@
+ 	 * windows.
+ 	 */
+ 	ta	ST_FLUSH_WINDOWS
+-	ld	ENV(g1,JB_PC), %o7 /* Set return PC. */
+-	ld	ENV(g1,JB_SP), %fp /* Set saved SP on restore below. */
++	/*
++	 * The window of the setjmp caller must be reloaded from where it was
++	 * just flushed: its %sp at that time.  That is not JB_SP if the caller
++	 * allocated stack after setjmp (alloca, VLA: busybox
++	 * run_nofork_applet), and then the frame at JB_SP holds a stale %fp
++	 * and %i7.  Walk the frame chain flushed above, upwards and bounded
++	 * by the target, for the frame whose saved %fp is the target.
++	 */
++	mov	%fp, %o0
++1:	cmp	%o0, %g3		/* above the target (other stack)? */
++	bgu	2f
++	 andcc	%o0, 7, %g0		/* or misaligned: give up */
++	bne	2f
++	 nop
++	ld	[%o0 + 56], %o1		/* saved %fp (%i6) of this frame */
++	cmp	%o1, %g3
++	be	3f			/* found: reload the window from %o0 */
++	 cmp	%o1, %o0
++	bgu	1b			/* the chain must go up */
++	 mov	%o1, %o0
++2:	/* Not found (e.g. another stack): reload from JB_SP, with its
++	 * saved %fp (offset 56 of the save area) set to the target. */
++	ld	ENV(g1,JB_SP), %o0
++	st	%g3, [%o0 + 56]
++3:	mov	%o0, %fp		/* restore below reloads the window from here */
+ 	sub	%fp, 64, %sp	/* Allocate a register frame. */
+-	st	%g3, RW_FP	/* Set saved FP on restore below. */
+-	retl
+-	restore %g2, 0, %o0	/* Restore values from above register frame. */
++	restore	%g2, 0, %o0	/* Back in the setjmp caller's window. */
++	ld	ENV(g1,JB_SP), %sp
++	ld	ENV(g1,JB_PC), %o1
++	jmp	%o1 + 8
++	 nop
+ 
+ .Lfound:
+ 	/* We have unwound register windows so %fp matches the target.  */

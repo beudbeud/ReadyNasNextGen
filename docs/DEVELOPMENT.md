@@ -71,7 +71,12 @@ kernel FPU emulation path, and that the built-in command line is shorter than 25
 
 The toolchain applies `board/readynas-duo-v1/patches/uclibc/`: `flush` after each instruction
 rewrite by ld-uClibc (PLT). Without it, the Padre instruction cache ran the old PLT (segfaults
-in `_dl_linux_resolver`).
+in `_dl_linux_resolver`). Second patch (generic SPARC32 bug, needs a toolchain rebuild, release
+r3): `__longjmp` reloaded the setjmp caller's register window from `JB_SP` and patched the wrong
+slot (`+0x48` instead of the `%fp` slot `+56`); if the caller lowered `%sp` after `setjmp`
+(alloca, VLA) the window came back with a stale `%fp`/`%i7`. Busybox hits it in
+`run_nofork_applet` whenever a NOFORK applet dies in `sh` (`dirname` without argument:
+segfault in `memcpy`, address `0x1724`).
 
 ### Prebuilt toolchain (fast build)
 
@@ -167,7 +172,7 @@ and runs `test-addon.sh` (install, reinstall, remove in a simulated system volum
 | Parameter | Purpose |
 |---|---|
 | `padre.disable=a,b` | do not start some Padre drivers: `i2c`, `rtc`, `led`, `hwmon`, `gmac`, `sata`, `dma`, `pci` (debugging) |
-| `padre_sata.dma=0/1` | disk DMA through the LP coprocessor (0 = PIO, default) |
+| `padre_sata.dma=0/1` | disk DMA through the LP coprocessor (0 = PIO, default). Booted with 1: switchable at run time in `/sys/module/padre_sata/parameters/dma` (0 = DMA commands run in PIO); `dma_cmds` counts LP commands |
 | `padre.trace_fault=N` | shows the first N user page faults |
 | `padre.trace_tick=1` | tick state in `/proc/padre_tick` and `[pulse]`/`[watchdog]` lines on the console (default 0) |
 | `padre_mm.flush=1/2/0` | handling of the `flush` instruction: 1 (default) whole D-cache + I; 2 targeted D line only; 0 skipped (diagnostics). Also at runtime: `/sys/module/padre_mm/parameters/flush` |
@@ -209,7 +214,7 @@ board/readynas-duo-v1/
   linux-padre.config, linux-padre-nas.fragment
   patches/linux/                 Padre platform for Linux 6.18.63 (arch/sparc, drivers)
   patches/e2fsprogs/             fuse2fs with uClibc-ng
-  patches/uclibc/                flush after the PLT rewrite by ld-uClibc
+  patches/uclibc/                flush after the PLT rewrite by ld-uClibc; SPARC longjmp fix
   patches/lvm2/                  alignment of the dm device list (libdm)
   initramfs/                     /init, `list` (gen_init_cpio), test sources
   rootfs-overlay/                ksmbd, NFS, fan control
