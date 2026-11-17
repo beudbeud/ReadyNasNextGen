@@ -384,6 +384,52 @@ check "raid_verify: started" '[ "$ST" = 200 ]'
 sleep 3	# the check (sparse 4 GB images) writes in $R: let it finish
 api GET 'a=log&f=storage'
 check "storage log: nas-raid log" '[ "$ST" = 200 ]'
+# "allow writing on the X-RAID" switch: real nas-raid remount on the images,
+# dm/LVM/fuse2fs simulated; umount refuses while $R/busy exists (open files)
+for c in dmsetup lvm fuse2fs; do stub $c; done
+stub umount '[ ! -e "$DIET_ROOT/busy" ]'
+i=0; while [ $i -lt 30 ] && grep -qs '^running' "$R"/var/lib/nas-raid/verify.state; do sleep 1; i=$((i + 1)); done
+rm -f "$R"/var/lib/nas-raid/xraid-dirty
+export NAS_RAID_DISKS="$(ls "$R/img/clean"/*.img | tr '\n' ' ')"
+printf '# local settings\nSAMPLES=8\nVERIFY_MAX_DAYS=3\n' > "$R"/etc/nas-raid.conf
+echo 'xraid-ro rw_disabled' > "$R"/var/run/nas-raid.mode
+api GET a=storage
+check "xraid_rw: state read from nas-raid.conf (no), X-RAID read-only" "json 'j[\"xraid_rw\"]==\"no\" and j[\"mode\"]==\"xraid-ro\"'"
+api POST a=xraid_rw 'on=1'
+check "xraid_rw on: refused without the typed word" '[ "$ST" = 400 ] && ! grep -q XRAID_RW "$R"/etc/nas-raid.conf'
+api POST a=xraid_rw 'on=1&confirm=WRITE'
+check "xraid_rw on: refused without the second confirmation" '[ "$ST" = 400 ] && ! grep -q XRAID_RW "$R"/etc/nas-raid.conf'
+api POST a=xraid_rw 'on=1&confirm=write&yes=1'
+check "xraid_rw on: wrong word refused" '[ "$ST" = 400 ]'
+: > "$R"/cmd.log
+api POST a=xraid_rw 'on=1&confirm=WRITE&yes=1'
+check "xraid_rw on: XRAID_RW=yes written once, other keys and comment kept" '[ "$ST" = 200 ] && [ "$(grep -c "^XRAID_RW=" "$R"/etc/nas-raid.conf)" = 1 ] && grep -qx "XRAID_RW=yes" "$R"/etc/nas-raid.conf && grep -qx "SAMPLES=8" "$R"/etc/nas-raid.conf && grep -qx "VERIFY_MAX_DAYS=3" "$R"/etc/nas-raid.conf && grep -qx "# local settings" "$R"/etc/nas-raid.conf && [ ! -e "$R"/etc/nas-raid.conf.tmp ]'
+check "xraid_rw on: services stopped, /c unmounted then mounted rw, services started" 'grep -q "S70ksmbd stop" "$R"/cmd.log && grep -q "S60nfs stop" "$R"/cmd.log && grep -q "S60minidlnad stop" "$R"/cmd.log && grep -q "S61rsyncd stop" "$R"/cmd.log && grep -q "S51webdav stop" "$R"/cmd.log && grep -q "^umount /c" "$R"/cmd.log && grep -q "fuse2fs -o allow_other" "$R"/cmd.log && grep -q "S70ksmbd start" "$R"/cmd.log && awk "/umount \/c/ { u = NR } /S70ksmbd start/ { s = NR } /S70ksmbd stop/ { t = NR } END { exit !(t < u && u < s) }" "$R"/cmd.log'
+api GET a=storage
+check "xraid_rw on: mode xraid-rw, switch on" "json 'j[\"mode\"]==\"xraid-rw\" and j[\"xraid_rw\"]==\"yes\"'"
+# a safeguard refuses (RAIDiator unclean shutdown): read-only is kept, with the reason
+export NAS_RAID_DISKS="$(ls "$R/img/dirty"/*.img | tr '\n' ' ')"
+rm -f "$R"/var/lib/nas-raid/xraid-dirty "$R"/var/lib/nas-raid/xraid-verified "$R"/var/run/xraid.json
+echo 'xraid-ro unclean_shutdown' > "$R"/var/run/nas-raid.mode
+api POST a=xraid_rw 'on=1&confirm=WRITE&yes=1'
+check "xraid_rw on, safeguard refuses: answer says read-only and why" '[ "$ST" = 200 ] && json "\"xraid-ro\" in j[\"msg\"] and \"unclean_shutdown\" in j[\"msg\"]"'
+api GET a=storage
+check "xraid_rw on, safeguard refuses: mode stays xraid-ro, reason shown" "json 'j[\"mode\"]==\"xraid-ro\" and j[\"reasons\"]==\"unclean_shutdown\" and j[\"xraid_rw\"]==\"yes\"'"
+# open files on /c: umount refused, nothing changed
+touch "$R"/busy; : > "$R"/cmd.log
+api POST a=xraid_rw 'on=0'
+check "xraid_rw off, /c busy: refused (409), XRAID_RW unchanged, services started again" '[ "$ST" = 409 ] && grep -qx "XRAID_RW=yes" "$R"/etc/nas-raid.conf && grep -q "S70ksmbd start" "$R"/cmd.log && ! grep -q "dmsetup remove" "$R"/cmd.log'
+rm -f "$R"/busy
+export NAS_RAID_DISKS="$(ls "$R/img/clean"/*.img | tr '\n' ' ')"; rm -f "$R"/var/run/xraid.json
+echo 'xraid-rw' > "$R"/var/run/nas-raid.mode
+api POST a=xraid_rw 'on=0'
+check "xraid_rw off: no heavy confirmation, XRAID_RW=no, remounted read-only (rw_disabled)" '[ "$ST" = 200 ] && grep -qx "XRAID_RW=no" "$R"/etc/nas-raid.conf && grep -qx "SAMPLES=8" "$R"/etc/nas-raid.conf && grep -q "xraid-ro rw_disabled" "$R"/var/run/nas-raid.mode'
+echo md > "$R"/var/run/nas-raid.mode
+api POST a=xraid_rw 'on=1&confirm=WRITE&yes=1'
+check "xraid_rw: refused on an md volume (409)" '[ "$ST" = 409 ] && grep -qx "XRAID_RW=no" "$R"/etc/nas-raid.conf'
+api POST a=xraid_rw 'on=2'
+check "xraid_rw: invalid value refused" '[ "$ST" = 400 ]'
+echo 'xraid-rw' > "$R"/var/run/nas-raid.mode; rm -f "$R"/etc/nas-raid.conf "$R"/etc/nas-raid.conf.bak "$R"/var/lib/nas-raid/xraid-dirty
 unset NAS_RAID_DISKS
 
 # ---------- collector cache (S95diet: the API with DIET_COLLECT=1) ----------

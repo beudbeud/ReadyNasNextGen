@@ -136,6 +136,30 @@ que son uid si libre) ; un compte créé avant y passe quand son mot de passe
 est redéfini. Noms refusés : ceux d'un groupe système (`audio`, `video`,
 `users`…), `sauvegarde`, `nas`, `c`, `home`, `webdav`, `root`.
 
+## Stockage : écriture sur le X-RAID
+
+La carte « Stockage /c » montre, en mode X-RAID seulement (pas en md),
+l'interrupteur « Autoriser l'écriture sur le X-RAID », coché si `XRAID_RW=yes`
+dans `/etc/nas-raid.conf` (champ `xraid_rw` de `GET ?a=storage`).
+
+- **Activer** : dialogue d'avertissement (écriture par fuse2fs sur l'ext3 à
+  blocs de 16 Ko de RAIDiator, sauvegarde recommandée), case à cocher **et**
+  mot `WRITE` à taper ; `POST ?a=xraid_rw` avec `on=1&confirm=WRITE&yes=1`.
+- **Désactiver** : simple confirmation, `on=0`.
+- L'API écrit `XRAID_RW=yes|no` dans `/etc/nas-raid.conf` (autres lignes
+  gardées, fichier temporaire puis `mv`, copie `.bak`), arrête WebDAV, rsync,
+  MiniDLNA, NFS et ksmbd, lance `nas-raid remount`, puis relance ces services
+  (leurs scripts respectent `SVC_*=0`).
+- `nas-raid remount` démonte d'abord `/c` seul : si un fichier y est encore
+  ouvert (`umount` refusé), rien n'est défait, le volume reste monté tel quel,
+  l'ancien réglage est remis et l'API répond 409. Ce refus a été préféré à un
+  démontage forcé.
+- Les garde-fous de nas-raid décident : si le volume reste en lecture seule
+  (arrêt non propre, miroir différent…), la réponse et la carte donnent le mode
+  et la raison (« écriture demandée, refusée par les garde-fous »).
+- Le remontage est fait pendant la requête (lecture des échantillons des deux
+  disques, démarrage de fuse2fs) : quelques dizaines de secondes sur le NAS.
+
 ## Rapidité : collecteur et cache
 
 Lancer un programme coûte ~60 ms sur ce SPARC et les flottants sont émulés par
@@ -202,5 +226,6 @@ l'API comme le ferait lighttpd et vérifie le JSON et les fichiers écrits.
   écrire à la main dans `/etc/minidlna.conf`) ; le nombre de fichiers
   indexés dépend du format de la page d'état de minidlnad.
 - `/c` est monté par `S35storage` (paquet xraid-compat, docs/XRAID.md) :
-  X-RAID existant (lecture seule par défaut) ou md. Sans volume monté,
+  X-RAID existant (lecture seule par défaut, écriture par l'interrupteur de
+  la carte Stockage) ou md. Sans volume monté,
   l'interface ne crée pas de partage et affiche « non monté ».

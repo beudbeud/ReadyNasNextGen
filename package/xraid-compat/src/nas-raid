@@ -6,6 +6,8 @@
 #
 #   nas-raid status [--json] [--refresh]   mode, sections, consistency, migration
 #   nas-raid mount | unmount               at boot / at shutdown (S35storage)
+#   nas-raid remount                       X-RAID only: unmount then mount (after a
+#                                          change of XRAID_RW); refused if /c is busy
 #   nas-raid verify                        compares the two X-RAID disks (long)
 #   nas-raid repair                        copies the base onto the mirror (md repair)
 #   nas-raid migrate [--finalize]          X-RAID -> md in place (2 disks)
@@ -263,6 +265,18 @@ do_unmount() {
 	esac
 	mounted "$MD_MOUNT" && x_ umount "$MD_MOUNT"
 	write "$RUN/nas-raid.mode" "none stopped"
+}
+
+# X-RAID remount (DIET: "allow writing" switch). /c is unmounted first, on its
+# own: if a file is still open there (umount refused), nothing is torn down and
+# the volume stays mounted as it was. Then the usual mount, with all safeguards.
+do_remount() {
+	current_mode
+	case "$CURRENT_MODE" in xraid-*) ;; *) die "remount: only for an X-RAID volume (mode $CURRENT_MODE)";; esac
+	[ -e "$STATE/migration" ] && die "remount: migration in progress"
+	if mounted "$DATA"; then x umount "$DATA" || die "$DATA is busy (open files): not remounted"; fi
+	do_unmount
+	do_mount
 }
 
 # ---------- full mirror verification (read-only) ----------
@@ -532,8 +546,9 @@ status() {
 		[ "${a:-0}" -gt 0 ] && cp=$(( ${b:-0} * 100 / a ))
 	fi
 	if [ -n "$JSON" ]; then
-		printf '{"mode":"%s","reasons":"%s","dirty":%d,"verify":{"state":"%s","date":%s,"progress":%s,"zones":%s},' \
-			"$m" "$reasons" "$dirty" "$v" "${vd:-0}" "${prog:-null}" "$zones"
+		case $XRAID_RW in yes) xrw=yes;; *) xrw=no;; esac
+		printf '{"mode":"%s","reasons":"%s","xraid_rw":"%s","dirty":%d,"verify":{"state":"%s","date":%s,"progress":%s,"zones":%s},' \
+			"$m" "$reasons" "$xrw" "$dirty" "$v" "${vd:-0}" "${prog:-null}" "$zones"
 		a=$(sed -n 's/^a=//p' "$STATE/migration" 2>/dev/null)
 		printf '"migration":{"step":"%s","a":"%s","copy":%s},"md":%s,"xraid":%s}\n' "$E" "${a##*/}" "${cp:-null}" "$([ -e "$MD" ] && echo 1 || echo 0)" "$xr"
 	else
@@ -558,6 +573,7 @@ case "$CMD" in
 status) legacy_state; status ;;
 mount) lock; legacy_state; do_mount ;;
 unmount) lock; legacy_state; do_unmount ;;
+remount) lock; legacy_state; do_remount ;;
 verify) lock; legacy_state; verify ;;
 repair) lock; legacy_state; repair ;;
 migrate) lock; legacy_state; migrate ;;

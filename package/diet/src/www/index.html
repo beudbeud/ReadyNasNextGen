@@ -259,6 +259,13 @@ dialog h3{margin:0 0 8px;font-size:16px}
   <p class="small"><span id="wizl"></span><br><input class="inp" id="wizi" autocomplete="off" spellcheck="false" style="width:100%"></p>
   <div class="btns"><span class="sp"></span><button class="b" value="annuler">Annuler</button><button class="b danger" type="button" id="wizgo" disabled>Lancer</button></div>
 </form></dialog>
+<dialog id="xrwd"><form method="dialog">
+<h3>Autoriser l’écriture sur le X-RAID</h3>
+<p class="small" style="color:var(--bad)">L’écriture passe par fuse2fs sur le système de fichiers ext3 à blocs de 16 Ko créé par RAIDiator, chaque écriture allant sur les deux disques. Ce chemin n’a pas encore été éprouvé longuement : une sauvegarde de /c est fortement recommandée. Le volume est démonté puis remonté ; SMB, NFS, DLNA, rsync et WebDAV sont arrêtés pendant ce temps. Les garde-fous de nas-raid peuvent garder la lecture seule.</p>
+<p><label><input type="checkbox" id="xrwc"> J’ai une sauvegarde de /c ou j’accepte le risque.</label></p>
+<p class="small"><span id="xrwl"></span><br><input class="inp" id="xrwi" autocomplete="off" spellcheck="false" style="width:100%"></p>
+<div class="btns"><span class="sp"></span><button class="b" value="annuler">Annuler</button><button class="b danger" type="button" id="xrwgo" disabled>Activer</button></div>
+</form></dialog>
 <div class="overlay" id="ov"><div id="ovt"></div></div>
 
 <script>
@@ -498,7 +505,14 @@ const I18N = {
   "erreur de lecture pendant l’échantillonnage": ["Lesefehler bei der Stichprobe", "read error while sampling"],
   "des blocs diffèrent entre les deux disques aux mêmes LBA": ["Blöcke an denselben LBA unterscheiden sich zwischen den Platten", "blocks differ between the two disks at the same LBAs"],
   "aucun superbloc X-RAID (WGao)": ["kein X-RAID-Superblock (WGao)", "no X-RAID superblock (WGao)"],
-  "écriture désactivée : XRAID_RW=yes dans /etc/nas-raid.conf": ["Schreiben deaktiviert: XRAID_RW=yes in /etc/nas-raid.conf", "writing disabled: XRAID_RW=yes in /etc/nas-raid.conf"],
+  "écriture désactivée (interrupteur « Autoriser l’écriture sur le X-RAID »)": ["Schreiben deaktiviert (Schalter „Schreiben auf das X-RAID erlauben“)", "writing disabled (switch “Allow writing on the X-RAID”)"],
+  "Autoriser l’écriture sur le X-RAID": ["Schreiben auf das X-RAID erlauben", "Allow writing on the X-RAID"],
+  "écriture demandée, refusée par les garde-fous ci-dessus": ["Schreiben verlangt, von den obigen Schutzregeln abgelehnt", "writing requested, refused by the safeguards above"],
+  "L’écriture passe par fuse2fs sur le système de fichiers ext3 à blocs de 16 Ko créé par RAIDiator, chaque écriture allant sur les deux disques. Ce chemin n’a pas encore été éprouvé longuement : une sauvegarde de /c est fortement recommandée. Le volume est démonté puis remonté ; SMB, NFS, DLNA, rsync et WebDAV sont arrêtés pendant ce temps. Les garde-fous de nas-raid peuvent garder la lecture seule.": ["Geschrieben wird über fuse2fs auf das ext3-Dateisystem mit 16-KB-Blöcken von RAIDiator, jede Schreibung geht auf beide Platten. Dieser Weg ist noch nicht lange erprobt: eine Sicherung von /c wird dringend empfohlen. Das Volume wird aus- und wieder eingehängt; SMB, NFS, DLNA, rsync und WebDAV stehen währenddessen. Die Schutzregeln von nas-raid können weiter nur Lesen erlauben.", "Writing goes through fuse2fs on the ext3 file system with 16 KB blocks created by RAIDiator, every write going to both disks. This path has not been tested for long yet: a backup of /c is strongly recommended. The volume is unmounted and mounted again; SMB, NFS, DLNA, rsync and WebDAV are stopped meanwhile. The safeguards of nas-raid may keep it read-only."],
+  "J’ai une sauvegarde de /c ou j’accepte le risque.": ["Ich habe eine Sicherung von /c oder nehme das Risiko in Kauf.", "I have a backup of /c or I accept the risk."],
+  "Activer": ["Einschalten", "Enable"],
+  "Repasser le X-RAID en lecture seule ? Le volume est démonté puis remonté (SMB, NFS, DLNA, rsync et WebDAV arrêtés pendant ce temps).": ["X-RAID wieder nur lesend? Das Volume wird aus- und wieder eingehängt (SMB, NFS, DLNA, rsync und WebDAV stehen währenddessen).", "Put the X-RAID back to read-only? The volume is unmounted and mounted again (SMB, NFS, DLNA, rsync and WebDAV stopped meanwhile)."],
+  "Remontage du volume /c…": ["Volume /c wird neu eingehängt …", "Remounting the /c volume…"],
   "arrêt brutal sous Linux : vérifier le miroir": ["harter Abbruch unter Linux: Spiegel prüfen", "unclean shutdown under Linux: check the mirror"],
   "arrêt brutal de RAIDiator, miroir vérifié depuis": ["harter Abbruch unter RAIDiator, Spiegel seither geprüft", "unclean RAIDiator shutdown, mirror checked since"],
   "migration vers md en cours": ["Umstellung auf md läuft", "migration to md in progress"]
@@ -666,7 +680,7 @@ const XR = {version:'version de superbloc inconnue (attendu 0.1.0)', level:'cham
   read_error:'erreur de lecture pendant l’échantillonnage', mirror_differs:'des blocs diffèrent entre les deux disques aux mêmes LBA',
   no_xraid:'aucun superbloc X-RAID (WGao)'};
 // reasons added by nas-raid
-const NR = {rw_disabled:'écriture désactivée : XRAID_RW=yes dans /etc/nas-raid.conf', unclean_shutdown_linux:'arrêt brutal sous Linux : vérifier le miroir',
+const NR = {rw_disabled:'écriture désactivée (interrupteur « Autoriser l’écriture sur le X-RAID »)', unclean_shutdown_linux:'arrêt brutal sous Linux : vérifier le miroir',
   unclean_shutdown_verified:'arrêt brutal de RAIDiator, miroir vérifié depuis', migration_in_progress:'migration vers md en cours'};
 const XRM = {'xraid-rw':'X-RAID, lecture et écriture', 'xraid-ro':'X-RAID, lecture seule', 'md':'RAID md', 'none':'aucun volume'};
 async function loadStk(d){
@@ -685,6 +699,11 @@ async function loadStk(d){
     h += `<div class="row"><span>${t('Vérification du miroir')}</span><span style="color:var(--${v.state==='ok'?'ok':v.state==='never'||v.state==='running'?'mute':'bad'})">${esc(vs)}</span></div>`;
   }
   if(m.step) h += `<div>${esc(t('Migration vers md : {0}', m.step + (m.copy!=null ? ' ('+m.copy+' %)' : '')))}</div>`;
+  // writing switch (XRAID_RW in /etc/nas-raid.conf): X-RAID only; nas-raid has the last word
+  if(stk.mode==='xraid-rw' || stk.mode==='xraid-ro'){
+    h += `<div class="row" style="margin-top:6px"><label><input type="checkbox" id="xrw" ${stk.xraid_rw==='yes'?'checked':''}> ${t('Autoriser l’écriture sur le X-RAID')}</label></div>`;
+    if(stk.xraid_rw==='yes' && stk.mode==='xraid-ro') h += `<div style="color:var(--warn)">${t('écriture demandée, refusée par les garde-fous ci-dessus')}</div>`;
+  }
   $('#xr').innerHTML = h;
   const b = [];
   if(x.base && x.mirror && v.state!=='running') b.push(`<button class="b" data-x="verify">${t('Vérifier le miroir')}</button>`);
@@ -694,6 +713,28 @@ async function loadStk(d){
   b.push(`<button class="b" data-x="log">${t('Journal du stockage')}</button>`);
   $('#xrb').innerHTML = b.join('');
 }
+// X-RAID writing switch: enabling = warning, tick box AND typed word; disabling = simple confirm
+const XRW_WORD = 'WRITE';
+async function xrwPost(body){
+  toast(t('Remontage du volume /c…'));
+  try{ toast((await post('xraid_rw', body)).msg); }catch(e){ toast(t('Erreur : {0}', e.message)); }
+  loadStk();
+}
+function xrwCheck(){ $('#xrwgo').disabled = !($('#xrwc').checked && $('#xrwi').value.trim() === XRW_WORD); }
+$('#xr').onchange = ev=>{
+  if(ev.target.id !== 'xrw') return;
+  if(ev.target.checked){
+    ev.target.checked = false;   // checked again by loadStk once nas-raid has answered
+    $('#xrwc').checked = false; $('#xrwi').value = ''; $('#xrwl').textContent = t('Tapez « {0} » pour confirmer :', XRW_WORD);
+    xrwCheck(); $('#xrwd').showModal();
+  } else {
+    if(!confirm(t('Repasser le X-RAID en lecture seule ? Le volume est démonté puis remonté (SMB, NFS, DLNA, rsync et WebDAV arrêtés pendant ce temps).'))){ ev.target.checked = true; return; }
+    xrwPost('on=0');
+  }
+};
+$('#xrwc').onchange = xrwCheck; $('#xrwi').oninput = xrwCheck;
+$('#xrwgo').onclick = ()=>{ $('#xrwd').close(); xrwPost('on=1&confirm='+XRW_WORD+'&yes=1'); };
+
 // Wizard: dry run, tick box AND typed phrase (double confirmation)
 let wizOp = '', wizPhrase = () => '';
 function wizCheck(){ $('#wizgo').disabled = !($('#wizc').checked && $('#wizi').value.trim() === wizPhrase()); $('#wizl').textContent = t('Tapez « {0} » pour confirmer :', wizPhrase()); }

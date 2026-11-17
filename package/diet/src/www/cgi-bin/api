@@ -5,7 +5,7 @@
 #   POST ?a=spindown|ksmbd|nfsd|ntp|reboot|poweroff|config|share_add|share_del|share_set
 #        |user_set|user_del|nfs_add|nfs_del|sys_set|notify_test
 #        |svc_set|dlna_set|dlna_scan|rsync_pw|rsync_c
-#        |raid_verify|raid_plan|raid_run   (X-Diet: 1 header required)
+#        |raid_verify|raid_plan|raid_run|xraid_rw   (X-Diet: 1 header required)
 # Message language: &l=fr|de|en.
 # Testing on a PC: DIET_ROOT=/path/to/fake-root prefixes every file read or
 # written (/proc, /sys, /etc, /var) and puts $DIET_ROOT/bin first in PATH
@@ -872,6 +872,59 @@ raid_do() {
   ok "$(tx "Lancé : suivre l’avancement dans le journal du stockage" "Gestartet: Fortschritt im Speicherprotokoll" "Started: follow the progress in the storage log")"
 }
 
+# xraid_rw: "allow writing on the X-RAID" switch. on=1 needs the typed word
+# (confirm=WRITE) AND the ticked box (yes=1); on=0 needs nothing. XRAID_RW is
+# written to /etc/nas-raid.conf (other keys kept, temporary file then mv), the
+# services that use /c are stopped, "nas-raid remount" unmounts and mounts again
+# (it refuses if a file is still open on /c: the old configuration is then put
+# back), the services are started again. The safeguards of nas-raid decide: the
+# mode obtained (rw or ro with its reasons) is in nas-raid.mode.
+NRCONF=$ETC/nas-raid.conf
+XRSVC="S51webdav S61rsyncd S60minidlnad S60nfs S70ksmbd"
+xraid_rw() {
+  set -f
+  on=""; confirm=""; yes=""
+  for kv in $(echo "$BODY" | tr '&' ' '); do
+    k=${kv%%=*}; v=$(urldec "${kv#*=}")
+    case "$k" in on) on=$v;; confirm) confirm=$v;; yes) yes=$v;; esac
+  done
+  case "$on" in 0) val=no;; 1) val=yes;; *) fail "400 Bad Request" "$(tx "Réglage invalide" "Ungültige Einstellung" "Invalid setting")";; esac
+  if [ "$on" = 1 ]; then
+    [ "$confirm" = WRITE ] || fail "400 Bad Request" "$(tx "mot de confirmation manquant ou faux (WRITE)" "Bestätigungswort fehlt oder falsch (WRITE)" "confirmation word missing or wrong (WRITE)")"
+    [ "$yes" = 1 ] || fail "400 Bad Request" "$(tx "seconde confirmation manquante" "zweite Bestätigung fehlt" "second confirmation missing")"
+  fi
+  command -v nas-raid >/dev/null 2>&1 || fail "404 Not Found" "nas-raid ?"
+  m=; read -r m _ 2>/dev/null < "$RUN/nas-raid.mode"
+  case "$m" in xraid-rw|xraid-ro) ;; *) fail "409 Conflict" "$(tx "Seulement pour un volume X-RAID" "Nur für ein X-RAID-Volume" "Only for an X-RAID volume")";; esac
+  # new configuration: every line kept except XRAID_RW, written once
+  {
+    if [ -r "$NRCONF" ]; then while IFS= read -r l; do case $l in XRAID_RW=*) ;; *) printf '%s\n' "$l";; esac; done < "$NRCONF"; fi
+    echo "XRAID_RW=$val"
+  } > "$NRCONF.tmp" || fail "500 Internal Server Error" "$(tx "Écriture impossible" "Schreiben nicht möglich" "Cannot write")"
+  [ -f "$NRCONF" ] && cp "$NRCONF" "$NRCONF.bak"
+  mv "$NRCONF.tmp" "$NRCONF"
+  note "Storage: XRAID_RW=$val from the interface, remounting /c"
+  for s in $XRSVC; do "$INITD/$s" stop </dev/null >/dev/null 2>&1; done
+  if OUTR=$(nas-raid remount 2>&1); then rc=0; else rc=1; fi
+  if [ $rc != 0 ]; then
+    # refused (busy) or failed: old configuration back, volume mounted again if needed
+    if [ -f "$NRCONF.bak" ]; then mv "$NRCONF.bak" "$NRCONF"; else rm -f "$NRCONF"; fi
+    m=; read -r m _ 2>/dev/null < "$RUN/nas-raid.mode"
+    case "$m" in xraid-*|md) ;; *) nas-raid mount >/dev/null 2>&1;; esac
+  fi
+  for s in S70ksmbd S60nfs S60minidlnad S61rsyncd S51webdav; do "$INITD/$s" start </dev/null >/dev/null 2>&1; done
+  invalidate
+  if [ $rc != 0 ]; then
+    note "Storage: remount refused or failed, XRAID_RW unchanged"
+    fail "409 Conflict" "$(tx "Volume non remonté (fichiers ouverts sur /c ?), réglage inchangé" "Volume nicht neu eingehängt (offene Dateien auf /c?), Einstellung unverändert" "Volume not remounted (open files on /c?), setting unchanged") : $(printf '%s' "$OUTR" | grep 'ERROR' | tail -n 1 | cut -c1-200)"
+  fi
+  m=; r=; read -r m r 2>/dev/null < "$RUN/nas-raid.mode"
+  if [ "$on" = 0 ]; then ok "$(tx "X-RAID remonté en lecture seule" "X-RAID schreibgeschützt neu eingehängt" "X-RAID remounted read-only")"
+  elif [ "$m" = xraid-rw ]; then ok "$(tx "Écriture sur le X-RAID activée" "Schreiben auf das X-RAID eingeschaltet" "Writing on the X-RAID enabled")"
+  else ok "$(tx "XRAID_RW=yes enregistré, mais les garde-fous gardent la lecture seule" "XRAID_RW=yes gespeichert, aber die Schutzregeln lassen nur Lesen zu" "XRAID_RW=yes saved, but the safeguards keep it read-only") ($m${r:+ : $r})"
+  fi
+}
+
 # --- Read answers and collector -------------------------------------------------
 hist_json() { [ -r "$RUN/hwmon.hist" ] && awk '{ printf "%s\\n", $0 }' "$RUN/hwmon.hist"; }
 calc() {	# calc key: JSON body of the GET answer (without header)
@@ -997,6 +1050,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
       bg "nas-raid verify"; note "Storage: mirror check started"
       ok "$(tx "Vérification lancée (plusieurs heures, disques en lecture seule)" "Prüfung gestartet (mehrere Stunden, nur Lesen)" "Check started (several hours, read-only)")" ;;
     raid_plan|raid_run) raid_do "$A" ;;
+    xraid_rw) xraid_rw ;;
     *) fail "400 Bad Request" "$(tx "action inconnue" "unbekannte Aktion" "unknown action")" ;;
   esac
   invalidate

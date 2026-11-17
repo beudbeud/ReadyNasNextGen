@@ -12,7 +12,8 @@ toute écriture sont au §9.
 
 Par défaut le X-RAID est monté **en lecture seule** (`XRAID_RW=no`). L'écriture
 ne s'active qu'après validation, en écrivant `XRAID_RW=yes` dans
-`/etc/nas-raid.conf`.
+`/etc/nas-raid.conf` (à la main puis `nas-raid remount`, ou par l'interrupteur
+« Autoriser l'écriture sur le X-RAID » de DIET, §7).
 
 ## 1. Le format X-RAID en bref
 
@@ -80,6 +81,11 @@ Au démarrage, `S35storage` lance `nas-raid mount` (avant NFS et SMB) :
 À l'arrêt (`nas-raid unmount`) : démontage, LVM désactivé, md arrêtés, dm
 retirés.
 
+`nas-raid remount` (X-RAID seulement, pas pendant une migration) : démonte
+d'abord `/c` seul et s'arrête là si `umount` est refusé (fichier ouvert : le
+volume reste monté tel quel), sinon `unmount` puis `mount` avec tous les
+garde-fous. Sert après un changement de `XRAID_RW`.
+
 Le swap (`p2`) et la racine RAIDiator (`p1`) ne sont pas utilisés (le swap de
 RAIDiator a des pages de 16 Kio).
 
@@ -87,7 +93,7 @@ RAIDiator a des pages de 16 Kio).
 
 | Situation | Effet |
 |---|---|
-| `XRAID_RW` ≠ `oui` (défaut) | lecture seule |
+| `XRAID_RW` ≠ `yes` (défaut) | lecture seule (raison `rw_disabled`) |
 | Superbloc absent, version ≠ 0.1.0, sections incohérentes, deux « base » | rien n'est monté |
 | Superbloc courant absent (secours seul) ou différent d'un disque à l'autre | lecture seule |
 | **Arrêt non propre** noté par RAIDiator (bit 0 de 0x84 à 0) | lecture seule, jusqu'à une vérification complète réussie (§4) |
@@ -212,9 +218,13 @@ lecture seule, RAID md), les raisons d'une lecture seule, l'état des sections,
 la dernière vérification du miroir et l'étape d'une migration. Boutons :
 « Vérifier le miroir », « Migrer vers md », « Terminer la migration »,
 « Créer un RAID md » (assistant : essai à blanc, case à cocher, phrase à
-taper) et « Journal du stockage ». API : `GET ?a=storage` (`nas-raid status
+taper) et « Journal du stockage ». En mode X-RAID, l'interrupteur « Autoriser l'écriture
+sur le X-RAID » écrit `XRAID_RW` (activation : avertissement, case à cocher et
+mot `WRITE`), arrête les services qui utilisent `/c` le temps d'un
+`nas-raid remount`, puis les relance ; si un garde-fou refuse, la carte reste en
+lecture seule avec la raison (docs/DIET.md). API : `GET ?a=storage` (`nas-raid status
 --json`, sans accès aux disques : résultat mis en cache au montage), `POST
-?a=raid_verify|raid_plan|raid_run`, journal `?a=log&f=storage`.
+?a=raid_verify|raid_plan|raid_run|xraid_rw`, journal `?a=log&f=storage`.
 
 ## 8. Essais sur PC (sans NAS, sans root)
 
