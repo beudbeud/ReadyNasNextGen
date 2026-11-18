@@ -1,0 +1,1525 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 02/23] sparc: Padre: MMU and caches
+
+The Padre MMU is not an SRMMU: it walks a two-level i386-like table
+(1024 x 4 MB directory, 1024 x 4 KB tables), has its own fault
+registers and ASIs, and maps the kernel and I/O through fixed windows.
+padre_mm.c replaces srmmu.c: page tables in the uncached area at the
+top of the DDR (the MMU reads memory, the write-back D-cache is not
+coherent), TLB and cache flushes, DMA helpers. pgtable/pgalloc get a
+Padre variant (folded pmd, PGTABLE_LEVELS 2, no HIGHMEM), user space
+is 0-1 GB (TASK_SIZE 0x40000000).
+
+The window overflow/underflow and trap entry stack checks (etrap, rtrap,
+wof, wuf) and srmmu_fault use the Padre MMU registers, as the 2.6.17
+kernel did; MMU-miss traps go to the fault handler. do_sparc_fault()
+ignores the stale write bit on instruction faults and no longer
+dereferences a NULL exception entry; padre.trace_fault=N logs the
+first N user faults.
+---
+ arch/sparc/Kconfig                        |   3 +-
+ arch/sparc/include/asm/cacheflush_32.h    |   6 +
+ arch/sparc/include/asm/page_32.h          |  14 +
+ arch/sparc/include/asm/pgalloc_32.h       |   4 +
+ arch/sparc/include/asm/pgalloc_32_padre.h |  42 ++
+ arch/sparc/include/asm/pgtable_32.h       |   4 +
+ arch/sparc/include/asm/pgtable_32_padre.h | 305 +++++++++++++
+ arch/sparc/include/asm/processor_32.h     |   7 +-
+ arch/sparc/include/asm/vaddrs.h           |   5 +
+ arch/sparc/kernel/entry.S                 |  18 +
+ arch/sparc/kernel/etrap_32.S              |  39 ++
+ arch/sparc/kernel/rtrap_32.S              |  30 ++
+ arch/sparc/kernel/ttable_32.S             |  13 +
+ arch/sparc/kernel/wof.S                   |  43 ++
+ arch/sparc/kernel/wuf.S                   |  32 ++
+ arch/sparc/mm/Makefile                    |   4 +
+ arch/sparc/mm/fault_32.c                  |  53 +++
+ arch/sparc/mm/init_32.c                   |   2 +
+ arch/sparc/mm/padre_mm.c                  | 503 ++++++++++++++++++++++
+ 19 files changed, 1125 insertions(+), 2 deletions(-)
+ create mode 100644 arch/sparc/include/asm/pgalloc_32_padre.h
+ create mode 100644 arch/sparc/include/asm/pgtable_32_padre.h
+ create mode 100644 arch/sparc/mm/padre_mm.c
+
+diff --git a/arch/sparc/Kconfig b/arch/sparc/Kconfig
+index 50c87d6955818d475b54aab1a00e2755161cf4b7..d2a0c9ff2d62067694d4a90126f075cefc4a9c7b 100644
+--- a/arch/sparc/Kconfig
++++ b/arch/sparc/Kconfig
+@@ -140,11 +140,12 @@ config MMU
+ 
+ config HIGHMEM
+ 	bool
+-	default y if SPARC32
++	default y if SPARC32 && !SPARC_PADRE
+ 	select KMAP_LOCAL
+ 
+ config PGTABLE_LEVELS
+ 	default 4 if 64BIT
++	default 2 if SPARC_PADRE
+ 	default 3
+ 
+ config ARCH_SUPPORTS_UPROBES
+diff --git a/arch/sparc/include/asm/cacheflush_32.h b/arch/sparc/include/asm/cacheflush_32.h
+index 9fee0ccfccb8e1b95a9d21ab293774fd6797eeb7..4da8a15d965aba43cf4233f0c6fb0effaa9cdd6a 100644
+--- a/arch/sparc/include/asm/cacheflush_32.h
++++ b/arch/sparc/include/asm/cacheflush_32.h
+@@ -15,7 +15,13 @@
+ 	sparc32_cachetlb_ops->cache_range(vma, start, end)
+ #define flush_cache_page(vma,addr,pfn) \
+ 	sparc32_cachetlb_ops->cache_page(vma, addr)
++#ifdef CONFIG_SPARC_PADRE
++/* Padre: I-cache not coherent with the D-cache (modules, etc.) */
++void padre_flush_icache_range(unsigned long start, unsigned long end);
++#define flush_icache_range(start, end)	padre_flush_icache_range(start, end)
++#else
+ #define flush_icache_range(start, end)		do { } while (0)
++#endif
+ 
+ #define copy_to_user_page(vma, page, vaddr, dst, src, len) \
+ 	do {							\
+diff --git a/arch/sparc/include/asm/page_32.h b/arch/sparc/include/asm/page_32.h
+index c1bccbedf567ec2b436b93d00f3a7491f524cb2b..4b4acccaeec0d155e86cc2731da441ca99eadbf6 100644
+--- a/arch/sparc/include/asm/page_32.h
++++ b/arch/sparc/include/asm/page_32.h
+@@ -80,7 +80,9 @@ typedef struct { unsigned long iopgprot; } iopgprot_t;
+  */
+ typedef unsigned long pte_t;
+ typedef unsigned long iopte_t;
++#ifndef CONFIG_SPARC_PADRE	/* Padre: folded pmd (pgtable-nopmd.h) */
+ typedef unsigned long pmd_t;
++#endif
+ typedef unsigned long pgd_t;
+ typedef unsigned long ctxd_t;
+ typedef unsigned long pgprot_t;
+@@ -88,14 +90,18 @@ typedef unsigned long iopgprot_t;
+ 
+ #define pte_val(x)	(x)
+ #define iopte_val(x)	(x)
++#ifndef CONFIG_SPARC_PADRE
+ #define pmd_val(x)      (x)
++#endif
+ #define pgd_val(x)	(x)
+ #define ctxd_val(x)	(x)
+ #define pgprot_val(x)	(x)
+ #define iopgprot_val(x)	(x)
+ 
+ #define __pte(x)	(x)
++#ifndef CONFIG_SPARC_PADRE
+ #define __pmd(x)	(x)
++#endif
+ #define __iopte(x)	(x)
+ #define __pgd(x)	(x)
+ #define __ctxd(x)	(x)
+@@ -106,7 +112,11 @@ typedef unsigned long iopgprot_t;
+ 
+ typedef pte_t *pgtable_t;
+ 
++#ifdef CONFIG_SPARC_PADRE
++#define TASK_UNMAPPED_BASE	0x20000000
++#else
+ #define TASK_UNMAPPED_BASE	0x50000000
++#endif
+ 
+ #else /* !(__ASSEMBLER__) */
+ 
+@@ -114,7 +124,11 @@ typedef pte_t *pgtable_t;
+ 
+ #endif /* !(__ASSEMBLER__) */
+ 
++#ifdef CONFIG_SPARC_PADRE
++#define PAGE_OFFSET	0x80000000	/* fixed DDR window on Padre */
++#else
+ #define PAGE_OFFSET	0xf0000000
++#endif
+ #ifndef __ASSEMBLER__
+ extern unsigned long phys_base;
+ extern unsigned long pfn_base;
+diff --git a/arch/sparc/include/asm/pgalloc_32.h b/arch/sparc/include/asm/pgalloc_32.h
+index 4f73e87b22a32b6cb45a0c821bd4f84876bdeb30..cd7118616766041b833d0f4bc580903b1902f84a 100644
+--- a/arch/sparc/include/asm/pgalloc_32.h
++++ b/arch/sparc/include/asm/pgalloc_32.h
+@@ -2,6 +2,9 @@
+ #ifndef _SPARC_PGALLOC_H
+ #define _SPARC_PGALLOC_H
+ 
++#ifdef CONFIG_SPARC_PADRE
++#include <asm/pgalloc_32_padre.h>
++#else
+ #include <linux/kernel.h>
+ #include <linux/sched.h>
+ #include <linux/pgtable.h>
+@@ -74,4 +77,5 @@ static inline void free_pte_fast(pte_t *pte)
+ void pte_free(struct mm_struct * mm, pgtable_t pte);
+ #define __pte_free_tlb(tlb, pte, addr)	pte_free((tlb)->mm, pte)
+ 
++#endif /* !CONFIG_SPARC_PADRE */
+ #endif /* _SPARC_PGALLOC_H */
+diff --git a/arch/sparc/include/asm/pgalloc_32_padre.h b/arch/sparc/include/asm/pgalloc_32_padre.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..1fe714ef387004d0d22fa5182cb32f4a032c781c
+--- /dev/null
++++ b/arch/sparc/include/asm/pgalloc_32_padre.h
+@@ -0,0 +1,42 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Padre: page directories and page tables come from the uncached area
++ * (padre_mm.c), like the SRMMU "nocache" pool.
++ */
++#ifndef _SPARC_PGALLOC_32_PADRE_H
++#define _SPARC_PGALLOC_32_PADRE_H
++
++#include <linux/kernel.h>
++#include <linux/sched.h>
++#include <linux/pgtable.h>
++#include <asm/page.h>
++
++void *padre_get_nocache_page(void);
++void padre_free_nocache_page(void *addr);
++
++pgd_t *pgd_alloc(struct mm_struct *mm);
++void pgd_free(struct mm_struct *mm, pgd_t *pgd);
++
++static inline void pmd_populate_kernel(struct mm_struct *mm, pmd_t *pmdp,
++				       pte_t *ptep)
++{
++	WRITE_ONCE(*pmdp, __pmd(__pa(ptep) | _PADRE_PGD_TABLE));
++}
++#define pmd_populate(mm, pmdp, pte)	pmd_populate_kernel(mm, pmdp, pte)
++
++pgtable_t pte_alloc_one(struct mm_struct *mm);
++void pte_free(struct mm_struct *mm, pgtable_t pte);
++
++static inline pte_t *pte_alloc_one_kernel(struct mm_struct *mm)
++{
++	return padre_get_nocache_page();
++}
++
++static inline void pte_free_kernel(struct mm_struct *mm, pte_t *pte)
++{
++	padre_free_nocache_page(pte);
++}
++
++#define __pte_free_tlb(tlb, pte, addr)	pte_free((tlb)->mm, pte)
++
++#endif /* _SPARC_PGALLOC_32_PADRE_H */
+diff --git a/arch/sparc/include/asm/pgtable_32.h b/arch/sparc/include/asm/pgtable_32.h
+index f1538a48484acb96bfa04d2169cf1c0e24bb2e95..7d31c18f992ef6a97022c822f889ab132492f501 100644
+--- a/arch/sparc/include/asm/pgtable_32.h
++++ b/arch/sparc/include/asm/pgtable_32.h
+@@ -9,6 +9,9 @@
+  *  Copyright (C) 1998 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
+  */
+ 
++#ifdef CONFIG_SPARC_PADRE
++#include <asm/pgtable_32_padre.h>
++#else
+ #include <linux/const.h>
+ 
+ #define PMD_SHIFT		18
+@@ -435,4 +438,5 @@ static inline int io_remap_pfn_range(struct vm_area_struct *vma,
+ 
+ #define pmd_pgtable(pmd)	((pgtable_t)__pmd_page(pmd))
+ 
++#endif /* !CONFIG_SPARC_PADRE */
+ #endif /* !(_SPARC_PGTABLE_H) */
+diff --git a/arch/sparc/include/asm/pgtable_32_padre.h b/arch/sparc/include/asm/pgtable_32_padre.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..b48b5bafe297f51ebd11aacb8d4a4b707213810d
+--- /dev/null
++++ b/arch/sparc/include/asm/pgtable_32_padre.h
+@@ -0,0 +1,305 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Page tables of the Infrant "Padre" (IT3107) MMU.
++ *
++ * From NETGEAR's GPL 2.6.17 kernel sources: the MMU walks a two-level
++ * table itself, like i386 without PAE:
++ *   - directory of 1024 entries of 4 MB (PGT register, bus address);
++ *   - tables of 1024 entries, 4 KB hardware pages;
++ *   - entry = bus address (bits 31-12) | U R W X C T A D Z V.
++ * The shipped 2.6.17 kernel uses 16 KB Linux pages (4 hardware entries
++ * per page); here we keep 4 KB pages, a mode supported by the same code
++ * (CONFIG_PADRE_4K_PAGE), so one entry per page.
++ * The kernel itself (0x8000_0000, I/O at 0x4000_0000) needs no tables:
++ * fixed windows. Only user space and vmalloc go through the
++ * tables.
++ * The tables come from the uncached area at the top of the DDR (like
++ * CONFIG_PADRE_RESERVE_DMA in 2.6.17): the MMU reads them from memory,
++ * the D-cache is not coherent.
++ */
++#ifndef _SPARC_PGTABLE_32_PADRE_H
++#define _SPARC_PGTABLE_32_PADRE_H
++
++#include <linux/const.h>
++#include <asm/padre.h>
++
++#define PGDIR_SHIFT		22
++#define PGDIR_SIZE		(1UL << PGDIR_SHIFT)
++#define PGDIR_MASK		(~(PGDIR_SIZE-1))
++
++#ifndef __ASSEMBLER__
++#include <asm-generic/pgtable-nopmd.h>
++
++#include <linux/spinlock.h>
++#include <linux/mm_types.h>
++#include <asm/types.h>
++#include <asm/vaddrs.h>
++#include <asm/oplib.h>
++#include <asm/cpu_type.h>
++
++struct vm_area_struct;
++struct page;
++
++void load_mmu(void);
++unsigned long calc_highpages(void);
++unsigned long __init bootmem_init(unsigned long *pages_avail);
++void paging_init(void);
++
++#define pte_ERROR(e)   __builtin_trap()
++#define pmd_ERROR(e)   __builtin_trap()
++#define pgd_ERROR(e)   __builtin_trap()
++
++#define PTRS_PER_PTE		1024
++#define PTRS_PER_PGD		1024
++#define USER_PTRS_PER_PGD	(TASK_SIZE / PGDIR_SIZE)
++#define PADRE_PGD_TABLE_SIZE	(PTRS_PER_PGD * 4)
++#define PADRE_PTE_TABLE_SIZE	(PTRS_PER_PTE * 4)
++
++/* Software bit, only when V = 0: PROT_NONE (page "present" for Linux,
++ * invalid for the MMU). Bits 10 and 11 are unused by the hardware
++ * (2.6.17 already used them for pte_file).
++ */
++#define _PAGE_PROTNONE		0x400
++#define _PAGE_SWP_EXCLUSIVE	_PADRE_PAGE_Z	/* V = 0: free */
++
++#define _PAGE_P			(_PADRE_PAGE_V | _PADRE_PAGE_C)
++#define _PAGE_CHG_MASK		(PAGE_MASK | _PADRE_PAGE_A | _PADRE_PAGE_D)
++#define _PADRE_PAGE_USER	(_PADRE_PAGE_U | _PADRE_PAGE_R | _PADRE_PAGE_X)
++
++#define PAGE_NONE	__pgprot(_PAGE_PROTNONE | _PADRE_PAGE_C)
++#define PAGE_SHARED	__pgprot(_PAGE_P | _PADRE_PAGE_USER | _PADRE_PAGE_W)
++#define PAGE_COPY	__pgprot(_PAGE_P | _PADRE_PAGE_USER)
++#define PAGE_READONLY	__pgprot(_PAGE_P | _PADRE_PAGE_USER)
++#define PAGE_KERNEL	__pgprot(_PAGE_P | _PADRE_PAGE_R | _PADRE_PAGE_W | \
++				 _PADRE_PAGE_X | _PADRE_PAGE_A | _PADRE_PAGE_D)
++/* Directory entry (2.6.17: _KERNPG_TABLE / _PAGE_TABLE) */
++#define _PADRE_PGD_TABLE	(_PADRE_PAGE_W | _PADRE_PAGE_D | _PADRE_PAGE_R | \
++				 _PADRE_PAGE_X | _PAGE_P | _PADRE_PAGE_U)
++
++#define swapper_pg_dir NULL	/* the real one is allocated by padre_mm.c */
++
++extern unsigned long phys_base;
++extern unsigned long pfn_base;
++
++extern unsigned long empty_zero_page[PAGE_SIZE / sizeof(unsigned long)];
++#define ZERO_PAGE(vaddr) (virt_to_page(empty_zero_page))
++
++/* Tables in uncached memory: a plain store is enough. */
++static inline void set_pte(pte_t *ptep, pte_t pteval)
++{
++	WRITE_ONCE(*ptep, pteval);
++}
++
++static inline int pte_present(pte_t pte)
++{
++	return pte_val(pte) & (_PADRE_PAGE_V | _PAGE_PROTNONE);
++}
++
++static inline int pte_none(pte_t pte)
++{
++	return !pte_val(pte);
++}
++
++static inline void pte_clear(struct mm_struct *mm, unsigned long addr,
++			     pte_t *ptep)
++{
++	set_pte(ptep, __pte(0));
++}
++
++/* Directory level (pmd folded into pgd) */
++static inline int pmd_none(pmd_t pmd)
++{
++	return !pmd_val(pmd);
++}
++
++static inline int pmd_bad(pmd_t pmd)
++{
++	return (pmd_val(pmd) & ~PAGE_MASK) != _PADRE_PGD_TABLE;
++}
++
++static inline int pmd_present(pmd_t pmd)
++{
++	return pmd_val(pmd) & _PADRE_PAGE_V;
++}
++
++static inline void pmd_clear(pmd_t *pmdp)
++{
++	WRITE_ONCE(*pmdp, __pmd(0));
++}
++
++static inline unsigned long pmd_pfn(pmd_t pmd)
++{
++	return pmd_val(pmd) >> PAGE_SHIFT;
++}
++
++static inline struct page *pmd_page(pmd_t pmd)
++{
++	return pfn_to_page(pmd_pfn(pmd));
++}
++
++static inline unsigned long pmd_page_vaddr(pmd_t pmd)
++{
++	return (unsigned long)__va(pmd_val(pmd) & PAGE_MASK);
++}
++
++#define __pmd_page(pmd)		pmd_page_vaddr(pmd)
++#define pmd_pgtable(pmd)	((pgtable_t)pmd_page_vaddr(pmd))
++
++static inline int pte_write(pte_t pte)
++{
++	return pte_val(pte) & _PADRE_PAGE_W;
++}
++
++static inline int pte_dirty(pte_t pte)
++{
++	return pte_val(pte) & _PADRE_PAGE_D;
++}
++
++static inline int pte_young(pte_t pte)
++{
++	return pte_val(pte) & _PADRE_PAGE_A;
++}
++
++static inline pte_t pte_wrprotect(pte_t pte)
++{
++	return __pte(pte_val(pte) & ~_PADRE_PAGE_W);
++}
++
++static inline pte_t pte_mkclean(pte_t pte)
++{
++	return __pte(pte_val(pte) & ~_PADRE_PAGE_D);
++}
++
++static inline pte_t pte_mkold(pte_t pte)
++{
++	return __pte(pte_val(pte) & ~_PADRE_PAGE_A);
++}
++
++static inline pte_t pte_mkwrite_novma(pte_t pte)
++{
++	return __pte(pte_val(pte) | _PADRE_PAGE_W);
++}
++
++static inline pte_t pte_mkdirty(pte_t pte)
++{
++	return __pte(pte_val(pte) | _PADRE_PAGE_D);
++}
++
++static inline pte_t pte_mkyoung(pte_t pte)
++{
++	return __pte(pte_val(pte) | _PADRE_PAGE_A);
++}
++
++#define PFN_PTE_SHIFT		PAGE_SHIFT
++
++static inline pte_t pfn_pte(unsigned long pfn, pgprot_t pgprot)
++{
++	return __pte((pfn << PFN_PTE_SHIFT) | pgprot_val(pgprot));
++}
++
++static inline unsigned long pte_pfn(pte_t pte)
++{
++	return pte_val(pte) >> PFN_PTE_SHIFT;
++}
++
++#define pte_page(pte)	pfn_to_page(pte_pfn(pte))
++
++static inline pte_t mk_pte_phys(unsigned long page, pgprot_t pgprot)
++{
++	return __pte((page & PAGE_MASK) | pgprot_val(pgprot));
++}
++
++#define pgprot_noncached pgprot_noncached
++static inline pgprot_t pgprot_noncached(pgprot_t prot)
++{
++	return __pgprot(pgprot_val(prot) & ~_PADRE_PAGE_C);
++}
++
++static pte_t pte_modify(pte_t pte, pgprot_t newprot) __attribute_const__;
++static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
++{
++	return __pte((pte_val(pte) & _PAGE_CHG_MASK) | pgprot_val(newprot));
++}
++
++struct seq_file;
++void mmu_info(struct seq_file *m);
++
++#define FAULT_CODE_PROT     0x1
++#define FAULT_CODE_WRITE    0x2
++#define FAULT_CODE_USER     0x4
++
++/* I-cache not coherent with the D-cache: needed for executable pages
++ * (2.6.17: flush_icache_page()).
++ */
++struct vm_fault;
++void update_mmu_cache_range(struct vm_fault *vmf, struct vm_area_struct *vma,
++			    unsigned long address, pte_t *ptep, unsigned int nr);
++#define update_mmu_cache(vma, address, ptep) \
++	update_mmu_cache_range(NULL, vma, address, ptep, 1)
++
++/*
++ * Swap entries (V = 0, PROTNONE = 0):
++ *   31 ............ 11 | 10 | 9 8 7 | 6 .. 2 | 1 | 0
++ *        offset        |  0 |   0   |  type  | E | 0
++ */
++#define PADRE_SWP_TYPE_SHIFT	2
++#define PADRE_SWP_TYPE_MASK	0x1f
++#define PADRE_SWP_OFF_SHIFT	11
++
++static inline unsigned long __swp_type(swp_entry_t entry)
++{
++	return (entry.val >> PADRE_SWP_TYPE_SHIFT) & PADRE_SWP_TYPE_MASK;
++}
++
++static inline unsigned long __swp_offset(swp_entry_t entry)
++{
++	return entry.val >> PADRE_SWP_OFF_SHIFT;
++}
++
++static inline swp_entry_t __swp_entry(unsigned long type, unsigned long offset)
++{
++	return (swp_entry_t) {
++		(type & PADRE_SWP_TYPE_MASK) << PADRE_SWP_TYPE_SHIFT
++		| offset << PADRE_SWP_OFF_SHIFT };
++}
++
++#define __pte_to_swp_entry(pte)		((swp_entry_t) { pte_val(pte) })
++#define __swp_entry_to_pte(x)		((pte_t) { (x).val })
++
++static inline bool pte_swp_exclusive(pte_t pte)
++{
++	return pte_val(pte) & _PAGE_SWP_EXCLUSIVE;
++}
++
++static inline pte_t pte_swp_mkexclusive(pte_t pte)
++{
++	return __pte(pte_val(pte) | _PAGE_SWP_EXCLUSIVE);
++}
++
++static inline pte_t pte_swp_clear_exclusive(pte_t pte)
++{
++	return __pte(pte_val(pte) & ~_PAGE_SWP_EXCLUSIVE);
++}
++
++#define __HAVE_ARCH_PTEP_SET_ACCESS_FLAGS
++#define ptep_set_access_flags(__vma, __address, __ptep, __entry, __dirty) \
++({									  \
++	int __changed = !pte_same(*(__ptep), __entry);			  \
++	if (__changed) {						  \
++		set_pte(__ptep, __entry);				  \
++		flush_tlb_page(__vma, __address);			  \
++	}								  \
++	__changed;							  \
++})
++
++#endif /* !(__ASSEMBLER__) */
++
++/* Same bounds as the 2.6.17 kernel (asm-padre/pgtable.h) */
++#define VMALLOC_START           _AC(0xf8000000,UL)
++#define VMALLOC_END             _AC(0xfc000000,UL)
++#define MODULES_VADDR           VMALLOC_START
++#define MODULES_END             VMALLOC_END
++
++#define HAVE_ARCH_UNMAPPED_AREA
++
++#endif /* _SPARC_PGTABLE_32_PADRE_H */
+diff --git a/arch/sparc/include/asm/processor_32.h b/arch/sparc/include/asm/processor_32.h
+index ba8b70ffec085feb17de9050f37de98e0039f7c3..4377055451adeb8fe5d73e6e199fee8f32a24d0b 100644
+--- a/arch/sparc/include/asm/processor_32.h
++++ b/arch/sparc/include/asm/processor_32.h
+@@ -17,9 +17,14 @@
+  * That one page is used to protect kernel from intruders, so that
+  * we can make our access_ok test faster
+  */
++#ifdef CONFIG_SPARC_PADRE
++/* 0x4000_0000 - 0x7fff_ffff: fixed I/O window, out of reach of the page tables */
++#define TASK_SIZE	0x40000000UL
++#else
+ #define TASK_SIZE	PAGE_OFFSET
++#endif
+ #ifdef __KERNEL__
+-#define STACK_TOP	(PAGE_OFFSET - PAGE_SIZE)
++#define STACK_TOP	(TASK_SIZE - PAGE_SIZE)
+ #define STACK_TOP_MAX	STACK_TOP
+ #endif /* __KERNEL__ */
+ 
+diff --git a/arch/sparc/include/asm/vaddrs.h b/arch/sparc/include/asm/vaddrs.h
+index da567600c8974cfe5cf6f9a120af9fce011d3033..f115bb5a3e7521c2e1b0a083fcf8abcf6c3d02fc 100644
+--- a/arch/sparc/include/asm/vaddrs.h
++++ b/arch/sparc/include/asm/vaddrs.h
+@@ -12,7 +12,12 @@
+  * Copyright (C) 2000 Anton Blanchard (anton@samba.org)
+  */
+ 
++#ifdef CONFIG_SPARC_PADRE
++/* All of the DDR (256 MB, up to 1 GB) is in the fixed window */
++#define SRMMU_MAXMEM		0x40000000
++#else
+ #define SRMMU_MAXMEM		0x0c000000
++#endif
+ 
+ #define SRMMU_NOCACHE_VADDR	(KERNBASE + SRMMU_MAXMEM)
+ 				/* = 0x0fc000000 */
+diff --git a/arch/sparc/kernel/entry.S b/arch/sparc/kernel/entry.S
+index a3fdee4cd6fa318575d0115c4f0e8af8f94c2b59..31d74ba228866e609919bfd1429295236e8390ab 100644
+--- a/arch/sparc/kernel/entry.S
++++ b/arch/sparc/kernel/entry.S
+@@ -31,6 +31,7 @@
+ #include <asm/unistd.h>
+ 
+ #include <asm/asmmacro.h>
++#include <asm/padre.h>
+ 
+ #define curptr      g6
+ 
+@@ -766,6 +767,22 @@ linux_trap_ipi15_sun4m:
+ 	.align	4
+ 	.globl	srmmu_fault
+ srmmu_fault:
++#ifdef CONFIG_SPARC_PADRE
++	/* Padre: status then address (order of the GPL 2.6.17 kernel), bit 9
++	 * of the status = write. For an instruction fault, do_sparc_fault
++	 * takes the address from %pc.
++	 */
++
++	mov	PADRE_MMU_DFSR, %l4
++	mov	PADRE_MMU_DFADDR, %l5
++	lda	[%l4] ASI_PADRE_MMU, %l4
++	lda	[%l5] ASI_PADRE_MMU, %l6
++
++	andn	%l6, 0xfff, %l6
++	srl	%l4, PADRE_MMU_DFSR_WRITE_SHIFT - 1, %l5
++	and	%l5, 2, %l5
++	or	%l5, %l6, %l6
++#else
+ 	mov	0x400, %l5
+ 	mov	0x300, %l4
+ 
+@@ -780,6 +797,7 @@ SUN_PI_(lda	[%l4] ASI_M_MMUREGS, %l5)	! read sfsr last
+ 
+ 	and	%l5, 2, %l5
+ 	or	%l5, %l6, %l6
++#endif
+ 
+ 	or	%l6, %l7, %l7			! l7 = [addr,write,txtfault]
+ 
+diff --git a/arch/sparc/kernel/etrap_32.S b/arch/sparc/kernel/etrap_32.S
+index 9f243f918619e59217541fb216ad8b5f44264cbb..c59e68e3d8657342fc56738523b998a68dc0c154 100644
+--- a/arch/sparc/kernel/etrap_32.S
++++ b/arch/sparc/kernel/etrap_32.S
+@@ -14,6 +14,7 @@
+ #include <asm/ptrace.h>
+ #include <asm/winmacro.h>
+ #include <asm/asmmacro.h>
++#include <asm/padre.h>
+ #include <asm/thread_info.h>
+ 
+ /* Registers to not touch at all. */
+@@ -229,6 +230,43 @@ tsetup_patch6:
+ 
+ 	.globl	tsetup_srmmu_stackchk
+ tsetup_srmmu_stackchk:
++#ifdef CONFIG_SPARC_PADRE
++	/* Padre (taken from the GPL 2.6.17 kernel): %g3 saved in memory */
++
++	bne	trap_setup_user_stack_is_bolixed
++	 sethi	%hi(PADRE_USER_TOP), %glob_tmp
++
++	cmp	%glob_tmp, %sp
++	bleu,a	1f
++	 sethi	%hi(padre_save_glob_tmp), %glob_tmp
++
++trap_setup_user_stack_is_bolixed:
++	SAVE_BOLIXED_USER_STACK(curptr, g3)
++	restore	%g0, %g0, %g0
++
++	jmpl	%t_retpc + 0x8, %g0
++	 mov	%t_kstack, %sp
++
++1:
++	st	%g3, [%glob_tmp + %lo(padre_save_glob_tmp)]
++	mov	PADRE_MMU_DFSR, %glob_tmp
++	lda	[%glob_tmp] ASI_PADRE_MMU, %g0
++	mov	PADRE_MMU_CONTROL, %glob_tmp
++	mov	PADRE_MMU_ON | PADRE_MMU_CONTROL_NF, %g3
++	sta	%g3, [%glob_tmp] ASI_PADRE_MMU
++
++	STORE_WINDOW(sp)
++
++	mov	PADRE_MMU_ON, %g3
++	sta	%g3, [%glob_tmp] ASI_PADRE_MMU
++	mov	PADRE_MMU_DFSR, %glob_tmp
++	lda	[%glob_tmp] ASI_PADRE_MMU, %g3
++	andcc	%g3, PADRE_MMU_DFSR_V, %g0
++	sethi	%hi(padre_save_glob_tmp), %glob_tmp
++	ld	[%glob_tmp + %lo(padre_save_glob_tmp)], %g3
++	bne	trap_setup_user_stack_is_bolixed
++	 nop
++#else
+ 	/* Check results of callers andcc %sp, 0x7, %g0 */
+ 	bne	trap_setup_user_stack_is_bolixed
+ 	 sethi   %hi(PAGE_OFFSET), %glob_tmp
+@@ -273,6 +311,7 @@ SUN_PI_(lda	[%glob_tmp] ASI_M_MMUREGS, %glob_tmp)	! save away status of winstore
+ 	andcc	%glob_tmp, 0x2, %g0			! did we fault?
+ 	bne	trap_setup_user_stack_is_bolixed	! failure
+ 	 nop
++#endif
+ 
+ 	restore %g0, %g0, %g0
+ 
+diff --git a/arch/sparc/kernel/rtrap_32.S b/arch/sparc/kernel/rtrap_32.S
+index 8931fe266346a3275cfffa7e6c3e6de6ec459b0a..40022b36c8601afc2c4f22ffe0037020327aba93 100644
+--- a/arch/sparc/kernel/rtrap_32.S
++++ b/arch/sparc/kernel/rtrap_32.S
+@@ -13,6 +13,7 @@
+ #include <asm/contregs.h>
+ #include <asm/winmacro.h>
+ #include <asm/asmmacro.h>
++#include <asm/padre.h>
+ #include <asm/thread_info.h>
+ 
+ #define t_psr     l0
+@@ -227,6 +228,34 @@ ret_trap_user_stack_is_bolixed:
+ 
+ 	.globl	srmmu_rett_stackchk
+ srmmu_rett_stackchk:
++#ifdef CONFIG_SPARC_PADRE
++	/* Padre (taken from the GPL 2.6.17 kernel) */
++
++	bne	ret_trap_user_stack_is_bolixed
++	 sethi	%hi(PADRE_USER_TOP), %g1
++	cmp	%g1, %fp
++	bleu	ret_trap_user_stack_is_bolixed
++	 mov	PADRE_MMU_DFSR, %g1
++	lda	[%g1] ASI_PADRE_MMU, %g0
++
++	mov	PADRE_MMU_CONTROL, %g1
++	mov	PADRE_MMU_ON | PADRE_MMU_CONTROL_NF, %g2
++	sta	%g2, [%g1] ASI_PADRE_MMU
++
++	restore	%g0, %g0, %g0
++
++	LOAD_WINDOW(sp)
++
++	save	%g0, %g0, %g0
++
++	mov	PADRE_MMU_ON, %g2
++	sta	%g2, [%g1] ASI_PADRE_MMU
++	mov	PADRE_MMU_DFSR, %g1
++	lda	[%g1] ASI_PADRE_MMU, %g2
++	andcc	%g2, PADRE_MMU_DFSR_V, %g0
++	be	ret_trap_userwins_ok
++	 nop
++#else
+ 	bne	ret_trap_user_stack_is_bolixed
+ 	 sethi   %hi(PAGE_OFFSET), %g1
+ 	cmp	%g1, %fp
+@@ -261,5 +290,6 @@ SUN_PI_(lda	[%g1] ASI_M_MMUREGS, %g1)
+ 	andcc	%g1, 0x2, %g0
+ 	be	ret_trap_userwins_ok
+ 	 nop
++#endif
+ 
+ 	b,a	ret_trap_user_stack_is_bolixed
+diff --git a/arch/sparc/kernel/ttable_32.S b/arch/sparc/kernel/ttable_32.S
+index e79fd786fbbb2595299fd09e33fd8188a081cf7c..4aac52ca48de20c5549dc0913b6399a3c93004b7 100644
+--- a/arch/sparc/kernel/ttable_32.S
++++ b/arch/sparc/kernel/ttable_32.S
+@@ -44,7 +44,12 @@ t_irq13:TRAP_ENTRY_INTERRUPT(13)            /* IRQ Audio Intr.               */
+ t_irq14:TRAP_ENTRY_INTERRUPT(14)            /* IRQ Timer #2                  */
+ 
+ 	.globl	t_nmi
++#ifdef CONFIG_SPARC_PADRE
++t_nmi:	TRAP_ENTRY_INTERRUPT(15)            /* Padre: ordinary level 15 */
++
++#else
+ t_nmi:	TRAP_ENTRY(0x1f, linux_trap_ipi15_sun4m)
++#endif
+ 
+ t_racc:	TRAP_ENTRY(0x20, do_reg_access)     /* General Register Access Error */
+ t_iacce:BAD_TRAP(0x21)                      /* Instr Access Error            */
+@@ -57,11 +62,19 @@ t_cpexc:TRAP_ENTRY(0x28, do_cp_exception)   /* Co-Processor Exception        */
+ t_dacce:SRMMU_DFAULT                        /* Data Access Error             */
+ t_hwdz:	TRAP_ENTRY(0x2a, do_hw_divzero)     /* Division by zero, you lose... */
+ t_dserr:BAD_TRAP(0x2b)                      /* Data Store Error              */
++#ifdef CONFIG_SPARC_PADRE
++t_daccm:SRMMU_DFAULT                        /* Data Access MMU-Miss (Padre)  */
++#else
+ t_daccm:BAD_TRAP(0x2c)                      /* Data Access MMU-Miss          */
++#endif
+ t_bad2d:BAD_TRAP(0x2d) BAD_TRAP(0x2e) BAD_TRAP(0x2f) BAD_TRAP(0x30) BAD_TRAP(0x31)
+ t_bad32:BAD_TRAP(0x32) BAD_TRAP(0x33) BAD_TRAP(0x34) BAD_TRAP(0x35) BAD_TRAP(0x36)
+ t_bad37:BAD_TRAP(0x37) BAD_TRAP(0x38) BAD_TRAP(0x39) BAD_TRAP(0x3a) BAD_TRAP(0x3b)
++#ifdef CONFIG_SPARC_PADRE
++t_iaccm:SRMMU_TFAULT                        /* Instr Access MMU-Miss (Padre) */
++#else
+ t_iaccm:BAD_TRAP(0x3c)                      /* Instr Access MMU-Miss         */
++#endif
+ t_bad3d:BAD_TRAP(0x3d) BAD_TRAP(0x3e) BAD_TRAP(0x3f) BAD_TRAP(0x40) BAD_TRAP(0x41)
+ t_bad42:BAD_TRAP(0x42) BAD_TRAP(0x43) BAD_TRAP(0x44) BAD_TRAP(0x45) BAD_TRAP(0x46)
+ t_bad47:BAD_TRAP(0x47) BAD_TRAP(0x48) BAD_TRAP(0x49) BAD_TRAP(0x4a) BAD_TRAP(0x4b)
+diff --git a/arch/sparc/kernel/wof.S b/arch/sparc/kernel/wof.S
+index 96a3a112423acefc61448db436f0ec1a320b3e71..43c31018ac495206a1e63a92480332fc9c57d38c 100644
+--- a/arch/sparc/kernel/wof.S
++++ b/arch/sparc/kernel/wof.S
+@@ -13,6 +13,7 @@
+ #include <asm/asi.h>
+ #include <asm/winmacro.h>
+ #include <asm/asmmacro.h>
++#include <asm/padre.h>
+ #include <asm/thread_info.h>
+ 
+ /* WARNING: This routine is hairy and _very_ complicated, but it
+@@ -325,6 +326,47 @@ spwin_srmmu_stackchk:
+ 	 * reason... ;(  Note that the 'sethi' below assumes the
+ 	 * kernel is page aligned, which should always be the case.
+ 	 */
++#ifdef CONFIG_SPARC_PADRE
++	/* Padre (taken from the GPL 2.6.17 kernel): own MMU registers, only
++	 * one free global, so %g6 is saved in memory (UP only).
++	 */
++	bne	spwin_user_stack_is_bolixed
++	 sethi	%hi(PADRE_USER_TOP), %glob_tmp
++	cmp	%glob_tmp, %sp
++	bleu	spwin_user_stack_is_bolixed
++	 sethi	%hi(padre_save_glob_tmp), %glob_tmp
++	st	%g6, [%glob_tmp + %lo(padre_save_glob_tmp)]
++
++	mov	PADRE_MMU_DFSR, %glob_tmp
++	lda	[%glob_tmp] ASI_PADRE_MMU, %g0		! clear the status
++	mov	PADRE_MMU_CONTROL, %glob_tmp
++	mov	PADRE_MMU_ON | PADRE_MMU_CONTROL_NF, %g6
++	sta	%g6, [%glob_tmp] ASI_PADRE_MMU		! no trap
++
++	STORE_WINDOW(sp)
++
++	mov	PADRE_MMU_ON, %g6
++	sta	%g6, [%glob_tmp] ASI_PADRE_MMU
++	mov	PADRE_MMU_DFSR, %glob_tmp
++	lda	[%glob_tmp] ASI_PADRE_MMU, %g6
++	andcc	%g6, PADRE_MMU_DFSR_V, %g0		! fault?
++
++	sethi	%hi(padre_save_glob_tmp), %glob_tmp
++	ld	[%glob_tmp + %lo(padre_save_glob_tmp)], %g6
++	be,a	spwin_finish_up + 0x4
++	 restore %g0, %g0, %g0
++
++	rd	%psr, %glob_tmp
++	b	spwin_user_stack_is_bolixed + 0x4
++	 nop
++
++	.pushsection .data
++	.align	4
++	.globl	padre_save_glob_tmp
++padre_save_glob_tmp:
++	.word	0
++	.popsection
++#else
+ 	/* Check results of callers andcc %sp, 0x7, %g0 */
+ 	bne	spwin_user_stack_is_bolixed
+ 	 sethi   %hi(PAGE_OFFSET), %glob_tmp
+@@ -364,3 +406,4 @@ SUN_PI_(lda	[%glob_tmp] ASI_M_MMUREGS, %glob_tmp)
+ 	rd	%psr, %glob_tmp
+ 	b	spwin_user_stack_is_bolixed + 0x4	! we faulted, ugh
+ 	 nop
++#endif
+diff --git a/arch/sparc/kernel/wuf.S b/arch/sparc/kernel/wuf.S
+index 1a4ca490e9c22b8b20f130f7b2a4102012ca13e4..192b6a12798527760899e8e9d19034aed4520c0b 100644
+--- a/arch/sparc/kernel/wuf.S
++++ b/arch/sparc/kernel/wuf.S
+@@ -13,6 +13,7 @@
+ #include <asm/asi.h>
+ #include <asm/winmacro.h>
+ #include <asm/asmmacro.h>
++#include <asm/padre.h>
+ #include <asm/thread_info.h>
+ 
+ /* Just like the overflow handler we define macros for registers
+@@ -244,6 +245,36 @@ fwin_user_finish_up:
+ srmmu_fwin_stackchk:
+ 	/* LOCATION: Window 'W' */
+ 
++#ifdef CONFIG_SPARC_PADRE
++	/* Padre (taken from the GPL 2.6.17 kernel) */
++	bne	fwin_user_stack_is_bolixed
++	 sethi	%hi(PADRE_USER_TOP), %l5
++	mov	PADRE_MMU_DFSR, %l4
++	cmp	%l5, %sp
++	bleu	fwin_user_stack_is_bolixed
++	 lda	[%l4] ASI_PADRE_MMU, %g0		! clear the status
++
++	mov	PADRE_MMU_CONTROL, %l5
++	mov	PADRE_MMU_ON | PADRE_MMU_CONTROL_NF, %l4
++	sta	%l4, [%l5] ASI_PADRE_MMU		! no trap
++
++	LOAD_WINDOW(sp)
++
++	save	%g0, %g0, %g0
++	save	%g0, %g0, %g0
++
++	/* LOCATION: Window 'T' */
++	mov	PADRE_MMU_CONTROL, %twin_tmp1
++	mov	PADRE_MMU_ON, %twin_tmp2
++	sta	%twin_tmp2, [%twin_tmp1] ASI_PADRE_MMU
++	mov	PADRE_MMU_DFSR, %twin_tmp1
++	lda	[%twin_tmp1] ASI_PADRE_MMU, %twin_tmp2
++	andcc	%twin_tmp2, PADRE_MMU_DFSR_V, %g0	! fault?
++
++
++	bne	1f
++	 nop
++#else
+ 	/* Caller did 'andcc %sp, 0x7, %g0' */
+ 	bne	fwin_user_stack_is_bolixed
+ 	 sethi   %hi(PAGE_OFFSET), %l5
+@@ -296,6 +327,7 @@ SUN_PI_(lda	[%twin_tmp2] ASI_M_MMUREGS, %twin_tmp2)	   ! read fault status
+ 
+ 	bne	1f					   ! yep, cleanup
+ 	 nop
++#endif
+ 
+ 	wr	%t_psr, 0x0, %psr
+ 	nop
+diff --git a/arch/sparc/mm/Makefile b/arch/sparc/mm/Makefile
+index e9d232561c82aefcd7f6f7aa5834119d8b44e09f..86f339b625f4df109020b37c01291d955f55626f 100644
+--- a/arch/sparc/mm/Makefile
++++ b/arch/sparc/mm/Makefile
+@@ -5,10 +5,14 @@
+ obj-$(CONFIG_SPARC64)   += ultra.o tlb.o tsb.o
+ obj-y                   += fault_$(BITS).o
+ obj-y                   += init_$(BITS).o
++ifdef CONFIG_SPARC_PADRE
++obj-y                   += padre_mm.o
++else
+ obj-$(CONFIG_SPARC32)   += srmmu.o iommu.o io-unit.o
+ obj-$(CONFIG_SPARC32)   += srmmu_access.o
+ obj-$(CONFIG_SPARC32)   += hypersparc.o viking.o tsunami.o swift.o
+ obj-$(CONFIG_SPARC32)   += leon_mm.o
++endif
+ 
+ # Only used by sparc64
+ obj-$(CONFIG_HUGETLB_PAGE) += hugetlbpage.o
+diff --git a/arch/sparc/mm/fault_32.c b/arch/sparc/mm/fault_32.c
+index 86a831ebd8c8e30e51058bc09d8c02d2ef2cf71b..859a5406be34bbc9bc3f98a0c650bdc4696c25a2 100644
+--- a/arch/sparc/mm/fault_32.c
++++ b/arch/sparc/mm/fault_32.c
+@@ -109,6 +109,34 @@ static noinline void do_fault_siginfo(int code, int sig, struct pt_regs *regs,
+ 	__do_fault_siginfo(code, sig, regs, addr);
+ }
+ 
++#ifdef CONFIG_SPARC_PADRE
++/* padre.trace_fault=N: print the first N user faults */
++static int padre_trace_fault;
++
++static int __init padre_trace_fault_param(char *s)
++{
++	padre_trace_fault = s ? simple_strtol(s, NULL, 0) : 20;
++	if (padre_trace_fault == 1)
++		padre_trace_fault = 20;
++	return 0;
++}
++early_param("padre.trace_fault", padre_trace_fault_param);
++
++static void padre_trace_pte(const char *what, unsigned long address, unsigned long pc)
++{
++	struct mm_struct *mm = current->active_mm;
++	unsigned long pgd = 0, pte = 0;
++
++	if (mm && mm->pgd) {
++		pgd = pgd_val(*pgd_offset(mm, address));
++		if (pgd & 1)
++			pte = ((unsigned long *)__va(pgd & PAGE_MASK))[(address >> PAGE_SHIFT) & 1023];
++	}
++	pr_info("padre fault %s %s[%d] addr %08lx pc %08lx pgd %08lx pte %08lx\n",
++		what, current->comm, task_pid_nr(current), address, pc, pgd, pte);
++}
++#endif
++
+ asmlinkage void do_sparc_fault(struct pt_regs *regs, int text_fault, int write,
+ 			       unsigned long address)
+ {
+@@ -122,6 +150,20 @@ asmlinkage void do_sparc_fault(struct pt_regs *regs, int text_fault, int write,
+ 
+ 	if (text_fault)
+ 		address = regs->pc;
++#ifdef CONFIG_SPARC_PADRE
++	/* Padre: srmmu_fault (entry.S) takes the write bit from the DATA
++	 * fault status register, stale for an instruction fault (2.6.17
++	 * passed write = 0, text_access_fault). Without this, the first
++	 * user instruction failed with SEGV_ACCERR.
++	 */
++	if (text_fault)
++		write = 0;
++	if (padre_trace_fault > 0 && !(regs->psr & PSR_PS)) {
++		padre_trace_fault--;
++		padre_trace_pte(text_fault ? "instr" : (write ? "write" : "read"),
++				address, regs->pc);
++	}
++#endif
+ 
+ 	/*
+ 	 * We fault-in kernel-space virtual memory on-demand. The
+@@ -232,6 +274,14 @@ asmlinkage void do_sparc_fault(struct pt_regs *regs, int text_fault, int write,
+ 		const struct exception_table_entry *entry;
+ 
+ 		entry = search_exception_tables(regs->pc);
++#ifdef CONFIG_SPARC_PADRE
++		/* With no entry, entry->fixup dereferenced NULL: a new kernel
++		 * fault, endless recursion and a silent hang instead of an oops
++		 * (why the first emulated FPop went silent). Fall through to
++		 * unhandled_fault() to get the message.
++		 */
++		if (entry) {
++#endif
+ #ifdef DEBUG_EXCEPTIONS
+ 		printk("Exception: PC<%08lx> faddr<%08lx>\n",
+ 		       regs->pc, address);
+@@ -241,6 +291,9 @@ asmlinkage void do_sparc_fault(struct pt_regs *regs, int text_fault, int write,
+ 		regs->pc = entry->fixup;
+ 		regs->npc = regs->pc + 4;
+ 		return;
++#ifdef CONFIG_SPARC_PADRE
++		}
++#endif
+ 	}
+ 
+ 	unhandled_fault(address, tsk, regs);
+diff --git a/arch/sparc/mm/init_32.c b/arch/sparc/mm/init_32.c
+index fdc93dd12c3e3e85ca117eb70a25a575c8dad699..c0d20013e7c4ff726e0b6fa60349629ca7b1ec62 100644
+--- a/arch/sparc/mm/init_32.c
++++ b/arch/sparc/mm/init_32.c
+@@ -236,6 +236,7 @@ void __init arch_mm_preinit(void)
+ {
+ 	int i;
+ 
++#ifdef CONFIG_HIGHMEM
+ 	if (PKMAP_BASE+LAST_PKMAP*PAGE_SIZE >= FIXADDR_START) {
+ 		prom_printf("BUG: fixmap and pkmap areas overlap\n");
+ 		prom_printf("pkbase: 0x%lx pkend: 0x%lx fixstart 0x%lx\n",
+@@ -245,6 +246,7 @@ void __init arch_mm_preinit(void)
+ 		prom_printf("Please mail sparclinux@vger.kernel.org.\n");
+ 		prom_halt();
+ 	}
++#endif
+ 
+ 
+ 	/* Saves us work later. */
+diff --git a/arch/sparc/mm/padre_mm.c b/arch/sparc/mm/padre_mm.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..99e9c47fca0a30d242cbe31ae21fb84c356becc8
+--- /dev/null
++++ b/arch/sparc/mm/padre_mm.c
+@@ -0,0 +1,503 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * padre_mm.c: MMU and caches of the Infrant IT3107 "Padre".
++ *
++ * Replaces srmmu.c for CONFIG_SPARC_PADRE. The hardware behaviour comes
++ * from NETGEAR's GPL 2.6.17 kernel sources (include/asm-padre/
++ * {pgtable,tlbflush,mmu_context}.h, arch/padre/mm/{init,fault,
++ * padre_cache}.c); the code is rewritten for the 6.x kernel API.
++ *
++ * Not verified on hardware.
++ */
++
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/mm.h>
++#include <linux/memblock.h>
++#include <linux/bitmap.h>
++#include <linux/spinlock.h>
++#include <linux/seq_file.h>
++#include <linux/dma-map-ops.h>
++#include <linux/dma-direct.h>
++#include <linux/pagemap.h>
++#include <linux/moduleparam.h>
++
++#include <asm/padre.h>
++#include <asm/page.h>
++#include <asm/pgtable.h>
++#include <asm/pgalloc.h>
++#include <asm/mmu_context.h>
++#include <asm/cacheflush.h>
++#include <asm/tlbflush.h>
++#include <asm/sections.h>
++#include <asm/setup.h>
++#include <asm/psr.h>
++
++#include "mm_32.h"
++
++extern unsigned long last_valid_pfn;
++extern unsigned long highstart_pfn, highend_pfn;
++
++const struct sparc32_cachetlb_ops *sparc32_cachetlb_ops;
++EXPORT_SYMBOL(sparc32_cachetlb_ops);
++
++/* Used by other arch/sparc files */
++char *srmmu_name = "Infrant Padre";
++int viking_mxcc_present;
++int flush_page_for_dma_global = 1;
++int vac_cache_size;
++EXPORT_SYMBOL(vac_cache_size);
++int vac_line_size;
++
++/* ---------------------------------------------------------------------
++ * Caches (2.6.17 padre_cache.c; padre_cachefix is set to 1 there by
++ * padre_i2c when boot_param.product_features has bit 5)
++ */
++static int padre_cachefix;
++static inline unsigned long padre_read_dcctrl(void)
++{
++	unsigned long val;
++
++	__asm__ __volatile__("lda [%1] %2, %0"
++			     : "=r" (val)
++			     : "r" (PADRE_DCMU_CTRL), "i" (ASI_PADRE_DCMU));
++	return val;
++}
++
++static inline void padre_write_dcctrl(unsigned long val)
++{
++	__asm__ __volatile__("sta %0, [%1] %2"
++			     : : "r" (val), "r" (PADRE_DCMU_CTRL),
++			       "i" (ASI_PADRE_DCMU) : "memory");
++}
++
++/* Probe each line of [start, end] in the requested mode */
++static void padre_dcache_probe(unsigned long start, unsigned long end,
++			       unsigned long mode)
++{
++	unsigned long flags, val;
++
++	if (end <= start)
++		return;
++	start &= ~(PADRE_DCACHE_LINE - 1UL);
++	end = (end - 1) & ~(PADRE_DCACHE_LINE - 1UL);
++
++	local_irq_save(flags);
++	val = padre_read_dcctrl();
++	padre_write_dcctrl(val | mode);
++	for (; start <= end; start += PADRE_DCACHE_LINE)
++		__asm__ __volatile__("ld [%0], %%g0" : : "r" (start) : "memory");
++	padre_write_dcctrl(val);
++	local_irq_restore(flags);
++}
++
++/* Write dirty lines back to memory (without invalidating) */
++void padre_clean_dcache_range(unsigned long start, unsigned long end)
++{
++	padre_dcache_probe(start, end, PADRE_DCMU_PROBE_CLEAN);
++}
++EXPORT_SYMBOL(padre_clean_dcache_range);
++
++/* Write back, then invalidate */
++void padre_flush_dcache_range(unsigned long start, unsigned long end)
++{
++	padre_dcache_probe(start, end, PADRE_DCMU_PROBE_INVCLN);
++}
++EXPORT_SYMBOL(padre_flush_dcache_range);
++
++/* Whole D-cache, by a forced sweep of the S3 SRAM (2.6.17) */
++void padre_flush_dcache_all(void)
++{
++	unsigned long flags, val, a;
++
++	local_irq_save(flags);
++	val = padre_read_dcctrl();
++	padre_write_dcctrl(val | PADRE_DCMU_PROBE_INVCLN |
++			   PADRE_DCMU_CTRL_FORCE | 0x80);
++	for (a = PADRE_S3_RAMTOP_CACHEABLE;
++	     a <= PADRE_S3_RAMTOP_CACHEABLE + 0x1000 - PADRE_DCACHE_LINE;
++	     a += PADRE_DCACHE_LINE)
++		__asm__ __volatile__("ld [%0], %%g0" : : "r" (a) : "memory");
++	padre_write_dcctrl(val);
++	local_irq_restore(flags);
++}
++
++/* Invalidate the whole I-cache: disabled, tags cleared by the MBIST
++ * engine, re-enabled (2.6.17: __flush_icache_workaround).
++ */
++void padre_flush_icache_all(void)
++{
++	unsigned long flags;
++
++	local_irq_save(flags);
++	__asm__ __volatile__("sta %%g0, [%0] %1\n\tnop; nop; nop"
++			     : : "r" (PADRE_ICMU_CTRL), "i" (ASI_PADRE_ICMU)
++			     : "memory");
++	/* 2.6.17: "cachefix" variant if product_features bit 5 (the case
++	 * for the Duo v1 studied, VPD 0x17b = 0x63)
++	 */
++	__raw_writel(padre_cachefix ? 0x0ff : 0x3ff, (void __iomem *)PADRE_MBIST_ADDR);
++	__raw_writel(0, (void __iomem *)PADRE_MBIST_DATA);
++	__raw_writel(PADRE_MBIST_MODE_EN | (1 << 20) | (padre_cachefix ? 1 << 10 : 0),
++	       (void __iomem *)PADRE_MBIST_MODE);
++	{
++		unsigned int n = 1000000;
++
++		while (!(__raw_readl((void __iomem *)PADRE_MBIST_MODE) & PADRE_MBIST_MODE_DONE) && --n)
++			;
++		if (!n)
++			pr_err("padre: MBIST (I-cache flush) never completes\n");
++	}
++	__raw_writel(0, (void __iomem *)PADRE_MBIST_MODE);
++	__asm__ __volatile__("sta %0, [%1] %2\n\tnop; nop; nop"
++			     : : "r" (PADRE_ICMU_CTRL_EN), "r" (PADRE_ICMU_CTRL),
++			       "i" (ASI_PADRE_ICMU) : "memory");
++	local_irq_restore(flags);
++}
++
++void padre_flush_icache_range(unsigned long start, unsigned long end)
++{
++	padre_clean_dcache_range(start, end);
++	padre_flush_icache_all();
++}
++EXPORT_SYMBOL(padre_flush_icache_range);
++
++void update_mmu_cache_range(struct vm_fault *vmf, struct vm_area_struct *vma,
++			    unsigned long address, pte_t *ptep, unsigned int nr)
++{
++	unsigned long kaddr;
++
++	if (!(vma->vm_flags & VM_EXEC) || !pfn_valid(pte_pfn(*ptep)))
++		return;
++	kaddr = (unsigned long)__va(pte_pfn(*ptep) << PAGE_SHIFT);
++	padre_flush_icache_range(kaddr, kaddr + nr * PAGE_SIZE);
++}
++
++static void padre_nop_all(void) { }
++static void padre_nop_mm(struct mm_struct *mm) { }
++static void padre_nop_range(struct vm_area_struct *vma, unsigned long s,
++			    unsigned long e) { }
++static void padre_nop_page(struct vm_area_struct *vma, unsigned long a) { }
++
++static void padre_page_to_ram(unsigned long page)
++{
++	padre_clean_dcache_range(page, page + PAGE_SIZE);
++}
++
++static void padre_page_for_dma(unsigned long page)
++{
++	padre_flush_dcache_range(page, page + PAGE_SIZE);
++}
++
++static void padre_sig_insns(struct mm_struct *mm, unsigned long insn_addr)
++{
++	padre_flush_dcache_all();
++	padre_flush_icache_all();
++}
++
++/* ---------------------------------------------------------------------
++ * TLB (no contexts: flushed on every address space switch)
++ */
++static inline void padre_set_pgt(pgd_t *pgd)
++{
++	__asm__ __volatile__("sta %0, [%1] %2"
++			     : : "r" (__pa(pgd) | PADRE_MMU_PGT_EN | PADRE_MMU_PGT_FL),
++			       "r" (PADRE_MMU_PGT), "i" (ASI_PADRE_MMU) : "memory");
++}
++
++static void padre_tlb_all(void)
++{
++	__asm__ __volatile__("sta %0, [%1] %2"
++			     : : "r" (PADRE_MMU_CONTROL_FL | PADRE_MMU_ON),
++			       "r" (PADRE_MMU_CONTROL), "i" (ASI_PADRE_MMU)
++			     : "memory");
++}
++
++static void padre_tlb_mm(struct mm_struct *mm)
++{
++	if (mm == current->active_mm)
++		padre_tlb_all();
++}
++
++static void padre_tlb_range(struct vm_area_struct *vma, unsigned long start,
++			    unsigned long end)
++{
++	padre_tlb_mm(vma->vm_mm);
++}
++
++/* 2.6.17: the TLB probe may write the entry back to memory, so restore
++ * the value read before (flush_tlb_page in asm-padre/tlbflush.h).
++ */
++static void padre_tlb_page(struct vm_area_struct *vma, unsigned long addr)
++{
++	struct mm_struct *mm = vma->vm_mm;
++	unsigned long flags;
++	pmd_t *pmd;
++	pte_t *ptep, pte;
++
++	if (mm != current->active_mm)
++		return;
++	addr &= PAGE_MASK;
++	pmd = pmd_off(mm, addr);
++	local_irq_save(flags);
++	if (pmd_none(*pmd)) {
++		__asm__ __volatile__("sta %%g0, [%0] %1"
++				     : : "r" (addr), "i" (ASI_PADRE_TLBPROBE)
++				     : "memory");
++	} else {
++		ptep = (pte_t *)pmd_page_vaddr(*pmd) + pte_index(addr);
++		pte = READ_ONCE(*ptep);
++		__asm__ __volatile__("sta %%g0, [%0] %1"
++				     : : "r" (addr), "i" (ASI_PADRE_TLBPROBE)
++				     : "memory");
++		WRITE_ONCE(*ptep, pte);
++	}
++	local_irq_restore(flags);
++}
++
++static const struct sparc32_cachetlb_ops padre_ops = {
++	.cache_all	= padre_nop_all,	/* no aliasing: nothing to do */
++	.cache_mm	= padre_nop_mm,
++	.cache_range	= padre_nop_range,
++	.cache_page	= padre_nop_page,
++	.tlb_all	= padre_tlb_all,
++	.tlb_mm		= padre_tlb_mm,
++	.tlb_range	= padre_tlb_range,
++	.tlb_page	= padre_tlb_page,
++	.page_to_ram	= padre_page_to_ram,
++	.sig_insns	= padre_sig_insns,
++	.page_for_dma	= padre_page_for_dma,
++};
++
++void __init load_mmu(void)
++{
++	sparc32_cachetlb_ops = &padre_ops;
++}
++
++/* ---------------------------------------------------------------------
++ * Uncached area (last 16 MB of DDR, threshold set in head_32.S):
++ * first 8 MB (2048 pages) for page directories and page tables,
++ * last 8 MB for coherent DMA (arch_dma_alloc below).
++ * ponytail: first-fit bitmap allocators; enough for EHCI and a few pools,
++ * revisit if a driver makes large allocations.
++ */
++#define PADRE_NOCACHE_SIZE	(16UL << 20)
++#define PADRE_PT_PAGES		2048
++
++unsigned long padre_nocache_phys;
++static void *padre_pt_pool;
++static DECLARE_BITMAP(padre_pt_map, PADRE_PT_PAGES);
++static unsigned int padre_pt_used;
++static DEFINE_SPINLOCK(padre_pt_lock);
++
++void *padre_get_nocache_page(void)
++{
++	unsigned long flags;
++	unsigned int i;
++	void *p = NULL;
++
++	spin_lock_irqsave(&padre_pt_lock, flags);
++	i = find_first_zero_bit(padre_pt_map, PADRE_PT_PAGES);
++	if (i < PADRE_PT_PAGES) {
++		__set_bit(i, padre_pt_map);
++		padre_pt_used++;
++		p = padre_pt_pool + i * PAGE_SIZE;
++	}
++	spin_unlock_irqrestore(&padre_pt_lock, flags);
++
++	if (p)
++		memset(p, 0, PAGE_SIZE);
++	else
++		pr_err("padre: out of uncached pages for page tables\n");
++	return p;
++}
++
++void padre_free_nocache_page(void *addr)
++{
++	unsigned long flags;
++	unsigned int i = (addr - padre_pt_pool) / PAGE_SIZE;
++
++	BUG_ON(addr < padre_pt_pool || i >= PADRE_PT_PAGES);
++	spin_lock_irqsave(&padre_pt_lock, flags);
++	__clear_bit(i, padre_pt_map);
++	padre_pt_used--;
++	spin_unlock_irqrestore(&padre_pt_lock, flags);
++}
++
++/* ---------------------------------------------------------------------
++ * Coherent DMA (dma_alloc_coherent: EHCI QH/qTD descriptors...) in the
++ * last 8 MB of the area that is uncached BY PHYSICAL ADDRESS (CACHEABLE
++ * threshold), like the page tables, which do work. Before: vmap with the
++ * PTE C bit cleared; nothing shows the Padre D-cache honours that bit
++ * (2.6.17 did not trust it: it flushed the whole cache on every URB), and
++ * EHCI never saw its descriptors (-60 on every control
++ * transfer).
++ * DMA address = Linux physical address (DDR at 0x4000_0000 on the bus,
++ * like 2.6.17 virt_to_bus).
++ */
++#define PADRE_DMA_PAGES		(PADRE_NOCACHE_SIZE / PAGE_SIZE - PADRE_PT_PAGES)
++
++static DECLARE_BITMAP(padre_dma_map, PADRE_DMA_PAGES);
++static DEFINE_SPINLOCK(padre_dma_lock);
++
++void *arch_dma_alloc(struct device *dev, size_t size, dma_addr_t *dma_handle,
++		     gfp_t gfp, unsigned long attrs)
++{
++	unsigned int n = PAGE_ALIGN(size) >> PAGE_SHIFT;
++	unsigned long flags, i;
++	void *va;
++
++	spin_lock_irqsave(&padre_dma_lock, flags);
++	i = bitmap_find_next_zero_area(padre_dma_map, PADRE_DMA_PAGES, 0, n, 0);
++	if (i < PADRE_DMA_PAGES)
++		bitmap_set(padre_dma_map, i, n);
++	spin_unlock_irqrestore(&padre_dma_lock, flags);
++	if (i >= PADRE_DMA_PAGES) {
++		pr_err_ratelimited("padre: coherent DMA exhausted (%zu bytes)\n", size);
++		return NULL;
++	}
++	va = padre_pt_pool + (PADRE_PT_PAGES + i) * PAGE_SIZE;
++	memset(va, 0, n * PAGE_SIZE);
++	*dma_handle = phys_to_dma(dev, __pa(va));
++	return va;
++}
++
++void arch_dma_free(struct device *dev, size_t size, void *cpu_addr,
++		   dma_addr_t dma_handle, unsigned long attrs)
++{
++	void *base = padre_pt_pool + PADRE_PT_PAGES * PAGE_SIZE;
++	unsigned int n = PAGE_ALIGN(size) >> PAGE_SHIFT;
++	unsigned long flags, i = (cpu_addr - base) >> PAGE_SHIFT;
++
++	if (WARN_ON(cpu_addr < base || i + n > PADRE_DMA_PAGES))
++		return;
++	spin_lock_irqsave(&padre_dma_lock, flags);
++	bitmap_clear(padre_dma_map, i, n);
++	spin_unlock_irqrestore(&padre_dma_lock, flags);
++}
++
++pgd_t *pgd_alloc(struct mm_struct *mm)
++{
++	pgd_t *pgd = padre_get_nocache_page();
++
++	if (pgd)	/* kernel part (vmalloc) shared by all */
++		memcpy(pgd + USER_PTRS_PER_PGD, init_mm.pgd + USER_PTRS_PER_PGD,
++		       (PTRS_PER_PGD - USER_PTRS_PER_PGD) * sizeof(pgd_t));
++	return pgd;
++}
++
++void pgd_free(struct mm_struct *mm, pgd_t *pgd)
++{
++	padre_free_nocache_page(pgd);
++}
++
++pgtable_t pte_alloc_one(struct mm_struct *mm)
++{
++	pte_t *ptep = padre_get_nocache_page();
++
++	if (ptep && !pagetable_pte_ctor(mm, virt_to_ptdesc(ptep))) {
++		padre_free_nocache_page(ptep);
++		ptep = NULL;
++	}
++	return ptep;
++}
++
++void pte_free(struct mm_struct *mm, pgtable_t ptep)
++{
++	pagetable_dtor(virt_to_ptdesc(ptep));
++	padre_free_nocache_page(ptep);
++}
++
++/* ---------------------------------------------------------------------
++ * Context: a single base register, TLB flushed on every switch
++ */
++int init_new_context(struct task_struct *tsk, struct mm_struct *mm)
++{
++	return 0;
++}
++
++void destroy_context(struct mm_struct *mm)
++{
++}
++
++void switch_mm(struct mm_struct *old_mm, struct mm_struct *mm,
++	       struct task_struct *tsk)
++{
++	if (old_mm != mm)
++		padre_set_pgt(mm->pgd);
++}
++
++void mmu_info(struct seq_file *m)
++{
++	seq_printf(m, "MMU type\t: %s\n"
++		      "pagetables\t: %u/%u pages\n",
++		   srmmu_name, padre_pt_used, PADRE_PT_PAGES);
++}
++
++/* Preallocated kernel tables: the directory entries never change again,
++ * pgd_alloc() only has to copy them.
++ */
++static void __init padre_kernel_ptables(unsigned long start, unsigned long end)
++{
++	for (start &= PGDIR_MASK; start < end && start; start += PGDIR_SIZE) {
++		pmd_t *pmd = pmd_off_k(start);
++		pte_t *pte;
++
++		if (!pmd_none(*pmd))
++			continue;
++		pte = padre_get_nocache_page();
++		if (!pte)
++			panic("padre: kernel page tables");
++		pmd_populate_kernel(&init_mm, pmd, pte);
++	}
++}
++
++void __init srmmu_paging_init(void)
++{
++	unsigned long pages_avail = 0;
++	unsigned long max_zone_pfn[MAX_NR_ZONES] = { 0 };
++
++	init_mm.context = 0;
++	padre_cachefix = !!(padre_boot_param.product_features & (1 << 5));
++	last_valid_pfn = bootmem_init(&pages_avail);
++	/* min_low_pfn is not set by sparc32 (stays 0): dma_capable()
++	 * translates it to a DMA address; with padre.pcibus, page 0 has no
++	 * translation and ALL mappings failed (test at 16:08, -EAGAIN).
++	 */
++	min_low_pfn = pfn_base;
++
++	padre_nocache_phys = (max_low_pfn << PAGE_SHIFT) - PADRE_NOCACHE_SIZE;
++	memblock_reserve(padre_nocache_phys, PADRE_NOCACHE_SIZE);
++	padre_pt_pool = __va(padre_nocache_phys);
++
++	init_mm.pgd = padre_get_nocache_page();
++	padre_kernel_ptables(VMALLOC_START, VMALLOC_END);
++
++	padre_set_pgt(init_mm.pgd);
++	padre_tlb_all();
++
++	max_zone_pfn[ZONE_DMA] = max_low_pfn;
++	max_zone_pfn[ZONE_NORMAL] = max_low_pfn;
++	free_area_init(max_zone_pfn);
++}
++
++/* ---------------------------------------------------------------------
++ * Non-coherent DMA
++ */
++void arch_sync_dma_for_device(phys_addr_t paddr, size_t size,
++			      enum dma_data_direction dir)
++{
++	unsigned long va = (unsigned long)__va(paddr);
++
++	if (dir == DMA_TO_DEVICE)
++		padre_clean_dcache_range(va, va + size);
++	else
++		padre_flush_dcache_range(va, va + size);
++}
++
++void arch_dma_prep_coherent(struct page *page, size_t size)
++{
++	unsigned long va = (unsigned long)page_address(page);
++
++	padre_flush_dcache_range(va, va + size);
++}

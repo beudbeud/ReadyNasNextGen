@@ -1,7 +1,15 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 19/23] padre_sata: DMA switchable at run time, command guard
+
 padre_sata: LP DMA switchable at run time (dma=2 at boot: ready, starting in
 PIO), non read/write DMA commands refused (READ LOG DMA EXT, FUA, TRIM),
 2.6.17 IDE segment limits (64 KiB, no 64 KiB crossing).
+---
+ drivers/platform/padre/padre_sata.c | 61 +++++++++++++++++++++++++++--
+ 1 file changed, 57 insertions(+), 4 deletions(-)
 
+diff --git a/drivers/platform/padre/padre_sata.c b/drivers/platform/padre/padre_sata.c
+index adddbf5c9e831299d12658422503cdc1f24611c4..cd8ea3288b8d0798a0cc27ccfbfb90cf988884be 100644
 --- a/drivers/platform/padre/padre_sata.c
 +++ b/drivers/platform/padre/padre_sata.c
 @@ -12,7 +12,8 @@
@@ -14,7 +22,7 @@ PIO), non read/write DMA commands refused (READ LOG DMA EXT, FUA, TRIM),
   * boot, see below). No X-RAID (standard md/RAID1 on top).
   *
   * Parameter: padre_sata.read_only=1 (command line) refuses any write, for a
-@@ -308,9 +309,18 @@
+@@ -308,9 +309,18 @@ static int padre_hardreset(struct ata_link *link, unsigned int *class,
  #define LP_MAX_SEG	64		/* 64 x 4 KiB = 256 KiB per command */
  #define LP_MAX_SECT	512
  
@@ -35,7 +43,7 @@ PIO), non read/write DMA commands refused (READ LOG DMA EXT, FUA, TRIM),
  
  struct padre_port {
  	u8 *list;			/* one page: up to 128 descriptors */
-@@ -397,6 +407,17 @@
+@@ -397,6 +407,17 @@ static enum ata_completion_errors padre_qc_prep(struct ata_queued_cmd *qc)
  
  	if (qc->tf.protocol != ATA_PROT_DMA)
  		return AC_ERR_OK;
@@ -53,7 +61,7 @@ PIO), non read/write DMA commands refused (READ LOG DMA EXT, FUA, TRIM),
  	if (n < 1 || n > LP_MAX_SEG)
  		return AC_ERR_SYSTEM;
  	for_each_sg(qc->sg, sg, n, si) {
-@@ -448,8 +469,21 @@
+@@ -448,8 +469,21 @@ static unsigned int padre_qc_issue(struct ata_queued_cmd *qc)
  		return ata_sff_qc_issue(qc);
  	}
  
@@ -75,7 +83,7 @@ PIO), non read/write DMA commands refused (READ LOG DMA EXT, FUA, TRIM),
  	lp_owner = ap;
  	pp->dma_qc = qc;
  	lp_start(ap->port_no, pp->list, qc->n_elem);
-@@ -538,6 +572,14 @@
+@@ -538,6 +572,14 @@ static void padre_error_handler(struct ata_port *ap)
  	ata_sff_error_handler(ap);
  }
  
@@ -90,7 +98,7 @@ PIO), non read/write DMA commands refused (READ LOG DMA EXT, FUA, TRIM),
  /* ---------- boot self-test (before libata): DMA compared with PIO ---------- */
  
  static int link_ready(int c)
-@@ -686,7 +728,11 @@
+@@ -686,7 +728,11 @@ static int lp_autotest(int c, u8 *list, u32 ffctrl0)
  static const struct scsi_host_template padre_sht = {
  	ATA_BASE_SHT(DRV_NAME),
  	.sg_tablesize	= LP_MAX_SEG,
@@ -103,7 +111,7 @@ PIO), non read/write DMA commands refused (READ LOG DMA EXT, FUA, TRIM),
  	.max_sectors	= LP_MAX_SECT,
  };
  
-@@ -696,6 +742,7 @@
+@@ -696,6 +742,7 @@ static struct ata_port_operations padre_ops = {
  	.qc_prep		= padre_qc_prep,
  	.qc_issue		= padre_qc_issue,
  	.error_handler		= padre_error_handler,
@@ -111,7 +119,7 @@ PIO), non read/write DMA commands refused (READ LOG DMA EXT, FUA, TRIM),
  	.reset.softreset	= NULL,
  	.reset.hardreset	= padre_hardreset,
  	.scr_read		= padre_scr_read,
-@@ -762,6 +809,8 @@
+@@ -762,6 +809,8 @@ static int __init padre_sata_init(void)
  		return -ENOMEM;
  
  	lp_ok = dma && !padre_disabled("dma") && (lp_rd(LP_STAT) & 0xff) == 1;
@@ -120,7 +128,7 @@ PIO), non read/write DMA commands refused (READ LOG DMA EXT, FUA, TRIM),
  	pr_info(DRV_NAME ": DMA %s (LP STAT=%02x version %04x)\n",
  		lp_ok ? "requested, self-test" : "no (PIO)", lp_rd(LP_STAT) & 0xff,
  		lp_rd(LP_VERSION) & 0xffff);
-@@ -819,6 +868,10 @@
+@@ -819,6 +868,10 @@ static int __init padre_sata_init(void)
  		if (rc)
  			return rc;
  	}

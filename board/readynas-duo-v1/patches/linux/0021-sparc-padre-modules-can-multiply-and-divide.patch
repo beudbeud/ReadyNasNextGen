@@ -1,0 +1,129 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 21/23] sparc: Padre: modules can multiply and divide
+
+The kernel is compiled with -mcpu=v7 (sdiv is broken on this CPU), so
+gcc calls .mul/.umul/.div/.udiv/.rem/.urem, and a module that uses them
+did not load: kbuild cannot export a name that starts with a dot.
+Export them as _Mul... (the name modpost checks for .mul) and rename a
+module's undefined .mul to _Mul in place when it is loaded, as modpost
+does. Needed by mtd.ko for padre_nand (shelved).
+---
+ arch/sparc/kernel/module.c    | 11 ++++++++++
+ arch/sparc/lib/padre_muldiv.S | 39 +++++++++++++++++++++--------------
+ 2 files changed, 35 insertions(+), 15 deletions(-)
+
+diff --git a/arch/sparc/kernel/module.c b/arch/sparc/kernel/module.c
+index 49740450a6859fda566459ee4679869f9854b760..ae06b3f280a130f32c3a1f2f5b8fce2d6fcd0afd 100644
+--- a/arch/sparc/kernel/module.c
++++ b/arch/sparc/kernel/module.c
+@@ -45,6 +45,17 @@ int module_frob_arch_sections(Elf_Ehdr *hdr,
+ 		if (sym[i].st_shndx == SHN_UNDEF) {
+ 			if (ELF_ST_TYPE(sym[i].st_info) == STT_REGISTER)
+ 				sym[i].st_shndx = SHN_ABS;
++#ifdef CONFIG_SPARC_PADRE
++			/* gcc -mcpu=v7 calls .mul, .udiv...: the kernel exports
++			 * them as _Mul, _Udiv... (lib/padre_muldiv.S), the name
++			 * modpost checks; rename in place, same length. */
++			else if (strtab[sym[i].st_name] == '.' &&
++				 strtab[sym[i].st_name + 1]) {
++				strtab[sym[i].st_name] = '_';
++				strtab[sym[i].st_name + 1] =
++					toupper(strtab[sym[i].st_name + 1]);
++			}
++#endif
+ 		}
+ 	}
+ 	return 0;
+diff --git a/arch/sparc/lib/padre_muldiv.S b/arch/sparc/lib/padre_muldiv.S
+index a49da3fd5b1999be05754a09222911eeca9c6454..66911a017b1da9593f7544668d21c39d6920cde3 100644
+--- a/arch/sparc/lib/padre_muldiv.S
++++ b/arch/sparc/lib/padre_muldiv.S
+@@ -9,33 +9,38 @@
+  * gcc convention: arguments in %o0/%o1, result in %o0 (64-bit product:
+  * high word in %o1), leaf routines without a register window.
+  *
+- * Limitation: kbuild cannot export a symbol whose name starts with a
+- * dot, so a module (.ko) that multiplies or divides will not load. The
+- * Padre drivers are built into the kernel (=y).
++ * Modules: kbuild cannot export a name that starts with a dot. Each
++ * routine also has the name modpost checks for it (.udiv -> _Udiv), which
++ * is exported; the module loader renames a module's undefined .udiv to
++ * _Udiv the same way (kernel/module.c, module_frob_arch_sections()).
+  */
+ 
++#include <linux/export.h>
+ #include <linux/linkage.h>
+ 
++#define PADRE_MD(dot, alias)	\
++	.globl	dot, alias;	\
++	.type	alias, STT_FUNC; \
++dot:;				\
++alias:
++
+ 	.text
+ 	.align	4
+ 
+ /* signed product: %o1:%o0 = %o0 * %o1 */
+-	.globl	.mul
+-.mul:
++PADRE_MD(.mul, _Mul)
+ 	smul	%o0, %o1, %o0
+ 	retl
+ 	 rd	%y, %o1
+ 
+ /* unsigned product */
+-	.globl	.umul
+-.umul:
++PADRE_MD(.umul, _Umul)
+ 	umul	%o0, %o1, %o0
+ 	retl
+ 	 rd	%y, %o1
+ 
+ /* unsigned quotient: %o0 = %o0 / %o1 */
+-	.globl	.udiv
+-.udiv:
++PADRE_MD(.udiv, _Udiv)
+ 	wr	%g0, 0, %y
+ 	nop
+ 	nop
+@@ -44,8 +49,7 @@
+ 	 udiv	%o0, %o1, %o0
+ 
+ /* unsigned remainder: %o0 = %o0 % %o1 */
+-	.globl	.urem
+-.urem:
++PADRE_MD(.urem, _Urem)
+ 	wr	%g0, 0, %y
+ 	nop
+ 	nop
+@@ -56,8 +60,7 @@
+ 	 sub	%o0, %o2, %o0
+ 
+ /* signed quotient, truncated towards zero (C) */
+-	.globl	.div
+-.div:
++PADRE_MD(.div, _Div)
+ 	xor	%o0, %o1, %o3		! sign of the result in bit 31
+ 	tst	%o0
+ 	bge	1f
+@@ -79,8 +82,7 @@
+ 	 nop
+ 
+ /* signed remainder, with the sign of the dividend (C) */
+-	.globl	.rem
+-.rem:
++PADRE_MD(.rem, _Rem)
+ 	mov	%o0, %o3		! sign of the dividend
+ 
+ 	tst	%o0
+@@ -103,3 +105,10 @@
+ 	 neg	%o0
+ 3:	retl
+ 	 nop
++
++	EXPORT_SYMBOL(_Mul)
++	EXPORT_SYMBOL(_Umul)
++	EXPORT_SYMBOL(_Div)
++	EXPORT_SYMBOL(_Udiv)
++	EXPORT_SYMBOL(_Rem)
++	EXPORT_SYMBOL(_Urem)

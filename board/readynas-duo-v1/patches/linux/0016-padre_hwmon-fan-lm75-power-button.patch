@@ -1,0 +1,638 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 16/23] platform: padre: add the fan, LM75 and power button driver
+
+Ported from the GPL 2.6.17 hwmon driver, same interface
+(/proc/sys/dev/hwmon, /proc/sys/dev/boot/info, uevent_helper
+"powerdown"/"powersave" on the power button).
+---
+ drivers/platform/padre/Kconfig       |   8 +
+ drivers/platform/padre/Makefile      |   1 +
+ drivers/platform/padre/padre_hwmon.c | 593 +++++++++++++++++++++++++++
+ 3 files changed, 602 insertions(+)
+ create mode 100644 drivers/platform/padre/padre_hwmon.c
+
+diff --git a/drivers/platform/padre/Kconfig b/drivers/platform/padre/Kconfig
+index 14bf546bdc576b71691eb3d0207342e8a039f56b..0035578968cbce8c25facf9de301deb6526d232d 100644
+--- a/drivers/platform/padre/Kconfig
++++ b/drivers/platform/padre/Kconfig
+@@ -24,4 +24,12 @@ config PADRE_LED
+ 	  /proc/sys/dev/led and /proc/sys/dev/button, ported from the
+ 	  GPL led_button driver for 2.6.17.
+ 
++config PADRE_HWMON
++	bool "Fan, LM75, power button"
++	depends on PADRE_I2C
++	default y
++	help
++	  /proc/sys/dev/hwmon and /proc/sys/dev/boot, ported from the
++	  GPL hwmon driver for 2.6.17.
++
+ endmenu
+diff --git a/drivers/platform/padre/Makefile b/drivers/platform/padre/Makefile
+index d4bfd4fce8937fd4980ee7d18cf1680be3280b60..c1dc233b07d171daf14d7dc2e51be91d78b2d257 100644
+--- a/drivers/platform/padre/Makefile
++++ b/drivers/platform/padre/Makefile
+@@ -2,3 +2,4 @@
+ obj-$(CONFIG_PADRE_I2C)		+= padre_i2c.o
+ obj-$(CONFIG_PADRE_RTC)		+= padre_rtc.o
+ obj-$(CONFIG_PADRE_LED)		+= padre_led.o
++obj-$(CONFIG_PADRE_HWMON)	+= padre_hwmon.o
+diff --git a/drivers/platform/padre/padre_hwmon.c b/drivers/platform/padre/padre_hwmon.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..f59baa88ce0af82586a62ee9f567d9230ea577b1
+--- /dev/null
++++ b/drivers/platform/padre/padre_hwmon.c
+@@ -0,0 +1,593 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * padre_hwmon.c: fan, temperature (LM75), power button and
++ * /proc/sys/dev/boot/info of the ReadyNAS Duo v1.
++ *
++ * Ported from padre_hwmon_libre.c (GPL driver for 2.6.17, validated on the
++ * NAS under 2.6.17, written from the functional HWMON description) to 6.18,
++ * same interface /proc/sys/dev/hwmon/{temp_0,fan_0,fan_1,info,POWER_SWITCH,
++ * GPIO0,fan0_speed_control,fan1_speed_control,i2c_addr_lm75} and
++ * /proc/sys/dev/boot/info; button: uevent_helper "powerdown"/"powersave".
++ * Removed: the "hot switch" (park) that neutralised the Infrant module.
++ *
++ * Copyright (C) 2026 the ReadyNasNextGen authors
++ */
++
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/sysctl.h>
++#include <linux/interrupt.h>
++#include <linux/timer.h>
++#include <linux/workqueue.h>
++#include <linux/kobject.h>
++#include <linux/umh.h>
++#include <linux/ctype.h>
++#include <linux/string.h>
++#include <linux/reboot.h>
++#include <linux/io.h>
++
++#include <asm/padre.h>
++#include <asm/padre_i2c.h>
++
++#define R(o)		((void __iomem *)(PADRE_APB + (o)))
++#define GPIO_DATA	R(0xc0)
++#define GPIO_DIR	R(0xc4)		/* 1 = output */
++#define SYS_CTRL	R(0x94)		/* bits 10-4 = reset cause */
++#define FAN_CFG		R(0x820)
++#define FAN_PWM		R(0x824)	/* channel 0: 5-0, channel 1: 21-16 */
++#define FAN_EN		R(0x82c)
++#define TACH_EN		R(0x840)
++#define TACH_CLK	R(0x844)	/* 2 bits per channel */
++#define TACH_CNT	R(0x84c)	/* 8 bits per channel */
++
++#define PWM_FIXED	0x01000100	/* bits 8 and 24, always 1 */
++#define PWM_SAFE	(PWM_FIXED | (63 << 16) | 63)	/* 63/64 on both channels */
++
++#define POWSW_HWIRQ	11
++#define POWSW_TICK	2		/* jiffies (HZ = 100) : 20 ms */
++#define POWSW_LONG	150		/* 150 x 20 ms = 3 s */
++#define FORCEDOWN_DELAY	(120 * HZ)
++#define MEASURE_PERIOD	(10 * HZ)
++
++#define rd(r)		__raw_readl(r)
++#define wr(r, v)	__raw_writel((v), (r))
++
++/* 30 x tachometer clock (20000, 10000, 5000, 2500 Hz): rpm = 60 f / (2 count) */
++static const u32 fan_clk_x30[4] = { 600000, 300000, 150000, 75000 };
++
++static u8 pcbid;
++static int temp_0, fan_rpm[2], power_switch, lm75_addr;
++static int fan_req[2] = { 255, 255 };
++
++/* Initial setpoint (0-255): moderate, fan control (S03fan service, disk
++ * temperatures from drivetemp) then takes over.
++ * Safety net: without a write to fan0_speed_control for NO_CONTROL_TIMEOUT,
++ * go back to full speed (no daemon = no monitoring).
++ */
++static int setpoint = 80;
++module_param(setpoint, int, 0644);
++MODULE_PARM_DESC(setpoint, "fan setpoint at boot, 0-255 (default 80)");
++#define NO_CONTROL_TIMEOUT	(300 * HZ)
++static unsigned long last_setpoint;	/* jiffies of the last user write */
++static bool watchdog_tripped;
++static int fan_idx[2];
++static int sensor_failed;
++static char info_text[128] = "";
++static char boot_text[512];
++static struct timer_list measure_tmr, powsw_tmr, forcedown_tmr;
++static unsigned int powsw_irq_nr;
++static int irq_ok, irq_masked;
++static int powsw_pressed, powsw_ttick, powsw_itick;
++
++/* ---------- fan ---------- */
++
++static void tach_clk_write(void)
++{
++	wr(TACH_CLK, (fan_idx[1] << 2) | fan_idx[0]);
++}
++
++static void fan_apply(int ch, int v)
++{
++	u32 field = ((v >> 2) + 1) & 63;
++
++	if (v == 0) {
++		wr(FAN_EN, rd(FAN_EN) & ~(1u << ch));
++		return;
++	}
++	wr(FAN_EN, rd(FAN_EN) | (1u << ch));
++	if (ch == 0)
++		wr(FAN_PWM, (rd(FAN_PWM) & 0xffff0000) | field | PWM_FIXED);
++	else
++		wr(FAN_PWM, (rd(FAN_PWM) & 0x0000ffff) | (field << 16) | PWM_FIXED);
++	fan_idx[ch] = v > 192 ? 0 : v > 128 ? 1 : 2;
++	tach_clk_write();
++}
++
++static void fan_force_full(void)
++{
++	wr(FAN_PWM, PWM_SAFE);
++	wr(FAN_EN, rd(FAN_EN) | ((pcbid == 3) ? 3 : 1));
++}
++
++static void fan_set(int ch, int v)
++{
++	unsigned long flags;
++
++	v = clamp(v, 0, 255);
++	local_irq_save(flags);
++	fan_req[ch] = v;
++	if (!sensor_failed)
++		fan_apply(ch, v);
++	local_irq_restore(flags);
++}
++
++static void fan_hw_init(void)
++{
++	unsigned long flags;
++
++	local_irq_save(flags);
++	wr(FAN_PWM, PWM_SAFE);			/* full speed from the start */
++	if (pcbid == 3) {
++		wr(FAN_EN, 3);
++		wr(FAN_CFG, 3);
++		wr(GPIO_DIR, rd(GPIO_DIR) | 0xc0);
++	} else {
++		wr(FAN_EN, 1);
++		wr(FAN_CFG, 1);
++		wr(GPIO_DIR, rd(GPIO_DIR) | 0x40);
++	}
++	if (pcbid == 1) {
++		wr(GPIO_DIR, rd(GPIO_DIR) & ~0x10);
++		wr(TACH_EN, 1);
++	} else {
++		wr(GPIO_DIR, rd(GPIO_DIR) & ~0x30);
++		wr(TACH_EN, 3);
++	}
++	fan_idx[0] = fan_idx[1] = 0;
++	wr(TACH_CLK, 0);
++	local_irq_restore(flags);
++}
++
++/* ---------- measurements (every 10 s) ---------- */
++
++static int lm75_read(u16 *raw)
++{
++	s16 v;
++
++	if (!i2c_device_exist(lm75_addr))
++		return -1;
++	*raw = i2c_readw(lm75_addr);
++	v = (s16)*raw;
++	if ((*raw & 0x7f) || v > (125 << 8) || v < -(55 << 8))
++		return -1;
++	return 0;
++}
++
++static void measure_work_fn(struct work_struct *unused)
++{
++	unsigned long flags;
++	u32 cnt, c, en;
++	u16 raw = 0;
++	int ch, t2, fail = 0, changed = 0;
++	char *p = info_text;
++
++	local_irq_save(flags);
++	cnt = rd(TACH_CNT);
++	en = rd(TACH_EN);
++	wr(TACH_EN, 0);				/* restart the counter */
++	wr(TACH_EN, en);
++	local_irq_restore(flags);
++
++	for (ch = 0; ch < 2; ch++) {
++		c = (cnt >> (ch << 3)) & 0xff;
++		fan_rpm[ch] = c ? fan_clk_x30[fan_idx[ch]] / c : 0;
++		if (c >= 1 && c <= 63 && fan_idx[ch] > 0) {
++			fan_idx[ch]--;
++			changed = 1;
++		} else if (c > 192 && fan_idx[ch] < 3) {
++			fan_idx[ch]++;
++			changed = 1;
++		}
++	}
++	if (changed)
++		tach_clk_write();
++
++	if (lm75_addr) {
++		fail = lm75_read(&raw);
++		if (fail)
++			raw = 0;
++	}
++	t2 = (s16)raw >> 7;			/* half degrees */
++	temp_0 = ((s16)raw + 0x80) >> 8;
++
++	local_irq_save(flags);
++	if (fail && !sensor_failed) {
++		sensor_failed = 1;
++		fan_force_full();
++	} else if (!fail && sensor_failed) {
++		sensor_failed = 0;
++		fan_apply(0, fan_req[0]);
++		fan_apply(1, fan_req[1]);
++	}
++	local_irq_restore(flags);
++	if (fail)
++		pr_warn("padre_hwmon: cannot read LM75 0x%02x, fan at full speed\n",
++			lm75_addr);
++
++	p += sprintf(p, "temp_0:%s%d.%d\n", t2 < 0 ? "-" : "",
++		     abs(t2) >> 1, (abs(t2) & 1) ? 5 : 0);
++	p += sprintf(p, "fan_0:%d\n", fan_rpm[0]);
++	if (pcbid != 1)
++		sprintf(p, "fan_1:%d\n", fan_rpm[1]);
++	if (!watchdog_tripped && fan_req[0] < 255 &&
++	    time_after(jiffies, last_setpoint + NO_CONTROL_TIMEOUT)) {
++		watchdog_tripped = true;
++		pr_warn("padre_hwmon: no fan control for 5 min, fan at full speed\n");
++		fan_set(0, 255);
++		if (pcbid != 1)
++			fan_set(1, 255);
++	}
++	mod_timer(&measure_tmr, jiffies + MEASURE_PERIOD);
++}
++static DECLARE_WORK(measure_work, measure_work_fn);
++
++/* I2C busy-waits: measure outside interrupt context */
++static void measure_timer_fn(struct timer_list *unused)
++{
++	schedule_work(&measure_work);
++}
++
++static void lm75_probe(void)
++{
++	u8 a;
++
++	for (a = 0x48; a <= 0x4b; a++)
++		if (i2c_device_exist(a))
++			break;
++	if (a > 0x4b) {
++		lm75_addr = 0;
++		pr_err("padre_hwmon: LM75 not found\n");
++		return;
++	}
++	lm75_addr = a;
++	pr_info("padre_hwmon: LM75 at 0x%02x\n", a);
++	i2c_writeb_idx(a, 1, 0);	/* configuration: normal operation */
++	i2c_writeb(a, 0);		/* pointer to the temperature register */
++}
++
++/* ---------- power button (IRQ 11) ---------- */
++
++static void powsw_helper(const char *what)
++{
++#ifdef CONFIG_UEVENT_HELPER
++	char *argv[3], *envp[3];
++	int r;
++
++	if (!uevent_helper[0])
++		return;
++	if (what[5] == 'd')		/* powerdown: 120 s safety net */
++		mod_timer(&forcedown_tmr, jiffies + FORCEDOWN_DELAY);
++	argv[0] = uevent_helper;
++	argv[1] = (char *)what;
++	argv[2] = NULL;
++	envp[0] = "HOME=/";
++	envp[1] = "PATH=/sbin:/bin:/usr/sbin:/usr/bin";
++	envp[2] = NULL;
++	r = call_usermodehelper(uevent_helper, argv, envp, UMH_WAIT_EXEC);
++	if (r)
++		pr_info("padre_hwmon: %s: %d\n", what, r);
++#endif
++}
++
++static void powerdown_fn(struct work_struct *unused)
++{
++	powsw_helper("powerdown");
++}
++
++static void powersave_fn(struct work_struct *unused)
++{
++	powsw_helper("powersave");
++}
++
++static DECLARE_WORK(powerdown_work, powerdown_fn);
++static DECLARE_WORK(powersave_work, powersave_fn);
++
++static void forcedown_fn(struct timer_list *unused)
++{
++	pr_emerg("padre_hwmon: no shutdown from userspace, forcing power off\n");
++	kernel_power_off();
++}
++
++/* Level IRQ while the button is held: masked each time, the 20 ms timer
++ * unmasks it; no IRQ between two ticks = released.
++ */
++static irqreturn_t powsw_irq(int irq, void *dev)
++{
++	disable_irq_nosync(irq);
++	irq_masked = 1;
++	if (!power_switch)
++		return IRQ_HANDLED;
++	if (!powsw_pressed) {
++		powsw_pressed = 1;
++		powsw_ttick = POWSW_LONG;
++		powsw_itick = POWSW_LONG - 1;
++		mod_timer(&powsw_tmr, jiffies + POWSW_TICK);
++	} else if (powsw_itick <= 0) {
++		powsw_pressed = 0;
++		timer_delete(&powsw_tmr);
++		schedule_work(&powerdown_work);
++	} else
++		powsw_itick--;
++	return IRQ_HANDLED;
++}
++
++static void powsw_timer_fn(struct timer_list *unused)
++{
++	powsw_ttick--;
++	if (powsw_ttick != powsw_itick) {
++		powsw_pressed = 0;
++		schedule_work(&powersave_work);
++	} else
++		mod_timer(&powsw_tmr, jiffies + POWSW_TICK);
++	if (irq_masked) {
++		irq_masked = 0;
++		enable_irq(powsw_irq_nr);
++	}
++}
++
++/* ---------- /proc/sys/dev/boot/info ---------- */
++
++static const char *reason_name[16] = {
++	"normal", "factory", "bootp", "watchdog", "softfault", "diag", "skip_fsck",
++	"os_reinstall", "ecc", "tftp", "config", "rtc", "vpd", "bootdebug", "userdiag", "unknown"
++};
++
++static int has_nul(const u8 *s, int n)
++{
++	while (n--)
++		if (!*s++)
++			return 1;
++	return 0;
++}
++
++static int sn_val(u8 c)
++{
++	static const char let[] = "ABCDEFGH" "JKLMN" "P" "RSTUVWXY";
++
++	if (c >= '0' && c <= '9')
++		return c - '0';
++	if (c >= 'A' && c <= 'Z') {
++		const char *q = strchr(let, c);
++
++		return q ? 10 + (q - let) : 0;
++	}
++	return 0;
++}
++
++static int sn_ok(const u8 *s)
++{
++	int i, prefix = 0, sum = 0;
++
++	if (!has_nul(s, 16) || strlen((const char *)s) != 13)
++		return 0;
++	for (i = 0; i < 13; i++) {
++		if (i == 7)
++			continue;
++		prefix += sn_val(s[i]);
++		sum += prefix;
++	}
++	return (sum & 31) == sn_val(s[7]);
++}
++
++static u8 temp_lim(u8 v, u8 def)
++{
++	return (v >= 2 && v <= 80) ? v : def;
++}
++
++static void boot_info_init(void)
++{
++	struct padre_boot_param *bp = &padre_boot_param;
++	u8 *b = (u8 *)bp, *v = bp->vpd_extend;
++	u32 pf = bp->product_features, rcause = (rd(SYS_CTRL) >> 4) & 0x7f, ssh;
++	char raw_serial[17];
++	int i;
++
++	if (bp->boot_reason > 15)
++		bp->boot_reason = 15;
++	memcpy(raw_serial, bp->serial, 16);
++	raw_serial[16] = 0;
++	if (!has_nul(bp->vendor, 32))
++		bp->vendor[0] = 0;
++	if (!has_nul(bp->model, 32))
++		bp->model[0] = 0;
++	if (!has_nul(bp->boot_version, 128))
++		memcpy(bp->boot_version, "iboot 0.00a000", 15);
++	for (i = 0; i < 13; i++)
++		if (islower(bp->serial[i]))
++			bp->serial[i] -= 0x20;
++	if (!sn_ok(bp->serial))
++		sprintf((char *)bp->serial, "%02x%02x%02x%02x%02x%02x",
++			bp->mac[0], bp->mac[1], bp->mac[2], bp->mac[3], bp->mac[4], bp->mac[5]);
++	pr_info("Boot type/reason: %s/%x/%s\n", reason_name[bp->boot_reason], rcause, raw_serial);
++
++	ssh = (b[0x113] << 24) | (b[0x114] << 16) | (b[0x115] << 8) | b[0x116];
++	ssh = (ssh == 0 || ssh == 0x10000 || ssh == 0xffffffff) ? 0 : ssh - 0xba674080;
++
++	snprintf(boot_text, sizeof(boot_text),
++		 "cause:\t%s\nvendor:\t%s\nmodel:\t%s\nmodel_valid:\t%u\nserial:\t%s\nloader:\t%s\n"
++		 "max_chan:\t%u\nxraid:\t%u\nmode:\t%u\nfginit:\t%u\npcbid:\t%u\nboard_rev:\t%04x\n"
++		 "system_rev:\t%04x\nwatchdog:\t%u\njbod:\t%u\nauto:\t%u\nminrpm:\t%u\nminpwm:\t%u\n"
++		 "cftpwm:\t%u\nmaxtemp0:\t%u\nmintemp0:\t%u\nmaxtemp1:\t%u\nmintemp1:\t%u\n"
++		 "maxtemp2:\t%u\nmintemp2:\t%u\nrcause:\t%x\nnand_ecc:\t%u\nssh:\t%u",
++		 reason_name[bp->boot_reason], (char *)bp->vendor, (char *)bp->model, (pf >> 6) & 1,
++		 (char *)bp->serial, (char *)bp->boot_version,
++		 bp->bond_option == 0x20 ? 7 : bp->bond_option == 0x42 ? 2 : 4,
++		 pf & 1, (pf >> 1) & 1, (pf >> 2) & 1, v[0], (v[4] << 8) | v[5],
++		 (v[6] << 8) | v[7], (pf >> 26) & 1, (pf >> 3) & 1, (pf >> 4) & 1,
++		 (v[1] == 0 || v[1] == 0xff) ? 0 : v[1] << 6,
++		 (v[2] == 0 || v[2] == 0xff) ? 0 : v[2], v[3],
++		 temp_lim(b[0x139], 60), temp_lim(b[0x13a], 0), temp_lim(b[0x13b], 60),
++		 temp_lim(b[0x13c], 0), temp_lim(b[0x13d], 60), temp_lim(b[0x13e], 0),
++		 rcause, b[0xec] == 0xec, ssh);
++}
++
++/* ---------- /proc/sys (kernel buffers since 5.8) ---------- */
++
++static int dostr(const struct ctl_table *t, char *s, int max, int write,
++		 void *buf, size_t *lenp, loff_t *ppos)
++{
++	struct ctl_table tt = *t;
++
++	tt.data = s;
++	tt.maxlen = max;
++	return proc_dostring(&tt, write, buf, lenp, ppos);
++}
++
++static int int_io(const struct ctl_table *t, int write, void *buf, size_t *lenp,
++		  loff_t *ppos, int cur, long *val)
++{
++	char k[32], *e;
++	int r;
++
++	if (!write) {
++		sprintf(k, "%d", cur);
++		return dostr(t, k, sizeof(k), 0, buf, lenp, ppos);
++	}
++	k[0] = 0;
++	r = dostr(t, k, sizeof(k), 1, buf, lenp, ppos);
++	if (r)
++		return r;
++	*val = simple_strtol(k, &e, 0);
++	return e == k ? -EINVAL : 1;
++}
++
++static int proc_fan_ctl(const struct ctl_table *t, int write, void *buf,
++			size_t *lenp, loff_t *ppos)
++{
++	int ch = (long)t->extra1;
++	long v;
++	int r = int_io(t, write, buf, lenp, ppos, fan_req[ch], &v);
++
++	if (r == 1) {
++		fan_set(ch, v);
++		last_setpoint = jiffies;
++		watchdog_tripped = false;
++		r = 0;
++	}
++	return r;
++}
++
++static int proc_lm75(const struct ctl_table *t, int write, void *buf,
++		     size_t *lenp, loff_t *ppos)
++{
++	long v;
++	int r = int_io(t, write, buf, lenp, ppos, lm75_addr, &v);
++
++	if (r == -EINVAL) {
++		lm75_addr = 0;
++		r = 0;
++	} else if (r == 1) {
++		lm75_addr = v & 0x7f;
++		r = 0;
++	}
++	return r;
++}
++
++static int proc_gpio0(const struct ctl_table *t, int write, void *buf,
++		      size_t *lenp, loff_t *ppos)
++{
++	long v;
++
++	if (write)
++		return -EPERM;
++	return int_io(t, 0, buf, lenp, ppos, (rd(GPIO_DATA) >> 7) & 1, &v);
++}
++
++static int proc_power_switch(const struct ctl_table *t, int write, void *buf,
++			     size_t *lenp, loff_t *ppos)
++{
++	int old = power_switch, r = proc_dointvec(t, write, buf, lenp, ppos);
++
++	if (write && !r) {
++		if (power_switch)
++			power_switch = 1;
++		if (!old && power_switch && irq_ok && irq_masked) {
++			irq_masked = 0;
++			enable_irq(powsw_irq_nr);
++		}
++	}
++	return r;
++}
++
++static int proc_boot(const struct ctl_table *t, int write, void *buf,
++		     size_t *lenp, loff_t *ppos)
++{
++	return dostr(t, boot_text, sizeof(boot_text), write, buf, lenp, ppos);
++}
++
++static int proc_info(const struct ctl_table *t, int write, void *buf,
++		     size_t *lenp, loff_t *ppos)
++{
++	return dostr(t, info_text, sizeof(info_text), write, buf, lenp, ppos);
++}
++
++#define INT_RO(name, var) { .procname = name, .data = &var, \
++			    .maxlen = sizeof(int), .mode = 0444, .proc_handler = proc_dointvec }
++static const struct ctl_table hwmon_table[] = {
++	INT_RO("temp_0", temp_0),
++	INT_RO("fan_0", fan_rpm[0]),
++	{ .procname = "info", .mode = 0444, .proc_handler = proc_info },
++	{ .procname = "POWER_SWITCH", .data = &power_switch, .maxlen = sizeof(int),
++	  .mode = 0644, .proc_handler = proc_power_switch },
++	{ .procname = "GPIO0", .mode = 0400, .proc_handler = proc_gpio0 },
++	{ .procname = "fan0_speed_control", .mode = 0600, .proc_handler = proc_fan_ctl,
++	  .extra1 = (void *)0 },
++	{ .procname = "i2c_addr_lm75", .mode = 0600, .proc_handler = proc_lm75 },
++	INT_RO("fan_1", fan_rpm[1]),
++	/* must stay last: absent if pcbid == 1 */
++	{ .procname = "fan1_speed_control", .mode = 0600, .proc_handler = proc_fan_ctl,
++	  .extra1 = (void *)1 },
++};
++
++static const struct ctl_table boot_table[] = {
++	{ .procname = "info", .mode = 0444, .proc_handler = proc_boot },
++};
++
++static int __init padre_hwmon_init(void)
++{
++	if (padre_disabled("hwmon"))
++		return 0;
++	pr_info("padre_hwmon: start\n");
++	pcbid = padre_boot_param.vpd_extend[0];
++
++	boot_info_init();
++	fan_hw_init();			/* full speed before anything else */
++
++	timer_setup(&measure_tmr, measure_timer_fn, 0);
++	timer_setup(&powsw_tmr, powsw_timer_fn, 0);
++	timer_setup(&forcedown_tmr, forcedown_fn, 0);
++
++	powsw_irq_nr = padre_irq_virq(POWSW_HWIRQ);
++	irq_ok = !request_irq(powsw_irq_nr, powsw_irq, 0, "powsw", NULL);
++	if (!irq_ok)
++		pr_err("padre_hwmon: power button IRQ unavailable\n");
++
++	pr_info("padre_hwmon: button IRQ %s, probing LM75\n", irq_ok ? "ok" : "missing");
++	lm75_probe();
++
++	register_sysctl_sz("dev/hwmon", hwmon_table,
++			   ARRAY_SIZE(hwmon_table) - (pcbid == 1));
++	register_sysctl("dev/boot", boot_table);
++	/* full speed while the fan spins up, then the setpoint */
++	last_setpoint = jiffies;
++	fan_set(0, setpoint);
++	if (pcbid != 1)
++		fan_set(1, setpoint);
++	mod_timer(&measure_tmr, jiffies + HZ);
++	pr_info("padre_hwmon: done, pcbid %u, LM75 0x%02x, setpoint %d\n",
++
++		pcbid, lm75_addr, fan_req[0]);
++	return 0;
++}
++late_initcall(padre_hwmon_init);

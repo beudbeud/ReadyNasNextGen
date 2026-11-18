@@ -1,0 +1,550 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH] padre_nand: read-only NAND flash driver, for backups
+
+padre_nand: read-only NAND flash driver, to back up iboot and the
+NETGEAR firmware from Linux 6.18 (CONFIG_PADRE_NAND, a module).
+
+Same chip access as the GPL 2.6.17 padre_nand_flash/nand.c (ROM bus,
+CE in PCI_FEATURE with PCI off, the EHCI controller stopped meanwhile),
+Infrant bad block table read (never written), software Hamming ECC;
+only READ ID and READ0 can be sent.
+
+Shelved: not part of the series, applies on top of it (after 0023).
+---
+ drivers/platform/padre/Kconfig      |  11 +
+ drivers/platform/padre/Makefile     |   1 +
+ drivers/platform/padre/padre_nand.c | 496 ++++++++++++++++++++++++++++
+ 3 files changed, 508 insertions(+)
+ create mode 100644 drivers/platform/padre/padre_nand.c
+
+diff --git a/drivers/platform/padre/Kconfig b/drivers/platform/padre/Kconfig
+index 23056083dcbdd5683ff5c1fc5fa3aae48581edff..8cee2ffa60fb8b4b207a4faa6ce2f1d4c319f011 100644
+--- a/drivers/platform/padre/Kconfig
++++ b/drivers/platform/padre/Kconfig
+@@ -46,4 +46,15 @@ config PADRE_SATA
+ 	help
+ 	  Based on the GPL ide driver for 2.6.17 (IDE 2.6.17, PIO) and its IO description.
+ 
++config PADRE_NAND
++	tristate "NAND flash, read only (backup)"
++	depends on MTD && PCI
++	help
++	  Exposes the 64 MiB NAND flash (iboot, NETGEAR firmware) as two
++	  read-only MTD partitions, mtd0 "iboot" and mtd1 "firmware", with
++	  the Infrant bad block remapping and ECC of 2.6.17, to back them up
++	  (nas-flash backup). The driver can only send READ ID and READ:
++	  the flash is never written, erased or reset. Build it as a module,
++	  loaded only for the backup.
++
+ endmenu
+diff --git a/drivers/platform/padre/Makefile b/drivers/platform/padre/Makefile
+index 704d9292ce388060d0a77feb6dfb3cf66663d8f1..d10de6262b026591abf0718c5ce95474170b1ad7 100644
+--- a/drivers/platform/padre/Makefile
++++ b/drivers/platform/padre/Makefile
+@@ -5,3 +5,4 @@ obj-$(CONFIG_PADRE_LED)		+= padre_led.o
+ obj-$(CONFIG_PADRE_HWMON)	+= padre_hwmon.o
+ obj-$(CONFIG_PADRE_GMAC)	+= padre_gmac.o
+ obj-$(CONFIG_PADRE_SATA)	+= padre_sata.o
++obj-$(CONFIG_PADRE_NAND)	+= padre_nand.o
+diff --git a/drivers/platform/padre/padre_nand.c b/drivers/platform/padre/padre_nand.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..51e43cac39ce9235dfa639649c5f581eed4b5abf
+--- /dev/null
++++ b/drivers/platform/padre/padre_nand.c
+@@ -0,0 +1,496 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * padre_nand.c: READ-ONLY access to the NAND flash of the ReadyNAS Duo v1
++ * (64 MiB small-page NAND, 512 + 16 byte pages, 32 pages per 16 KiB block),
++ * to back it up from Linux 6.18. Nothing in this driver can program, erase
++ * or reset the flash: the only commands it can latch are READ ID (0x90) and
++ * READ0 (0x00), see pn_cmd(). There is no _write, _erase or
++ * _block_markbad method and the MTD devices are not MTD_WRITEABLE.
++ *
++ * Hardware, from NETGEAR's GPL 2.6.17 sources (padre_nand_flash.c and the
++ * Infrant drivers/mtd/nand/nand.c, "PZERO" branch):
++ *   - the chip sits on the ROM bus at bus address 0x0800_0000 (kernel
++ *     address 0x4800_0000): data at +0, command latch (CLE) at +0x10000,
++ *     address latch (ALE) at +0x20000; plain CPU byte accesses, no LP and
++ *     no DMA;
++ *   - chip enable is PCI_FEATURE (APB + 0x10c) bit 10, and the PCI bus
++ *     must be off (PCION, bit 2, cleared) while the chip is selected: the
++ *     ROM bus shares its pins with PCI. The VIA EHCI controller (USB stick,
++ *     root file system) is a PCI bus master: switching PCI off under one of
++ *     its transfers killed the USB stick on the first test (2026-11-18,
++ *     the system stayed up but lost its root file system). So every page
++ *     is read with interrupts off, the EHCI controller stopped (USBCMD.RS
++ *     cleared, HCHalted awaited, at most 2 ms) and restarted right after,
++ *     PCI_FEATURE restored as found; a controller that does not halt
++ *     makes the read fail, the flash is not touched;
++ *   - no ready/busy line: a fixed delay after READ0 (tR, 15 us on 2.6.17);
++ *   - Infrant bad block remapping: page 0 bytes 508-511 hold 0xdead<block>,
++ *     the block that holds the table (1024 big-endian {bad, good} pairs of
++ *     u16, 0xffff ends it); logical block n reads physical block
++ *     table[n].good if n is listed as bad, n otherwise; the device ends at
++ *     4096 - (number of bad blocks). mtd0 "iboot" is the first MiB, mtd1
++ *     "firmware" the rest, as on 2.6.17;
++ *   - ECC: software Hamming, 3 bytes per 256, in spare bytes 6-11, used
++ *     when VPD byte 392 (flash offset 0x8188) is 0xEC. Pages whose ECC
++ *     bytes are all 0xff were written without ECC (iboot): read as is.
++ *
++ * Parameters: ecc=-1 auto (VPD), 0 off, 1 on; raw=1 no remapping (physical
++ * view, 64 MiB); tr_us = delay after READ0.
++ */
++
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/delay.h>
++#include <linux/io.h>
++#include <linux/mutex.h>
++#include <linux/sched.h>
++#include <linux/slab.h>
++#include <linux/spinlock.h>
++#include <linux/unaligned.h>
++#include <linux/mtd/mtd.h>
++#include <linux/mtd/partitions.h>
++#include <linux/pci.h>
++
++#include <asm/padre.h>
++
++#define PN_DATA		((void __iomem *)PADRE_IO_VIRT(0x08000000UL))
++#define PN_CLE		(PN_DATA + 0x10000)
++#define PN_ALE		(PN_DATA + 0x20000)
++#define PN_PCI_FEAT	((void __iomem *)(PADRE_APB + 0x10c))
++#define PN_FEAT_PCION	(1 << 2)
++#define PN_FEAT_NAND_CE	(1 << 10)
++
++#define PN_PAGE		512
++#define PN_OOB		16
++#define PN_PPB		32		/* pages per block */
++#define PN_BLOCK	(PN_PAGE * PN_PPB)
++#define PN_BLOCKS	4096
++#define PN_DEV_ID	0x76		/* 64 MiB, 3.3 V, x8, small pages */
++
++/* host-test-begin (board/readynas-duo-v1/tests/test-padre-nand.sh) */
++/* The only two commands this driver knows. Program (0x80/0x10), erase
++ * (0x60/0xd0), reset (0xff), status (0x70) and the others are refused.
++ */
++#define PN_CMD_READ0	0x00
++#define PN_CMD_READID	0x90
++
++static bool pn_cmd_allowed(unsigned int cmd)
++{
++	return cmd == PN_CMD_READ0 || cmd == PN_CMD_READID;
++}
++
++/* Software Hamming ECC of 256 bytes, in the Linux 2.6 layout (the one of
++ * nand_ecc.c, ecc_sw_hamming_calculate() with sm_order = false):
++ * code[0] = ~line parities of address bits 7-4, code[1] = bits 3-0 (odd
++ * bit: parity of the bytes whose address bit is 1), code[2] = ~column
++ * parities CP5..CP0 << 2 | 3.
++ */
++static u8 pn_par(unsigned int v)
++{
++	v ^= v >> 4;
++	v ^= v >> 2;
++	v ^= v >> 1;
++	return v & 1;
++}
++
++static u8 pn_mix(unsigned int one, unsigned int zero)	/* 4 + 4 bits */
++{
++	u8 r = 0;
++	int k;
++
++	for (k = 3; k >= 0; k--)
++		r = (r << 2) | (((one >> k) & 1) << 1) | ((zero >> k) & 1);
++	return r;
++}
++
++static void pn_ecc_calc(const u8 *d, u8 *code)
++{
++	unsigned int x = 0, one = 0, zero = 0, i;
++
++	for (i = 0; i < 256; i++) {
++		x ^= d[i];
++		if (pn_par(d[i])) {
++			one ^= i;
++			zero ^= ~i & 0xff;
++		}
++	}
++	code[0] = ~pn_mix(one >> 4, zero >> 4);
++	code[1] = ~pn_mix(one & 15, zero & 15);
++	code[2] = ~((pn_par(x & 0xf0) << 7) | (pn_par(x & 0x0f) << 6) |
++		    (pn_par(x & 0xcc) << 5) | (pn_par(x & 0x33) << 4) |
++		    (pn_par(x & 0xaa) << 3) | (pn_par(x & 0x55) << 2));
++}
++
++/* 0: no error, 1: one bit corrected (in the data or in the code),
++ * -1: uncorrectable. */
++static int pn_ecc_correct(u8 *d, const u8 *rd, const u8 *calc)
++{
++	unsigned int x = (rd[0] ^ calc[0]) << 16 | (rd[1] ^ calc[1]) << 8 |
++			 (rd[2] ^ calc[2]);
++	unsigned int a = 0, k;
++
++	if (!x)
++		return 0;
++	if (!(x & (x - 1)))
++		return 1;	/* a single bit of the stored code flipped */
++	/* one data bit: each parity pair (bits 2k+1, 2k) differs once */
++	if (((x ^ (x >> 1)) & 0x555554) != 0x555554)
++		return -1;
++	/* odd bits, high to low: byte address (8 bits), then bit number (3) */
++	for (k = 23; k >= 3; k -= 2)
++		a = (a << 1) | ((x >> k) & 1);
++	d[a >> 3] ^= 1 << (a & 7);
++	return 1;
++}
++/* host-test-end */
++
++static int ecc = -1;
++module_param(ecc, int, 0444);
++MODULE_PARM_DESC(ecc, "-1 auto (VPD byte 392 = 0xEC), 0 off, 1 on");
++static bool raw;
++module_param(raw, bool, 0444);
++MODULE_PARM_DESC(raw, "1: physical blocks, no bad block remapping");
++static uint tr_us = 25;
++module_param(tr_us, uint, 0444);
++MODULE_PARM_DESC(tr_us, "wait after READ0, microseconds (2.6.17: 15)");
++
++static DEFINE_SPINLOCK(pn_lock);	/* PCI_FEATURE and the NAND bus */
++static DEFINE_MUTEX(pn_mutex);		/* pn_buf */
++static u8 pn_buf[PN_PAGE + PN_OOB];
++static s16 pn_map[PN_BLOCKS];		/* logical -> physical block, -1 none */
++static unsigned long pn_unprotected;	/* pages read without stored ECC */
++static unsigned long pn_usb_retries;	/* waits for a busy EHCI to halt */
++static struct mtd_info pn_mtd;
++static struct pci_dev *pn_ehci_dev;	/* VIA VT6212 EHCI, 00:17.2 */
++static void __iomem *pn_ehci_caps;
++static void __iomem *pn_ehci;		/* operational registers, NULL: none */
++static bool pn_ehci_swab;		/* PCI_SWAP 0 (not the 2.6.17 0x4444) */
++
++#define EHCI_CMD	0x00
++#define EHCI_CMD_RUN	(1 << 0)
++#define EHCI_STS	0x04
++#define EHCI_STS_HALT	(1 << 12)
++
++static struct mtd_partition pn_parts[] = {
++	{ .name = "iboot", .offset = 0, .size = SZ_1M,
++	  .mask_flags = MTD_WRITEABLE },
++	{ .name = "firmware", .offset = MTDPART_OFS_APPEND,
++	  .size = MTDPART_SIZ_FULL, .mask_flags = MTD_WRITEABLE },
++};
++
++/* Every write to the chip goes through these two functions. */
++static void pn_cmd(unsigned int cmd)
++{
++	if (WARN_ON_ONCE(!pn_cmd_allowed(cmd)))
++		return;
++	__raw_writeb(cmd, PN_CLE);
++}
++
++static void pn_addr(u8 a)
++{
++	__raw_writeb(a, PN_ALE);
++}
++
++static u32 pn_er(int r)
++{
++	u32 v = __raw_readl(pn_ehci + r);
++
++	return pn_ehci_swab ? swab32(v) : v;
++}
++
++static void pn_ew(int r, u32 v)
++{
++	__raw_writel(pn_ehci_swab ? swab32(v) : v, pn_ehci + r);
++}
++
++/* No PCI bus master may run while PCI is off: stop the EHCI schedules.
++ * Returns whether it was running (to restart it), or -EBUSY. */
++static int pn_usb_pause(void)
++{
++	int i;
++
++	if (!pn_ehci || !(pn_er(EHCI_CMD) & EHCI_CMD_RUN))
++		return 0;
++	pn_ew(EHCI_CMD, pn_er(EHCI_CMD) & ~EHCI_CMD_RUN);
++	for (i = 0; i < 2000; i++) {		/* EHCI: halted within 2 ms */
++		if (pn_er(EHCI_STS) & EHCI_STS_HALT)
++			return 1;
++		udelay(1);
++	}
++	pn_ew(EHCI_CMD, pn_er(EHCI_CMD) | EHCI_CMD_RUN);
++	return -EBUSY;
++}
++
++static void pn_usb_resume(int was_running)
++{
++	if (was_running > 0)
++		pn_ew(EHCI_CMD, pn_er(EHCI_CMD) | EHCI_CMD_RUN);
++}
++
++/* One operation with USB stopped, the chip selected and PCI off,
++ * interrupts disabled: cmd, then addresses (n of them: column, then page
++ * bytes), wait, then len bytes read. PCI_FEATURE is restored as found
++ * (CE off), then USB restarted.
++ */
++static int pn_op(unsigned int cmd, u32 page, int naddr, u8 *buf, int len)
++{
++	unsigned long flags;
++	u32 feat;
++	int i, usb, try;
++
++	/* EHCI busy (a USB transfer in progress): wait a little, outside the
++	 * lock and with interrupts on, and try again; the flash is never
++	 * touched while USB runs. ~0.5 s at most, then the read fails. */
++	for (try = 0; ; try++) {
++		spin_lock_irqsave(&pn_lock, flags);
++		usb = pn_usb_pause();
++		if (usb >= 0)
++			break;
++		spin_unlock_irqrestore(&pn_lock, flags);
++		if (try >= 100) {
++			pr_err_ratelimited("padre_nand: the EHCI controller does not halt, read refused\n");
++			return -EBUSY;
++		}
++		pn_usb_retries++;
++		usleep_range(2000, 5000);
++	}
++	feat = __raw_readl(PN_PCI_FEAT) & ~PN_FEAT_NAND_CE;
++	__raw_writel((feat | PN_FEAT_NAND_CE) & ~PN_FEAT_PCION, PN_PCI_FEAT);
++	pn_cmd(cmd);
++	if (naddr)
++		pn_addr(0);
++	for (i = 1; i < naddr; i++, page >>= 8)
++		pn_addr(page & 0xff);
++	udelay(cmd == PN_CMD_READ0 ? tr_us : 1);
++	for (i = 0; i < len; i++)
++		buf[i] = __raw_readb(PN_DATA);
++	__raw_writel(feat, PN_PCI_FEAT);
++	pn_usb_resume(usb);
++	spin_unlock_irqrestore(&pn_lock, flags);
++	return 0;
++}
++
++static int pn_read_phys(u32 page, u8 *buf)
++{
++	return pn_op(PN_CMD_READ0, page, 4, buf, PN_PAGE + PN_OOB);
++}
++
++/* ECC check of pn_buf: number of corrected bits, or -EBADMSG */
++static int pn_ecc_page(void)
++{
++	static const u8 ff[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
++	u8 *rd = pn_buf + PN_PAGE + 6, calc[6];
++	int h, r, flips = 0;
++
++	pn_ecc_calc(pn_buf, calc);
++	pn_ecc_calc(pn_buf + 256, calc + 3);
++	if (!memcmp(rd, ff, 6)) {
++		if (memcmp(calc, ff, 6))
++			pn_unprotected++;
++		return 0;
++	}
++	for (h = 0; h < 2; h++) {
++		r = pn_ecc_correct(pn_buf + 256 * h, rd + 3 * h, calc + 3 * h);
++		if (r < 0)
++			return -EBADMSG;
++		flips += r;
++	}
++	return flips;
++}
++
++static int pn_read(struct mtd_info *mtd, loff_t from, size_t len,
++		   size_t *retlen, u_char *buf)
++{
++	int ret = 0, bad = 0;
++
++	mutex_lock(&pn_mutex);
++	while (len) {
++		u32 lpage = from >> 9, col = from & (PN_PAGE - 1);
++		s16 pb = pn_map[lpage / PN_PPB];
++		size_t n = min_t(size_t, len, PN_PAGE - col);
++		int r = 0;
++
++		if (pb < 0) {
++			ret = -EIO;
++			break;
++		}
++		if (pn_read_phys(pb * PN_PPB + lpage % PN_PPB, pn_buf)) {
++			ret = -EIO;
++			break;
++		}
++		if (mtd->ecc_strength)
++			r = pn_ecc_page();
++		if (r < 0) {
++			mtd->ecc_stats.failed++;
++			bad = 1;
++		} else if (r) {
++			mtd->ecc_stats.corrected += r;
++			ret = max(ret, 1);
++		}
++		memcpy(buf, pn_buf + col, n);
++		buf += n;
++		from += n;
++		len -= n;
++		*retlen += n;
++		cond_resched();
++	}
++	mutex_unlock(&pn_mutex);
++	return ret < 0 ? ret : bad ? -EBADMSG : ret;
++}
++
++/* Infrant bad block table (read only; 2.6.17 wrote one when missing, here
++ * the driver refuses to load instead, unless raw=1). */
++static int pn_load_bbt(void)
++{
++	u8 *t;
++	u32 mark;
++	int i, nbad = 0, tpos;
++
++	for (i = 0; i < PN_BLOCKS; i++)
++		pn_map[i] = i;
++	if (raw)
++		return PN_BLOCKS;
++	if (pn_read_phys(0, pn_buf))
++		return -EBUSY;
++	mark = get_unaligned_be32(pn_buf + 508);
++	if ((mark >> 16) != 0xdead || (mark & 0xffff) >= PN_BLOCKS) {
++		pr_err("padre_nand: no bad block table mark at offset 508 (%08x): not loading (raw=1 for a physical view)\n", mark);
++		return -ENODEV;
++	}
++	tpos = mark & 0xffff;
++	t = kmalloc(8 * PN_PAGE, GFP_KERNEL);
++	if (!t)
++		return -ENOMEM;
++	for (i = 0; i < 8; i++) {
++		if (pn_read_phys(tpos * PN_PPB + i, pn_buf)) {
++			kfree(t);
++			return -EBUSY;
++		}
++		memcpy(t + i * PN_PAGE, pn_buf, PN_PAGE);
++	}
++	for (i = 0; i < 1024; i++) {
++		u16 b = get_unaligned_be16(t + 4 * i);
++		u16 g = get_unaligned_be16(t + 4 * i + 2);
++
++		if (b == 0xffff)
++			break;
++		if (b >= PN_BLOCKS || g >= PN_BLOCKS) {
++			pr_err("padre_nand: bad block table at block %d: entry %d (%u -> %u) out of range, not loading\n",
++			       tpos, i, b, g);
++			kfree(t);
++			return -EINVAL;
++		}
++		pr_info("padre_nand: bad block %u replaced by %u\n", b, g);
++		nbad++;
++	}
++	/* as nand_build_bbt(): the last nbad logical blocks do not exist */
++	for (i = 0; i < nbad; i++)
++		pn_map[get_unaligned_be16(t + 4 * i)] =
++			get_unaligned_be16(t + 4 * i + 2);
++	for (i = PN_BLOCKS - nbad; i < PN_BLOCKS; i++)
++		pn_map[i] = -1;
++	kfree(t);
++	pr_info("padre_nand: bad block table at block %d, %d bad block(s)\n",
++		tpos, nbad);
++	return PN_BLOCKS - nbad;
++}
++
++/* EHCI registers, through the same byte swapping as ehci-pci (HCIVERSION
++ * 0x0100 or 0x0110 in the top half of the first word, read either way). */
++static int pn_find_ehci(void)
++{
++	u32 v;
++
++	pn_ehci_dev = pci_get_device(PCI_VENDOR_ID_VIA, 0x3104, NULL);
++	if (!pn_ehci_dev)
++		return 0;			/* no EHCI: no bus master */
++	pn_ehci_caps = pci_iomap(pn_ehci_dev, 0, 0x100);
++	if (!pn_ehci_caps)
++		return -ENODEV;
++	v = __raw_readl(pn_ehci_caps);
++	if ((v >> 16) != 0x0100 && (v >> 16) != 0x0110) {
++		v = swab32(v);
++		pn_ehci_swab = true;
++	}
++	if (((v >> 16) != 0x0100 && (v >> 16) != 0x0110) || (v & 0xff) < 0x0c) {
++		pr_err("padre_nand: EHCI capability word %08x not understood, not loading\n", v);
++		return -ENODEV;
++	}
++	pn_ehci = pn_ehci_caps + (v & 0xff);
++	pr_info("padre_nand: EHCI stopped around each flash access (USBCMD %08x)\n",
++		pn_er(EHCI_CMD));
++	return 0;
++}
++
++static void pn_put_ehci(void)
++{
++	if (pn_ehci_caps)
++		pci_iounmap(pn_ehci_dev, pn_ehci_caps);
++	pci_dev_put(pn_ehci_dev);
++}
++
++static int __init pn_init(void)
++{
++	u8 id[2];
++	int good, err;
++
++	err = pn_find_ehci();
++	if (err || (err = pn_op(PN_CMD_READID, 0, 1, id, 2)))
++		goto out;
++	pr_info("padre_nand: NAND ID %02x %02x\n", id[0], id[1]);
++	if (id[1] != PN_DEV_ID) {
++		pr_err("padre_nand: unexpected device ID %02x (expected %02x), not loading\n",
++		       id[1], PN_DEV_ID);
++		err = -ENODEV;
++		goto out;
++	}
++	good = pn_load_bbt();
++	if (good < 0) {
++		err = good;
++		goto out;
++	}
++
++	pn_mtd.name = "padre-nand";
++	pn_mtd.type = MTD_ROM;
++	pn_mtd.flags = MTD_NO_ERASE;		/* never MTD_WRITEABLE */
++	pn_mtd.size = (u64)good * PN_BLOCK;
++	pn_mtd.erasesize = PN_BLOCK;
++	pn_mtd.writesize = PN_PAGE;
++	pn_mtd.writebufsize = PN_PAGE;
++	pn_mtd.owner = THIS_MODULE;
++	pn_mtd._read = pn_read;
++	if (ecc < 0) {
++		/* VPD: logical offset 0x8000, byte 392 */
++		err = pn_read_phys(pn_map[2] * PN_PPB, pn_buf);
++		if (err)
++			goto out;
++		ecc = pn_buf[392] == 0xec;
++	}
++	if (ecc) {
++		pn_mtd.ecc_strength = 1;
++		pn_mtd.ecc_step_size = 256;
++		pn_mtd.bitflip_threshold = 1;
++	}
++	pr_info("padre_nand: %s view, %d blocks (%llu KiB), ECC %s, read only\n",
++		raw ? "physical" : "logical", good,
++		(unsigned long long)pn_mtd.size >> 10, ecc ? "on" : "off");
++	err = mtd_device_register(&pn_mtd, pn_parts, ARRAY_SIZE(pn_parts));
++out:
++	if (err)
++		pn_put_ehci();
++	return err;
++}
++
++static void __exit pn_exit(void)
++{
++	mtd_device_unregister(&pn_mtd);
++	pn_put_ehci();
++	pr_info("padre_nand: unloaded (ECC: %u corrected, %u failed; %lu page(s) without stored ECC; %lu USB wait(s))\n",
++		pn_mtd.ecc_stats.corrected, pn_mtd.ecc_stats.failed,
++		pn_unprotected, pn_usb_retries);
++}
++
++module_init(pn_init);
++module_exit(pn_exit);
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("ReadyNAS Duo v1 NAND flash, read only (backup)");

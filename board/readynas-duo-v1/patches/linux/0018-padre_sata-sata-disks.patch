@@ -1,0 +1,875 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 18/23] platform: padre: add the SATA driver
+
+libata SFF driver for the two SATA ports of the IT3107, written from
+the GPL 2.6.17 IDE driver (PIO) and its IO description: 32-bit shadow
+register accesses, the driver's own SFF operations; DMA through the
+List Processor (padre_sata.dma=1, checked against PIO at boot);
+padre_sata.read_only=1 refuses writes.
+---
+ drivers/platform/padre/Kconfig      |   7 +
+ drivers/platform/padre/Makefile     |   1 +
+ drivers/platform/padre/padre_sata.c | 829 ++++++++++++++++++++++++++++
+ 3 files changed, 837 insertions(+)
+ create mode 100644 drivers/platform/padre/padre_sata.c
+
+diff --git a/drivers/platform/padre/Kconfig b/drivers/platform/padre/Kconfig
+index 9f77ae62f06d662610c327d5511c02a32be9f071..23056083dcbdd5683ff5c1fc5fa3aae48581edff 100644
+--- a/drivers/platform/padre/Kconfig
++++ b/drivers/platform/padre/Kconfig
+@@ -39,4 +39,11 @@ config PADRE_GMAC
+ 	help
+ 	  Ported from the GPL gmac driver for 2.6.17.
+ 
++config PADRE_SATA
++	bool "SATA disks (libata, PIO)"
++	depends on ATA_SFF
++	default y
++	help
++	  Based on the GPL ide driver for 2.6.17 (IDE 2.6.17, PIO) and its IO description.
++
+ endmenu
+diff --git a/drivers/platform/padre/Makefile b/drivers/platform/padre/Makefile
+index 68777a9d7a539dd1a5e19a071f56d5479342c721..704d9292ce388060d0a77feb6dfb3cf66663d8f1 100644
+--- a/drivers/platform/padre/Makefile
++++ b/drivers/platform/padre/Makefile
+@@ -4,3 +4,4 @@ obj-$(CONFIG_PADRE_RTC)		+= padre_rtc.o
+ obj-$(CONFIG_PADRE_LED)		+= padre_led.o
+ obj-$(CONFIG_PADRE_HWMON)	+= padre_hwmon.o
+ obj-$(CONFIG_PADRE_GMAC)	+= padre_gmac.o
++obj-$(CONFIG_PADRE_SATA)	+= padre_sata.o
+diff --git a/drivers/platform/padre/padre_sata.c b/drivers/platform/padre/padre_sata.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..adddbf5c9e831299d12658422503cdc1f24611c4
+--- /dev/null
++++ b/drivers/platform/padre/padre_sata.c
+@@ -0,0 +1,829 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * padre_sata.c: SATA disks of the ReadyNAS Duo v1 (IT3107 "Padre"), libata
++ * SFF driver in PIO.
++ *
++ * Written from padre_ide_libre.c (free driver for 2.6.17; 2.6.17 IDE driver
++ * in PIO, reads validated on the NAS: 7/7, data identical to the Infrant
++ * driver) and the IO functional description §4.2, §6.1 and §9:
++ *   SATA block n at 0x6000_7000 + 0x100*n, ATA shadow registers at
++ *   +4*r (32-bit accesses, 8 useful bits), SCR at +0x40/+0x44/+0x48 (libata
++ *   order), data at +0x00 (16 bits), waiting for +0x84 bit 4 (read) or
++ *   bit 5 (write) before each word, IRQ 32 + n.
++ * All accesses stay 32-bit (like the validated driver): the driver provides
++ * its own SFF operations instead of the libata ioread8 ones.
++ * DMA through the List Processor (padre_sata.dma=1, DMA = PIO self-test at
++ * boot, see below). No X-RAID (standard md/RAID1 on top).
++ *
++ * Parameter: padre_sata.read_only=1 (command line) refuses any write, for a
++ * first test.
++ *
++ * Copyright (C) 2026 the ReadyNasNextGen authors
++ */
++
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/delay.h>
++#include <linux/interrupt.h>
++#include <linux/platform_device.h>
++#include <linux/libata.h>
++#include <linux/dma-mapping.h>
++#include <linux/scatterlist.h>
++#include <linux/gfp.h>
++#include <linux/io.h>
++#include <scsi/scsi_host.h>
++
++#include <asm/padre.h>
++
++#define DRV_NAME	"padre_sata"
++
++#define SATA_BASE(c)	((void __iomem *)(PADRE_APB + 0x7000 + ((c) << 8)))
++#define S_DATA		0x00
++#define S_REG(r)	((r) << 2)	/* 1 error/feature ... 6 device, 7 status/command */
++#define S_ALTSTAT	0x38		/* control when written */
++#define S_SCR(r)	(0x40 + ((r) << 2))	/* SStatus, SError, SControl */
++#define S_CTRL		0x80
++#define S_STAT		0x84
++#define S_X88		0x88
++#define STAT_READ	(1 << 4)
++#define STAT_WRITE	(1 << 5)
++#define FIFO_US		10000
++#define HWIRQ0		32
++#define NCHAN_MAX	4
++
++static bool read_only;
++module_param(read_only, bool, 0644);
++MODULE_PARM_DESC(read_only, "1 = refuse any write to the disks");
++
++static inline void __iomem *pbase(struct ata_port *ap)
++{
++	return SATA_BASE(ap->port_no);
++}
++
++static inline u8 rd8(struct ata_port *ap, unsigned int off)
++{
++	return __raw_readl(pbase(ap) + off) & 0xff;
++}
++
++static inline void wr8(struct ata_port *ap, unsigned int off, u8 v)
++{
++	__raw_writel(v, pbase(ap) + off);
++}
++
++static u8 padre_check_status(struct ata_port *ap)
++{
++	return rd8(ap, S_REG(7));
++}
++
++static u8 padre_check_altstatus(struct ata_port *ap)
++{
++	return rd8(ap, S_ALTSTAT);
++}
++
++static void padre_set_devctl(struct ata_port *ap, u8 ctl)
++{
++	wr8(ap, S_ALTSTAT, ctl);
++}
++
++static void padre_dev_select(struct ata_port *ap, unsigned int device)
++{
++	wr8(ap, S_REG(6), device ? ATA_DEVICE_OBS | ATA_DEV1 : ATA_DEVICE_OBS);
++	ata_sff_pause(ap);
++}
++
++static void padre_tf_load(struct ata_port *ap, const struct ata_taskfile *tf)
++{
++	unsigned int is_addr = tf->flags & ATA_TFLAG_ISADDR;
++
++	if (tf->ctl != ap->last_ctl) {
++		wr8(ap, S_ALTSTAT, tf->ctl);
++		ap->last_ctl = tf->ctl;
++		ata_wait_idle(ap);
++	}
++	if (is_addr && (tf->flags & ATA_TFLAG_LBA48)) {
++		wr8(ap, S_REG(1), tf->hob_feature);
++		wr8(ap, S_REG(2), tf->hob_nsect);
++		wr8(ap, S_REG(3), tf->hob_lbal);
++		wr8(ap, S_REG(4), tf->hob_lbam);
++		wr8(ap, S_REG(5), tf->hob_lbah);
++	}
++	if (is_addr) {
++		wr8(ap, S_REG(1), tf->feature);
++		wr8(ap, S_REG(2), tf->nsect);
++		wr8(ap, S_REG(3), tf->lbal);
++		wr8(ap, S_REG(4), tf->lbam);
++		wr8(ap, S_REG(5), tf->lbah);
++	}
++	if (tf->flags & ATA_TFLAG_DEVICE)
++		wr8(ap, S_REG(6), tf->device);
++	ata_wait_idle(ap);
++}
++
++static void padre_tf_read(struct ata_port *ap, struct ata_taskfile *tf)
++{
++	tf->status = padre_check_status(ap);
++	tf->error = rd8(ap, S_REG(1));
++	tf->nsect = rd8(ap, S_REG(2));
++	tf->lbal = rd8(ap, S_REG(3));
++	tf->lbam = rd8(ap, S_REG(4));
++	tf->lbah = rd8(ap, S_REG(5));
++	tf->device = rd8(ap, S_REG(6));
++
++	if (tf->flags & ATA_TFLAG_LBA48) {
++		wr8(ap, S_ALTSTAT, tf->ctl | ATA_HOB);
++		tf->hob_feature = rd8(ap, S_REG(1));
++		tf->hob_nsect = rd8(ap, S_REG(2));
++		tf->hob_lbal = rd8(ap, S_REG(3));
++		tf->hob_lbam = rd8(ap, S_REG(4));
++		tf->hob_lbah = rd8(ap, S_REG(5));
++		wr8(ap, S_ALTSTAT, tf->ctl);
++		ap->last_ctl = tf->ctl;
++	}
++}
++
++static void padre_exec_command(struct ata_port *ap, const struct ata_taskfile *tf)
++{
++	wr8(ap, S_REG(7), tf->command);
++	ata_sff_pause(ap);
++}
++
++static int fifo_wait(struct ata_port *ap, u32 bit)
++{
++	int t;
++
++	for (t = 0; !(__raw_readl(pbase(ap) + S_STAT) & bit); t++) {
++		if (t >= FIFO_US)
++			return -1;
++		udelay(1);
++	}
++	return 0;
++}
++
++/* 16-bit words copied without swapping: memory is the image of the disk
++ * (IO description §9); libata swaps IDENTIFY itself (swap_buf_le16).
++ */
++static unsigned int padre_data_xfer(struct ata_queued_cmd *qc, unsigned char *buf,
++				    unsigned int buflen, int rw)
++{
++	struct ata_port *ap = qc->dev->link->ap;
++	void __iomem *d = pbase(ap) + S_DATA;
++	unsigned int n, words = buflen >> 1;
++	u16 *p = (u16 *)buf;
++
++	for (n = 0; n < words; n++, p++) {
++		if (fifo_wait(ap, rw == READ ? STAT_READ : STAT_WRITE)) {
++			ata_port_err(ap, "PIO FIFO not responding (+0x84 = %08x)\n",
++				     __raw_readl(pbase(ap) + S_STAT));
++			/* ata_pio_xfer() ignores the returned count: without
++			 * err_mask the command would complete "successfully"
++			 */
++			qc->err_mask |= AC_ERR_HOST_BUS;
++			if (rw == READ)
++				memset(p, 0, buflen - (n << 1));
++			return n << 1;
++		}
++		if (rw == READ)
++			*p = __raw_readl(d) & 0xffff;
++		else
++			__raw_writel(*p, d);
++	}
++	if (buflen & 1) {	/* final byte (ATAPI): half word */
++		u16 pad = 0;
++
++		if (rw == READ) {
++			if (!fifo_wait(ap, STAT_READ))
++				pad = __raw_readl(d) & 0xffff;
++			buf[buflen - 1] = pad >> 8;
++		} else {
++			pad = buf[buflen - 1] << 8;
++			if (!fifo_wait(ap, STAT_WRITE))
++				__raw_writel(pad, d);
++		}
++		words++;
++	}
++	return words << 1;
++}
++
++static void padre_drain_fifo(struct ata_queued_cmd *qc)
++{
++	struct ata_port *ap;
++	int count;
++
++	if (qc == NULL || qc->dma_dir == DMA_TO_DEVICE)
++		return;
++	ap = qc->ap;
++	for (count = 0; (padre_check_status(ap) & ATA_DRQ) && count < 65536; count += 2)
++		__raw_readl(pbase(ap) + S_DATA);
++}
++
++static int padre_scr_read(struct ata_link *link, unsigned int reg, u32 *val)
++{
++	if (reg > SCR_CONTROL)
++		return -EINVAL;
++	*val = __raw_readl(pbase(link->ap) + S_SCR(reg));
++	return 0;
++}
++
++static int padre_scr_write(struct ata_link *link, unsigned int reg, u32 val)
++{
++	if (reg > SCR_CONTROL)
++		return -EINVAL;
++	__raw_writel(val, pbase(link->ap) + S_SCR(reg));
++	return 0;
++}
++
++/* COMRESET as in padre_ide_libre (IO description §6.1), limited to 1.5 Gbit/s */
++static int padre_hardreset(struct ata_link *link, unsigned int *class,
++			   unsigned long deadline)
++{
++	struct ata_port *ap = link->ap;
++	void __iomem *b = pbase(ap);
++	int t;
++
++	*class = ATA_DEV_NONE;
++	__raw_writel(0x80, b + S_X88);
++	__raw_writel(0x40000, b + S_CTRL);
++	__raw_writel(0x11, b + S_SCR(SCR_CONTROL));	/* COMRESET */
++	msleep(5);
++	__raw_writel(0x10, b + S_SCR(SCR_CONTROL));
++	msleep(5);
++	__raw_writel(0x48000, b + S_CTRL);
++	msleep(5);
++
++	for (t = 0; t < 150 && (__raw_readl(b + S_SCR(SCR_STATUS)) & 0xf) != 3; t++)
++		msleep(10);				/* 1.5 s */
++	if ((__raw_readl(b + S_SCR(SCR_STATUS)) & 0xf) != 3) {
++		ata_link_info(link, "no disk (SStatus %03x)\n",
++			      __raw_readl(b + S_SCR(SCR_STATUS)) & 0xfff);
++		return 0;
++	}
++	__raw_writel(0, b + S_SCR(SCR_ERROR));
++	if (ata_sff_wait_ready(link, deadline)) {
++		ata_link_warn(link, "link up but disk not ready (status %02x)\n",
++			      padre_check_status(ap));
++		return -EBUSY;
++	}
++	*class = ata_sff_dev_classify(link->device, 1, NULL);
++	return 0;
++}
++
++
++/* ===================================================================
++ * DMA through the List Processor (LP), from padre_ide_libre.c (dma=1,
++ * validated under 2.6.17 on 16/11: read 24/24, write 34/34, 2-3 segments)
++ * and its README §9. One command = one list: head descriptor (sop) with
++ * READ/WRITE DMA EXT for the TOTAL sector count + 1st segment, then one
++ * descriptor per segment (words 4-7 zero), eop|intr0 on the last one.
++ * Completion: IRQ 44, acknowledged by LP+0x14 = LP+0x10. The LP serves one
++ * channel at a time (qc_defer). Firmware loaded by head_32.S (like 2.6.17).
++ */
++#define LP(o)		((void __iomem *)(PADRE_APB + 0x1000 + (o)))
++#define LP_STAT		0x000		/* low byte: 1 = READY */
++#define LP_CH_ENABLE	0x004
++#define LP_CH_TRIG	0x00c
++#define LP_ISTAT	0x010
++#define LP_IACK		0x014
++#define LP_VERSION	0x028
++#define LP_LIST(c)	(0x100 + (((c) + 4) << 2))
++#define LP_BIT(c)	(1u << ((c) + 4))
++#define LP_HWIRQ	44
++#define MC_FFCTRL(c)	((void __iomem *)(PADRE_APB + 0x2800 + (((c) + 4) << 4)))
++
++#define LPD_LEN		32
++#define LPD_FLAGS	0x08
++#define LPD_SIZE	0x09
++#define LPD_CHMAP	0x0c
++#define LPD_CMD		0x0f
++#define LPD_DEVHEAD	0x10
++#define LPD_LBA		0x12
++#define LPD_NSECT_HI	0x1a
++#define LPD_NSECT_LO	0x1b
++#define LPF_OWNER	0x80
++#define LPF_SOP		0x20
++#define LPF_INTR0	0x08
++#define LPF_EOP		0x02
++#define LPF_DMAIN	0x01		/* the DMA writes memory (disk read) */
++#define LPD_TYPE_LBA48	3
++#define LP_MAX_SEG	64		/* 64 x 4 KiB = 256 KiB per command */
++#define LP_MAX_SECT	512
++
++static int dma;
++module_param(dma, int, 0444);
++MODULE_PARM_DESC(dma, "1 = DMA through the List Processor after self-test (default 0: PIO)");
++
++struct padre_port {
++	u8 *list;			/* one page: up to 128 descriptors */
++	struct ata_queued_cmd *dma_qc;	/* DMA command in flight */
++	unsigned int irq;
++	bool irq_off;
++	u32 ffctrl0;
++};
++
++static struct ata_port *lp_owner;	/* port currently using the LP */
++static u8 lp_chmap;			/* byte 0x0C: disks present (0x03 on the Duo) */
++static bool dma_chan[NCHAN_MAX];
++
++static inline u32 lp_rd(unsigned int o) { return __raw_readl(LP(o)); }
++static inline void lp_wr(unsigned int o, u32 v) { __raw_writel(v, LP(o)); }
++
++static void lp_segment(u8 *p, u32 next, u32 bus, u32 len, u8 flags, u8 cmd)
++{
++	memset(p, 0, LPD_LEN);
++	*(u32 *)p = next | LPD_TYPE_LBA48;
++	*(u32 *)(p + 4) = bus;
++	p[LPD_FLAGS] = flags;
++	p[LPD_SIZE + 0] = (len >> 16) & 0xff;
++	p[LPD_SIZE + 1] = (len >> 8) & 0xff;
++	p[LPD_SIZE + 2] = len & 0xff;
++	p[LPD_CHMAP] = lp_chmap;
++	p[LPD_CMD] = cmd;
++}
++
++static void lp_head(u8 *p, u64 lba, u32 nsect)
++{
++	p[LPD_DEVHEAD] = 0xe0;
++	p[LPD_LBA + 0] = (lba >> 40) & 0xff;
++	p[LPD_LBA + 1] = (lba >> 32) & 0xff;
++	p[LPD_LBA + 2] = (lba >> 24) & 0xff;
++	p[LPD_LBA + 3] = (lba >> 16) & 0xff;
++	p[LPD_LBA + 4] = (lba >> 8) & 0xff;
++	p[LPD_LBA + 5] = lba & 0xff;
++	p[LPD_NSECT_HI] = (nsect >> 8) & 0xff;
++	p[LPD_NSECT_LO] = nsect & 0xff;
++}
++
++/* clean the list from the cache (the LP reads it from memory) and start it */
++static void lp_start(int c, u8 *list, int nseg)
++{
++	padre_clean_dcache_range((unsigned long)list, (unsigned long)list + nseg * LPD_LEN);
++	if (lp_rd(LP_ISTAT) & LP_BIT(c))
++		lp_wr(LP_IACK, LP_BIT(c));
++	lp_wr(LP_CH_ENABLE, lp_rd(LP_CH_ENABLE) | LP_BIT(c));
++	lp_wr(LP_LIST(c), __pa(list));
++	lp_wr(LP_CH_TRIG, LP_BIT(c));
++}
++
++/* take the channel away from the LP and reset its MC FIFO (LP stuck) */
++static void lp_stop(int c, u32 ffctrl0)
++{
++	lp_wr(LP_CH_ENABLE, lp_rd(LP_CH_ENABLE) & ~LP_BIT(c));
++	__raw_writel(0, MC_FFCTRL(c));
++	__raw_writel(ffctrl0, MC_FFCTRL(c));
++	if (lp_rd(LP_ISTAT) & LP_BIT(c))
++		lp_wr(LP_IACK, LP_BIT(c));
++}
++
++static u64 tf_lba(const struct ata_taskfile *tf)
++{
++	u64 lba = ((u32)tf->lbah << 16) | ((u32)tf->lbam << 8) | tf->lbal;
++
++	if (tf->flags & ATA_TFLAG_LBA48)
++		lba |= ((u64)tf->hob_lbah << 40) | ((u64)tf->hob_lbam << 32) |
++		       ((u64)tf->hob_lbal << 24);
++	else
++		lba |= (u64)(tf->device & 0xf) << 24;
++	return lba;
++}
++
++static enum ata_completion_errors padre_qc_prep(struct ata_queued_cmd *qc)
++{
++	struct padre_port *pp = qc->ap->private_data;
++	bool write = qc->tf.flags & ATA_TFLAG_WRITE;
++	struct scatterlist *sg;
++	unsigned int si, n = qc->n_elem;
++	u32 total = 0;
++	u8 *l = pp->list;
++
++	if (qc->tf.protocol != ATA_PROT_DMA)
++		return AC_ERR_OK;
++	if (n < 1 || n > LP_MAX_SEG)
++		return AC_ERR_SYSTEM;
++	for_each_sg(qc->sg, sg, n, si) {
++		u32 len = sg_dma_len(sg);
++
++		if ((len & 511) || len > 0xffffff)
++			return AC_ERR_SYSTEM;
++		lp_segment(l + si * LPD_LEN, __pa(l + (si + 1 == n ? 0 : si + 1) * LPD_LEN),
++			   sg_dma_address(sg), len,
++			   LPF_OWNER | (si == 0 ? LPF_SOP : 0) |
++			   (si + 1 == n ? (LPF_EOP | LPF_INTR0) : 0) | (write ? 0 : LPF_DMAIN),
++			   write ? ATA_CMD_WRITE_EXT : ATA_CMD_READ_EXT);	/* 0x35 / 0x25 */
++		total += len >> 9;
++	}
++	if (total != qc->nbytes >> 9 || total > 0xffff)
++		return AC_ERR_SYSTEM;
++	lp_head(l, tf_lba(&qc->tf), total);
++	return AC_ERR_OK;
++}
++
++static int padre_qc_defer(struct ata_queued_cmd *qc)
++{
++	int rc = ata_std_qc_defer(qc);
++
++	if (rc)
++		return rc;
++	/* the LP serves one channel at a time */
++	if (qc->tf.protocol == ATA_PROT_DMA && lp_owner && lp_owner != qc->ap)
++		return ATA_DEFER_PORT;
++	return 0;
++}
++
++static unsigned int padre_qc_issue(struct ata_queued_cmd *qc)
++{
++	struct ata_port *ap = qc->ap;
++	struct padre_port *pp = ap->private_data;
++
++	if (read_only && (qc->tf.flags & ATA_TFLAG_WRITE)) {
++		ata_dev_err(qc->dev, "write refused (read_only=1)\n");
++		return AC_ERR_DEV;
++	}
++	padre_led_ata_activity(ap->port_no);
++	if (qc->tf.protocol != ATA_PROT_DMA) {
++		/* everything polled: IRQ 32+n is not used (link/power events of
++		 * the SATA bridge cannot be acknowledged by reading the status:
++		 * possible interrupt storm, cf. padre_ide_libre "orage")
++		 */
++		qc->tf.flags |= ATA_TFLAG_POLLING;
++		return ata_sff_qc_issue(qc);
++	}
++
++	if ((lp_rd(LP_STAT) & 0xff) != 1 || lp_owner)
++		return AC_ERR_SYSTEM;
++	lp_owner = ap;
++	pp->dma_qc = qc;
++	lp_start(ap->port_no, pp->list, qc->n_elem);
++	return 0;
++}
++
++/* IRQ 44: list(s) completed */
++static irqreturn_t padre_lp_irq(int irq, void *dev)
++{
++	struct ata_host *host = dev;
++	u32 ist = lp_rd(LP_ISTAT);
++	unsigned long flags;
++	unsigned int i;
++
++	if (!ist)
++		return IRQ_NONE;
++	lp_wr(LP_IACK, ist);
++	spin_lock_irqsave(&host->lock, flags);
++	for (i = 0; i < host->n_ports; i++) {
++		struct ata_port *ap = host->ports[i];
++		struct padre_port *pp = ap->private_data;
++		struct ata_queued_cmd *qc = pp->dma_qc;
++		u8 st;
++
++		if (!(ist & LP_BIT(i)) || !qc)
++			continue;
++		pp->dma_qc = NULL;
++		lp_owner = NULL;
++		st = padre_check_status(ap);	/* reads and drops the disk INTRQ */
++		if (pp->irq_off) {
++			pp->irq_off = false;
++			enable_irq(pp->irq);
++		}
++		if (!(st & ATA_DRDY) || (st & (ATA_BUSY | ATA_ERR | ATA_DRQ)))
++			qc->err_mask |= AC_ERR_DEV;
++		ata_qc_complete(qc);
++	}
++	spin_unlock_irqrestore(&host->lock, flags);
++	return IRQ_HANDLED;
++}
++
++/* Disk IRQ 32+n. While an LP list runs, the disk is left alone (the LP
++ * drives it): the IRQ is disabled until the list completes.
++ */
++static irqreturn_t padre_sata_irq(int irq, void *dev)
++{
++	struct ata_port *ap = dev;
++	struct padre_port *pp = ap->private_data;
++	struct ata_queued_cmd *qc;
++	unsigned long flags;
++
++	spin_lock_irqsave(ap->lock, flags);
++	if (pp->dma_qc) {
++		disable_irq_nosync(irq);
++		pp->irq_off = true;
++	} else {
++		qc = ata_qc_from_tag(ap, ap->link.active_tag);
++		if (qc && !(qc->tf.flags & ATA_TFLAG_POLLING))
++			ata_sff_port_intr(ap, qc);
++		else
++			padre_check_status(ap);	/* drops INTRQ */
++	}
++	spin_unlock_irqrestore(ap->lock, flags);
++	return IRQ_HANDLED;
++}
++
++/* timeout (libata EH): release the LP before the COMRESET */
++static void padre_error_handler(struct ata_port *ap)
++{
++	struct padre_port *pp = ap->private_data;
++	unsigned long flags;
++
++	spin_lock_irqsave(ap->lock, flags);
++	if (pp->dma_qc) {
++		ata_port_warn(ap, "DMA list not completed (LP STAT=%02x CH_EN=%08x ISTAT=%08x), LP stopped\n",
++			      lp_rd(LP_STAT) & 0xff, lp_rd(LP_CH_ENABLE), lp_rd(LP_ISTAT));
++		lp_stop(ap->port_no, pp->ffctrl0);
++		pp->dma_qc = NULL;
++		lp_owner = NULL;
++		if (pp->irq_off) {
++			pp->irq_off = false;
++			enable_irq(pp->irq);
++		}
++	}
++	spin_unlock_irqrestore(ap->lock, flags);
++	ata_sff_error_handler(ap);
++}
++
++/* ---------- boot self-test (before libata): DMA compared with PIO ---------- */
++
++static int link_ready(int c)
++{
++	void __iomem *b = SATA_BASE(c);
++	int t;
++
++	__raw_writel(0x80, b + S_X88);
++	__raw_writel(0x40000, b + S_CTRL);
++	__raw_writel(0x11, b + S_SCR(SCR_CONTROL));
++	msleep(5);
++	__raw_writel(0x10, b + S_SCR(SCR_CONTROL));
++	msleep(5);
++	__raw_writel(0x48000, b + S_CTRL);
++	msleep(5);
++	for (t = 0; t < 150 && (__raw_readl(b + S_SCR(SCR_STATUS)) & 0xf) != 3; t++)
++		msleep(10);
++	if ((__raw_readl(b + S_SCR(SCR_STATUS)) & 0xf) != 3)
++		return -1;
++	__raw_writel(0, b + S_SCR(SCR_ERROR));
++	for (t = 0; t < 3500; t++) {				/* 35 s */
++		if ((__raw_readl(b + S_REG(7)) & 0xc1) == 0x40)
++			return 0;
++		msleep(10);
++	}
++	return -1;
++}
++
++static int fifo_word(int c, u32 bit)
++{
++	int t;
++
++	for (t = 0; !(__raw_readl(SATA_BASE(c) + S_STAT) & bit); t++) {
++		if (t >= FIFO_US)
++			return -1;
++		udelay(1);
++	}
++	return 0;
++}
++
++/* polled READ SECTORS EXT, outside libata */
++static int pio_read(int c, u64 lba, int n, u16 *buf)
++{
++	void __iomem *b = SATA_BASE(c);
++	int s, w, t;
++	u8 st = 0;
++
++	__raw_writel(0, b + S_REG(1)); __raw_writel(0, b + S_REG(1));
++	__raw_writel(0, b + S_REG(2)); __raw_writel(n, b + S_REG(2));
++	__raw_writel((lba >> 24) & 0xff, b + S_REG(3));
++	__raw_writel((lba >> 32) & 0xff, b + S_REG(4));
++	__raw_writel((lba >> 40) & 0xff, b + S_REG(5));
++	__raw_writel(lba & 0xff, b + S_REG(3));
++	__raw_writel((lba >> 8) & 0xff, b + S_REG(4));
++	__raw_writel((lba >> 16) & 0xff, b + S_REG(5));
++	__raw_writel(0xe0, b + S_REG(6));
++	__raw_writel(ATA_CMD_PIO_READ_EXT, b + S_REG(7));
++	for (s = 0; s < n; s++) {
++		for (t = 0; t < 100000; t++) {			/* 1 s */
++			st = __raw_readl(b + S_ALTSTAT) & 0xff;
++			if (!(st & ATA_BUSY))
++				break;
++			udelay(10);
++		}
++		if ((st & (ATA_BUSY | ATA_DRQ | ATA_ERR)) != ATA_DRQ)
++			return -1;
++		for (w = 0; w < 256; w++) {
++			if (fifo_word(c, STAT_READ))
++				return -1;
++			*buf++ = __raw_readl(b + S_DATA) & 0xffff;
++		}
++	}
++	(void)__raw_readl(b + S_REG(7));
++	return 0;
++}
++
++/* DMA read of n sectors in nseg segments (1 or 2, out of order) compared with PIO */
++static int lp_test(int c, u8 *list, u64 lba, int n, int nseg, u8 *ref, u8 *buf)
++{
++	u32 len = n << 9, l0 = nseg == 2 ? len >> 1 : len;
++	u8 *a0 = buf + (nseg == 2 ? 4096 : 0), *a1 = buf;
++	int t;
++	u8 st;
++
++	memset(buf, 0xa5, 8192);
++	padre_flush_dcache_range((unsigned long)buf, (unsigned long)buf + 8192);
++	lp_segment(list, __pa(nseg == 2 ? list + LPD_LEN : list), __pa(a0), l0,
++		   LPF_OWNER | LPF_SOP | LPF_DMAIN | (nseg == 2 ? 0 : (LPF_EOP | LPF_INTR0)),
++		   ATA_CMD_READ_EXT);
++	if (nseg == 2)
++		lp_segment(list + LPD_LEN, __pa(list), __pa(a1), len - l0,
++			   LPF_OWNER | LPF_DMAIN | LPF_EOP | LPF_INTR0, ATA_CMD_READ_EXT);
++	lp_head(list, lba, n);
++	lp_start(c, list, nseg);
++	for (t = 0; t < 100 && !(lp_rd(LP_ISTAT) & LP_BIT(c)); t++)	/* 1 s */
++		msleep(10);
++	if (!(lp_rd(LP_ISTAT) & LP_BIT(c))) {
++		padre_flush_dcache_range((unsigned long)list, (unsigned long)list + 2 * LPD_LEN);
++		pr_err(DRV_NAME ": [dma] channel %d: timeout (LP STAT=%02x CH_EN=%08x desc %08x %08x %08x %08x, SATA %02x)\n",
++		       c, lp_rd(LP_STAT) & 0xff, lp_rd(LP_CH_ENABLE), ((u32 *)list)[0],
++		       ((u32 *)list)[1], ((u32 *)list)[2], ((u32 *)list)[3],
++		       __raw_readl(SATA_BASE(c) + S_ALTSTAT) & 0xff);
++		return -1;
++	}
++	lp_wr(LP_IACK, LP_BIT(c));
++	padre_flush_dcache_range((unsigned long)buf, (unsigned long)buf + 8192);
++	st = __raw_readl(SATA_BASE(c) + S_REG(7)) & 0xff;
++	if (st & (ATA_BUSY | ATA_ERR | ATA_DRQ)) {
++		pr_err(DRV_NAME ": [dma] channel %d: ATA status %02x after the list\n", c, st);
++		return -2;
++	}
++	if (memcmp(a0, ref, l0) || memcmp(a1, ref + l0, len - l0)) {
++		pr_err(DRV_NAME ": [dma] channel %d: DMA differs from PIO (DMA %*ph / PIO %*ph)\n",
++		       c, 4, a0, 4, ref);
++		return -3;
++	}
++	return 0;
++}
++
++/* MBR (LBA 0, 1 sector), then 16 sectors in 2 segments (LBA 64) */
++static int lp_autotest(int c, u8 *list, u32 ffctrl0)
++{
++	static const struct { u64 lba; int n, seg; } e[] = { { 0, 1, 1 }, { 64, 16, 2 } };
++	unsigned long page = __get_free_pages(GFP_KERNEL, 2);	/* 16 KiB */
++	u8 *ref = (u8 *)page, *buf = (u8 *)page + 8192;
++	int i, r = 0;
++
++	if (!page)
++		return -ENOMEM;
++	for (i = 0; i < ARRAY_SIZE(e) && !r; i++) {
++		if (pio_read(c, e[i].lba, e[i].n, (u16 *)ref)) {
++			pr_err(DRV_NAME ": [dma] channel %d: reference PIO read failed\n", c);
++			r = -4;
++			break;
++		}
++		r = lp_test(c, list, e[i].lba, e[i].n, e[i].seg, ref, buf);
++	}
++	if (r && r != -4) {
++		lp_stop(c, ffctrl0);
++		return r;	/* page kept: the LP might still write to it */
++	}
++	free_pages(page, 2);
++	return r;
++}
++
++static const struct scsi_host_template padre_sht = {
++	ATA_BASE_SHT(DRV_NAME),
++	.sg_tablesize	= LP_MAX_SEG,
++	.dma_boundary	= 0xffffffff,
++	.max_sectors	= LP_MAX_SECT,
++};
++
++static struct ata_port_operations padre_ops = {
++	.inherits		= &ata_sff_port_ops,
++	.qc_defer		= padre_qc_defer,
++	.qc_prep		= padre_qc_prep,
++	.qc_issue		= padre_qc_issue,
++	.error_handler		= padre_error_handler,
++	.reset.softreset	= NULL,
++	.reset.hardreset	= padre_hardreset,
++	.scr_read		= padre_scr_read,
++	.scr_write		= padre_scr_write,
++	.sff_dev_select		= padre_dev_select,
++	.sff_set_devctl		= padre_set_devctl,
++	.sff_check_status	= padre_check_status,
++	.sff_check_altstatus	= padre_check_altstatus,
++	.sff_tf_load		= padre_tf_load,
++	.sff_tf_read		= padre_tf_read,
++	.sff_exec_command	= padre_exec_command,
++	.sff_data_xfer		= padre_data_xfer,
++	.sff_drain_fifo		= padre_drain_fifo,
++};
++
++/* Polled PIO (ATA_FLAG_PIO_POLLING); UDMA advertised only for channels
++ * whose DMA self-test passed (libata then picks READ/WRITE DMA EXT, served
++ * by the LP).
++ */
++static const struct ata_port_info padre_info_pio = {
++	.flags		= ATA_FLAG_SATA | ATA_FLAG_PIO_POLLING,
++	.pio_mask	= ATA_PIO4,
++	.port_ops	= &padre_ops,
++};
++
++static const struct ata_port_info padre_info_dma = {
++	.flags		= ATA_FLAG_SATA | ATA_FLAG_PIO_POLLING,
++	.pio_mask	= ATA_PIO4,
++	.udma_mask	= ATA_UDMA5,
++	.port_ops	= &padre_ops,
++};
++
++static int __init padre_sata_init(void)
++{
++	const struct ata_port_info *ppi[NCHAN_MAX + 1] = { };
++	struct platform_device_info pinfo = {
++		.name = DRV_NAME, .id = PLATFORM_DEVID_NONE,
++		.dma_mask = DMA_BIT_MASK(32),
++	};
++	struct platform_device *pdev;
++	struct ata_host *host;
++	struct padre_port *pps;
++	bool lp_ok;
++	int i, n, rc;
++
++	if (padre_disabled("sata"))
++		return 0;
++	pr_info("padre_sata: start\n");
++	switch (padre_boot_param.bond_option) {
++	case 0x42: n = 2; break;		/* Duo: "B" */
++	case 0x43: n = 1; break;
++	case 0x41: case 0x21: n = 4; break;
++	default:
++		pr_err(DRV_NAME ": bond_option %02x not supported\n",
++		       padre_boot_param.bond_option);
++		return -ENODEV;
++	}
++
++	pdev = platform_device_register_full(&pinfo);
++	if (IS_ERR(pdev))
++		return PTR_ERR(pdev);
++	pps = devm_kcalloc(&pdev->dev, n, sizeof(*pps), GFP_KERNEL);
++	if (!pps)
++		return -ENOMEM;
++
++	lp_ok = dma && !padre_disabled("dma") && (lp_rd(LP_STAT) & 0xff) == 1;
++	pr_info(DRV_NAME ": DMA %s (LP STAT=%02x version %04x)\n",
++		lp_ok ? "requested, self-test" : "no (PIO)", lp_rd(LP_STAT) & 0xff,
++		lp_rd(LP_VERSION) & 0xffff);
++	for (i = 0; i < n; i++) {
++		pps[i].list = (u8 *)devm_get_free_pages(&pdev->dev, GFP_KERNEL, 0);
++		if (!pps[i].list)
++			return -ENOMEM;
++		pps[i].ffctrl0 = __raw_readl(MC_FFCTRL(i));
++		pps[i].irq = padre_irq_virq(HWIRQ0 + i);
++		ppi[i] = &padre_info_pio;
++		if (!lp_ok)
++			continue;
++		if (link_ready(i)) {
++			pr_info(DRV_NAME ": channel %d: no disk ready, no self-test\n", i);
++			continue;
++		}
++		lp_chmap |= 1 << i;
++	}
++	for (i = 0; i < n && lp_ok; i++) {
++		if (!(lp_chmap & (1 << i)))
++			continue;
++		pr_info(DRV_NAME ": [dma] channel %d: FFCTRL=%08x, self-test\n", i, pps[i].ffctrl0);
++		rc = lp_autotest(i, pps[i].list, pps[i].ffctrl0);
++		dma_chan[i] = !rc;
++		pr_info(DRV_NAME ": [dma] channel %d: self-test %s (%d)\n", i,
++			rc ? "FAILED, channel in PIO" : "OK, DMA = PIO", rc);
++		if (!rc)
++			ppi[i] = &padre_info_dma;
++	}
++
++	host = ata_host_alloc_pinfo(&pdev->dev, ppi, n);
++	if (!host)
++		return -ENOMEM;
++	for (i = 0; i < n; i++) {
++		struct ata_port *ap = host->ports[i];
++
++		ap->private_data = &pps[i];
++		/* libata wants a non-NULL command address; never used
++		 * directly (all SFF operations are implemented here)
++		 */
++		ap->ioaddr.cmd_addr = SATA_BASE(i);
++		ata_port_desc(ap, "sata 0x%08lx irq %d%s", (unsigned long)SATA_BASE(i),
++			      HWIRQ0 + i, dma_chan[i] ? " dma LP" : "");
++	}
++	rc = ata_host_start(host);
++	if (rc)
++		return rc;
++	/* ponytail: IRQ 32+n not requested (everything is polled); padre_sata_irq
++	 * stays ready in case non-data commands should one day use the IRQ
++	 */
++	(void)padre_sata_irq;
++	if (lp_chmap) {
++		rc = devm_request_irq(&pdev->dev, padre_irq_virq(LP_HWIRQ), padre_lp_irq, 0,
++				      DRV_NAME "-lp", host);
++		if (rc)
++			return rc;
++	}
++	pr_info("padre_sata: %d channels, IRQs requested, registering with libata\n", n);
++	rc = ata_host_register(host, &padre_sht);
++	pr_info("padre_sata: done (%d)\n", rc);
++	if (!rc && read_only)
++		pr_warn(DRV_NAME ": read-only\n");
++	return rc;
++}
++late_initcall(padre_sata_init);

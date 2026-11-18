@@ -1,0 +1,215 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 06/23] sparc: Padre: emulate the whole FPU
+
+The Padre has no FPU. As in the 2.6.17 kernel, PSR.EF is never set and
+every floating-point instruction traps to do_fpd_trap(), which runs
+math-emu on current's thread.float_regs/fsr (SIGFPE with the right
+code on an exception). math-emu also emulates the floating-point loads,
+stores and branches, and sfp-machine uses current instead of
+last_task_used_math, which is never set (NULL dereference on the first
+arithmetic FPop).
+---
+ arch/sparc/include/asm/sfp-machine_32.h |  10 ++-
+ arch/sparc/kernel/traps_32.c            |  32 ++++++++
+ arch/sparc/math-emu/math_32.c           | 103 ++++++++++++++++++++++++
+ 3 files changed, 142 insertions(+), 3 deletions(-)
+
+diff --git a/arch/sparc/include/asm/sfp-machine_32.h b/arch/sparc/include/asm/sfp-machine_32.h
+index 838c9d58f3b4d628127b95319112c8fe59ad01b9..572a1a48b06b8bd3ba954ee96418dab0a6422cfc 100644
+--- a/arch/sparc/include/asm/sfp-machine_32.h
++++ b/arch/sparc/include/asm/sfp-machine_32.h
+@@ -179,9 +179,13 @@
+ extern struct task_struct *last_task_used_math;
+ #endif
+ 
++/* Padre (no FPU): emulation always runs for current, and
++ * last_task_used_math is never set (no fpsave/fpload): it was NULL and
++ * the first arithmetic FPop dereferenced NULL in the kernel.
++ */
+ /* Obtain the current rounding mode. */
+ #ifndef FP_ROUNDMODE
+-#ifdef CONFIG_SMP
++#if defined(CONFIG_SMP) || defined(CONFIG_SPARC_PADRE)
+ #define FP_ROUNDMODE	((current->thread.fsr >> 30) & 0x3)
+ #else
+ #define FP_ROUNDMODE	((last_task_used_math->thread.fsr >> 30) & 0x3)
+@@ -197,13 +201,13 @@ extern struct task_struct *last_task_used_math;
+ 
+ #define FP_HANDLE_EXCEPTIONS return _fex
+ 
+-#ifdef CONFIG_SMP
++#if defined(CONFIG_SMP) || defined(CONFIG_SPARC_PADRE)
+ #define FP_INHIBIT_RESULTS ((current->thread.fsr >> 23) & _fex)
+ #else
+ #define FP_INHIBIT_RESULTS ((last_task_used_math->thread.fsr >> 23) & _fex)
+ #endif
+ 
+-#ifdef CONFIG_SMP
++#if defined(CONFIG_SMP) || defined(CONFIG_SPARC_PADRE)
+ #define FP_TRAPPING_EXCEPTIONS ((current->thread.fsr >> 23) & 0x1f)
+ #else
+ #define FP_TRAPPING_EXCEPTIONS ((last_task_used_math->thread.fsr >> 23) & 0x1f)
+diff --git a/arch/sparc/kernel/traps_32.c b/arch/sparc/kernel/traps_32.c
+index bb149f6cc34b8b2ffc9d9191a4af6f9a3b80f16b..4aefde28968d8dc210d1fc844edac1193fe120ec 100644
+--- a/arch/sparc/kernel/traps_32.c
++++ b/arch/sparc/kernel/traps_32.c
+@@ -161,6 +161,38 @@ void do_fpd_trap(struct pt_regs *regs, unsigned long pc, unsigned long npc,
+ 	if(psr & PSR_PS)
+ 		die_if_kernel("Kernel gets FloatingPenguinUnit disabled trap", regs);
+ 
++#ifdef CONFIG_SPARC_PADRE
++	/* Padre: no FPU. As in the 2.6.17 kernel (arch/padre/kernel/traps.c),
++	 * PSR.EF is never set and every floating-point instruction is emulated
++	 * (math-emu/math_32.c) on the state kept in thread.float_regs/fsr.
++
++	 */
++	if (!used_math()) {
++		memset(current->thread.float_regs, 0, sizeof(current->thread.float_regs));
++		current->thread.fsr = 0;
++		current->thread.fpqdepth = 0;
++		set_used_math();
++	}
++	if (!do_mathemu(regs, current)) {
++		unsigned long fsr = current->thread.fsr;
++		int code = FPE_FLTUNK;
++
++		if ((fsr & 0x1c000) == (1 << 14)) {
++			if (fsr & 0x10)
++				code = FPE_FLTINV;
++			else if (fsr & 0x08)
++				code = FPE_FLTOVF;
++			else if (fsr & 0x04)
++				code = FPE_FLTUND;
++			else if (fsr & 0x02)
++				code = FPE_FLTDIV;
++			else if (fsr & 0x01)
++				code = FPE_FLTRES;
++		}
++		force_sig_fault(SIGFPE, code, (void __user *)pc);
++	}
++	return;
++#endif
+ 	put_psr(get_psr() | PSR_EF);    /* Allow FPU ops. */
+ 	regs->psr |= PSR_EF;
+ #ifndef CONFIG_SMP
+diff --git a/arch/sparc/math-emu/math_32.c b/arch/sparc/math-emu/math_32.c
+index 55c5df6f15736ef93121aeb3a15e90d2345f4acd..c3b91b8bc97a1c1e7ea3361541c5ad75dda7832c 100644
+--- a/arch/sparc/math-emu/math_32.c
++++ b/arch/sparc/math-emu/math_32.c
+@@ -132,6 +132,102 @@
+ 
+ static int do_one_mathemu(u32 insn, unsigned long *fsr, unsigned long *fregs);
+ 
++#ifdef CONFIG_SPARC_PADRE
++/* Padre (no FPU): also emulate floating-point loads/stores and
++ * branches, after arch/padre/math-emu/math.c from the GPL 2.6.17 kernel
++ * (memory accesses through get_user/put_user).
++ */
++unsigned long safe_compute_effective_address(struct pt_regs *, unsigned int);
++
++#define PADRE_LDF	0x20
++#define PADRE_LDFSR	0x21
++#define PADRE_LDDF	0x23
++#define PADRE_STF	0x24
++#define PADRE_STFSR	0x25
++#define PADRE_STDF	0x27
++#define PADRE_FBA	0x46
++
++#define F_E	0x1
++#define F_L	0x2
++#define F_G	0x4
++#define F_U	0x8
++
++static const unsigned long padre_fb_mask[] = {
++	0, F_L | F_G, F_L, F_G, 0x10, F_U | F_E, F_U | F_G | F_E, F_U | F_L | F_E,
++	F_G | F_L | F_U, F_U | F_L, F_U | F_G, F_U, F_E, F_G | F_E, F_L | F_E,
++	F_E | F_L | F_G
++};
++
++static int padre_ldst_mathemu(u32 insn, struct pt_regs *regs, unsigned long *fregs,
++			      unsigned long *fsr)
++{
++	unsigned long freg = (insn >> 25) & 0x1f;
++	u32 __user *addr = (u32 __user *)safe_compute_effective_address(regs, insn);
++	u32 v;
++
++	switch ((insn >> 19) & 0x3f) {
++	case PADRE_LDDF:
++		if (get_user(v, addr + 1))
++			return 0;
++		fregs[(freg + 1) & 31] = v;
++		fallthrough;
++	case PADRE_LDF:
++		if (get_user(v, addr))
++			return 0;
++		fregs[freg] = v;
++		break;
++	case PADRE_LDFSR:
++		if (get_user(v, addr))
++			return 0;
++		*fsr = v;
++		break;
++	case PADRE_STDF:
++		if (put_user((u32)fregs[(freg + 1) & 31], addr + 1))
++			return 0;
++		fallthrough;
++	case PADRE_STF:
++		if (put_user((u32)fregs[freg], addr))
++			return 0;
++		break;
++	case PADRE_STFSR:
++		if (put_user((u32)*fsr, addr))
++			return 0;
++		break;
++	default:
++		return 0;
++	}
++	regs->pc = regs->npc;
++	regs->npc += 4;
++	return 1;
++}
++
++static int padre_fbranch_mathemu(u32 insn, unsigned long fsr, struct pt_regs *regs)
++{
++	int disp22 = ((insn & 0x1fffff) - (insn & 0x200000)) << 2;
++	unsigned long annul = insn & 0x20000000;
++	unsigned long fcc = (fsr >> 10) & 0x3, temp;
++	unsigned long op = (insn >> 22) & 0x7f;
++
++	fcc = (1 << fcc) | 0x10;
++	temp = ((op & 0xf) == 0x6) ? 0 : 8;
++	temp += (op >> 4) & 0xf;
++
++	if (fcc & padre_fb_mask[temp & 15]) {
++		temp = regs->pc + disp22;
++		regs->pc = regs->npc;
++		if (op == PADRE_FBA && annul) {
++			regs->pc = temp;
++			temp += 4;
++		}
++		regs->npc = temp;
++	} else {
++		regs->pc = annul ? regs->npc + 4 : regs->npc;
++		regs->npc = regs->pc + 4;
++	}
++	return 1;
++}
++#endif
++
+ /* Unlike the Sparc64 version (which has a struct fpustate), we
+  * pass the taskstruct corresponding to the task which currently owns the
+  * FPU. This is partly because we don't have the fpustate struct and
+@@ -180,6 +276,13 @@ int do_mathemu(struct pt_regs *regs, struct task_struct *fpt)
+ 		printk("precise trap at %08lx\n", regs->pc);
+ #endif
+ 		if (!get_user(insn, (u32 __user *) regs->pc)) {
++#ifdef CONFIG_SPARC_PADRE
++			if ((insn & 0xc0000000) == 0xc0000000)
++				return padre_ldst_mathemu(insn, regs, fpt->thread.float_regs,
++							  &fpt->thread.fsr);
++			if ((insn & 0xc0000000) == 0)
++				return padre_fbranch_mathemu(insn, fpt->thread.fsr, regs);
++#endif
+ 			retcode = do_one_mathemu(insn, &fpt->thread.fsr, fpt->thread.float_regs);
+ 			if (retcode) {
+ 				/* in this case we need to fix up PC & nPC */

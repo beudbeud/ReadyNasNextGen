@@ -1,0 +1,106 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 03/23] sparc: Padre: emulate the user "flush" instruction
+
+"flush" traps on the Padre (2.6.17 emulated it). The uClibc dynamic
+loader uses it after rewriting the PLT: the write-back D-cache must be
+written out and the I-cache invalidated, otherwise the patched code is
+not seen (segfault in _dl_linux_resolver). padre_mm.flush= selects the
+whole cache (default), the target line only, or nothing.
+---
+ arch/sparc/kernel/entry.S | 18 ++++++++++++++
+ arch/sparc/mm/padre_mm.c  | 51 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 69 insertions(+)
+
+diff --git a/arch/sparc/kernel/entry.S b/arch/sparc/kernel/entry.S
+index 31d74ba228866e609919bfd1429295236e8390ab..a17c92922b3af9d877d207f4420870c7c4167883 100644
+--- a/arch/sparc/kernel/entry.S
++++ b/arch/sparc/kernel/entry.S
+@@ -454,8 +454,26 @@ bad_instruction:
+ 	RESTORE_ALL
+ 
+ 1:	/* unimplemented flush - just skip */
++#ifdef CONFIG_SPARC_PADRE
++	/* Padre: "flush" traps here (as in 2.6.17, which emulated it). The
++	 * dynamic loader uses it after rewriting the PLT: the D-cache
++	 * (write-back) must really be written out and the I-cache invalidated,
++	 * otherwise the patched code is not seen (segfault in
++	 * _dl_linux_resolver).
++	 */
++	SAVE_ALL
++
++	wr	%l0, PSR_ET, %psr		! re-enable traps
++	WRITE_PAUSE
++
++	call	padre_user_flush
++	 add	%sp, STACKFRAME_SZ, %o0
++
++	RESTORE_ALL
++#else
+ 	jmpl	%l2, %g0
+ 	 rett	%l2 + 4
++#endif
+ 
+ 	.align	4
+ 	.globl	priv_instruction
+diff --git a/arch/sparc/mm/padre_mm.c b/arch/sparc/mm/padre_mm.c
+index 99e9c47fca0a30d242cbe31ae21fb84c356becc8..910390bb91036f80c0c7b040234646b0fe981f63 100644
+--- a/arch/sparc/mm/padre_mm.c
++++ b/arch/sparc/mm/padre_mm.c
+@@ -155,6 +155,57 @@ void padre_flush_icache_all(void)
+ 	local_irq_restore(flags);
+ }
+ 
++/* "flush" instruction (bad_instruction trap, like the 2.6.17 "soft
++ * implemented flush"): the D-cache is write-back and the I-cache does not
++ * snoop it; rewritten code (ld-uClibc PLT, patched to execute flush) is
++ * only seen once the D line is written back and the I-cache invalidated.
++ * padre_mm.flush (command line or /sys/module/padre_mm/parameters/flush,
++ * writable at run time):
++ *   1 (default): whole D-cache written back + I-cache invalidated, without
++ *       reading user registers or touching the windows (the simplest);
++ *   2: only the target D line (decoded address, windows flushed to the
++ *       stack like the FPU emulation); test mode (faster, less simple);
++ *   0: instruction skipped, nothing done (original sparc32 behaviour,
++ *       diagnostics only: the PLT goes stale again).
++ * ponytail: whole I-cache invalidated (MBIST); per line (ITAG) if the cost matters.
++ */
++static int padre_flush_mode = 1;
++module_param_named(flush, padre_flush_mode, int, 0644);
++
++asmlinkage void padre_user_flush(struct pt_regs *regs)
++{
++	struct mm_struct *mm = current->mm;
++	unsigned long ea, k;
++	u32 insn;
++	pmd_t *pmd;
++	pte_t pte;
++
++	if (!padre_flush_mode)
++		goto out;
++	if (padre_flush_mode != 2 || (regs->psr & PSR_PS) || !mm ||
++	    get_user(insn, (u32 __user *)regs->pc))
++		goto all;
++	ea = safe_compute_effective_address(regs, insn) & ~7UL;
++	if (ea >= PAGE_OFFSET)
++		goto all;
++	pmd = pmd_off(mm, ea);
++	if (pmd_none(*pmd))
++		goto all;
++	pte = READ_ONCE(*((pte_t *)pmd_page_vaddr(*pmd) + pte_index(ea)));
++	if (!pte_present(pte) || !pfn_valid(pte_pfn(pte)))
++		goto all;
++	k = (unsigned long)__va(pte_pfn(pte) << PAGE_SHIFT) + (ea & ~PAGE_MASK);
++	padre_clean_dcache_range(k, k + 8);
++	goto icache;
++all:
++	padre_flush_dcache_all();
++icache:
++	padre_flush_icache_all();
++out:
++	regs->pc = regs->npc;
++	regs->npc += 4;
++}
++
+ void padre_flush_icache_range(unsigned long start, unsigned long end)
+ {
+ 	padre_clean_dcache_range(start, end);

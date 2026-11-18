@@ -1,0 +1,420 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 22/23] padre_gmac: NAPI, GRO and receive checksum by the engine
+
+Receive and transmit completion move from the hard interrupt to a NAPI
+poll: the interrupt masks the M4 engine and schedules the poll, which
+cleans the transmit ring, receives up to the budget through
+napi_gro_receive (buffers from napi_alloc_skb) and unmasks.
+
+The GMT block of the DJ engine checks the TCP/UDP checksum of received
+IPv4 frames (GMAC_CTRL bit 22, GMT mode 4, result in bits 17-22 of the
+descriptor, as in the 2.6.17 driver): good frames that are not IP
+fragments get CHECKSUM_UNNECESSARY (ethtool -K rx); the others go to the
+stack, which checks them. padre_gmac.csum_verify=1 (also in
+/sys/module/padre_gmac/parameters) checks every frame in software and
+counts disagreements; ethtool -S shows the counters.
+
+No transmit checksum nor scatter-gather: through the engine's meta
+command descriptors, the checksum state of the engine drifted from the
+one the driver asked for (seed sent unfilled, ICMP checksum zeroed).
+
+Measured on the NAS (500 MB over SMB3 from a PC on Wi-Fi): unsigned
+write 9.0 MiB/s and 0.10-0.12 CPU s/MiB instead of 6.2-7.5 MiB/s and
+0.13-0.15; read unchanged (bound by the transmit path).
+---
+ drivers/platform/padre/padre_gmac.c | 197 ++++++++++++++++++++++------
+ 1 file changed, 157 insertions(+), 40 deletions(-)
+
+diff --git a/drivers/platform/padre/padre_gmac.c b/drivers/platform/padre/padre_gmac.c
+index 9af11075e851c4b8a6706cce4dca98988e1ee5b9..ffe66784e1a451935cba792b4cb3b117604f8045 100644
+--- a/drivers/platform/padre/padre_gmac.c
++++ b/drivers/platform/padre/padre_gmac.c
+@@ -9,7 +9,9 @@
+  * MAC core) to 6.18: net_device_ops, MAC taken from boot_param, descriptors
+  * placed directly in the S3 SRAM (0x7000_1000, uncached, like the
+  * init_eth_desc allocator of the 2.6.17 kernel: 256 x 16 bytes).
+- * Otherwise the same behaviour: no NAPI, no hardware checksum.
++ * Receive and transmit completion in NAPI (GRO); TCP/UDP checksum of the
++ * received frames checked by the engine (GMT block). No transmit checksum:
++ * the engine's "meta" command descriptors gave wrong checksums on the NAS.
+  *
+  * Copyright (C) 2026 the ReadyNasNextGen authors
+  */
+@@ -22,6 +24,9 @@
+ #include <linux/skbuff.h>
+ #include <linux/ethtool.h>
+ #include <linux/mii.h>
++#include <linux/ip.h>
++#include <linux/udp.h>
++#include <net/ip.h>
+ #include <linux/interrupt.h>
+ #include <linux/workqueue.h>
+ #include <linux/delay.h>
+@@ -54,11 +59,16 @@
+ #define   C_RXEN	(1u << 28)
+ #define   C_PROMISC	(1u << 27)
+ #define   C_HASH	(1u << 25)
++#define   C_RXCSUM	(1u << 22)	/* receive checksum check */
++#define   C_TXCSUM	(1u << 21)	/* transmit insertion, unused without meta */
+ #define   C_BIT14	(1u << 14)
+ #define   C_BUSY	(1u << 12)
+ #define   C_PHYRST	(1u << 10)
+ #define   C_RXFLUSH	(1u << 6)
+-#define   C_INIT	0x25000300	/* out of reset, hardware checksum off */
++/* out of reset; C_TXCSUM as measured on the NAS (2.6.17 "level 1"): it
++ * changes nothing until a meta descriptor turns the insertion on
++ */
++#define   C_INIT	(0x25000300 | C_RXCSUM | C_TXCSUM)
+ #define G_HASH_LO	0x404
+ #define G_HASH_HI	0x408
+ #define G_MCX_CMD	0x418		/* [31:16] register, 2 = done, 1 = read, 0 = go */
+@@ -112,6 +122,7 @@
+ #define   I_TX		0x2
+ 
+ #define GMT0		0x40		/* GMT block (in DJ), mode */
++#define   GMT_CSUM	4		/* checksum engine on */
+ #define MC_RX		0		/* MC DMA channels of port 0 */
+ #define MC_TX		1
+ 
+@@ -128,6 +139,13 @@ struct m4d {
+ #define D_INTR0		(1u << 27)	/* interrupt bank 0 (GM0) */
+ #define D_EOP		(1u << 25)
+ #define D_RXOVR		(1u << 23)	/* ctl on RX: FIFO overflow */
++/* ctl on RX, checksum result: 17/19/21 one of them = L4 checked, 22 = IPv4,
++ * 18 = IP checksum error, 20 = L4 checksum error (GMAC description §5.1)
++ */
++#define D_CS_L4		0x2a0000
++#define D_CS_ST		0x540000
++#define D_CS_OK		0x400000
++#define D_CS_IPERR	0x040000
+ #define S_RXOK		(1u << 23)	/* stat on RX: frame received correctly */
+ #define S_TXUND		(1u << 31)	/* stat on TX: FIFO underrun */
+ 
+@@ -136,6 +154,7 @@ struct m4d {
+ 
+ #define RING		128
+ #define RMASK		(RING - 1)
++#define TX_WAKE		16
+ #define RXBUF		1536
+ #define RXALLOC		(RXBUF + 64)
+ #define GM_HWIRQ	41
+@@ -150,6 +169,11 @@ static struct net_device *gdev;
+ static volatile struct m4d *rxd[RING], *txd[RING];
+ static struct sk_buff *rxs[RING], *txs[RING];
+ static unsigned int rx_cur, tx_head, tx_tail;
++static struct napi_struct gnapi;
++static unsigned long rx_csum_ok, rx_csum_bad, rx_csum_wrong, rx_csum_missed;
++/* check the engine against a software checksum, without trusting it */
++static bool csum_verify;
++module_param(csum_verify, bool, 0644);
+ static int gphy = -1, glink, gspeed, gfdx, gbusy;
+ static unsigned int gm_irq_nr;
+ static DEFINE_SPINLOCK(glock);
+@@ -393,9 +417,10 @@ static void set_multicast(struct net_device *dev)
+ 
+ /* ---------- rings ---------- */
+ 
+-static struct sk_buff *rx_alloc(void)
++static struct sk_buff *rx_alloc(struct napi_struct *napi)
+ {
+-	struct sk_buff *skb = dev_alloc_skb(RXALLOC);
++	struct sk_buff *skb = napi ? napi_alloc_skb(napi, RXALLOC) :
++				     netdev_alloc_skb(gdev, RXALLOC);
+ 	unsigned long d;
+ 
+ 	if (!skb)
+@@ -469,7 +494,7 @@ static void hw_start(struct net_device *dev)
+ 
+ 	DJ_set(GMT0, 2);
+ 	mac_reset();
+-	DJ_set(GMT0, 0);			/* no hardware checksum */
++	DJ_set(GMT0, GMT_CSUM);
+ 
+ 	M4_set(M_TX_CTRL, 8);
+ 	M4_set(M_RX_CTRL, 8);
+@@ -482,13 +507,54 @@ static void hw_start(struct net_device *dev)
+ 	dma_start();
+ }
+ 
+-/* ---------- receive and transmit (interrupt) ---------- */
++/* ---------- receive and transmit (NAPI) ---------- */
+ 
+-static void rx_poll(struct net_device *dev)
++/* csum_verify: software check of an unfragmented TCP/UDP over IPv4 frame,
++ * 1 = good, 0 = bad, -1 = not checkable
++ */
++static int sw_csum(struct sk_buff *skb)
++{
++	const struct iphdr *iph = (const struct iphdr *)skb->data;
++	unsigned int ihl = iph->ihl * 4, len = ntohs(iph->tot_len);
++
++	if (skb->protocol != htons(ETH_P_IP) || ip_is_fragment(iph) ||
++	    (iph->protocol != IPPROTO_TCP && iph->protocol != IPPROTO_UDP) ||
++	    ihl < 20 || len < ihl + 8 || len > skb->len)
++		return -1;
++	if (iph->protocol == IPPROTO_UDP && !((const struct udphdr *)(skb->data + ihl))->check)
++		return -1;
++	return !csum_tcpudp_magic(iph->saddr, iph->daddr, len - ihl, iph->protocol,
++				  skb_checksum(skb, ihl, len - ihl, 0));
++}
++
++/* the engine checked the TCP/UDP checksum of an unfragmented IPv4 frame */
++static bool rx_csum(struct net_device *dev, struct sk_buff *skb, u32 ctl)
++{
++	const struct iphdr *iph = (const struct iphdr *)skb->data;
++	bool ok = !(ctl & D_CS_IPERR) && (ctl & D_CS_ST) == D_CS_OK && (ctl & D_CS_L4);
++
++	if (ok)
++		rx_csum_ok++;
++	else if (ctl & (D_CS_IPERR | D_CS_L4))
++		rx_csum_bad++;		/* the stack checks again and counts */
++	if (unlikely(csum_verify)) {
++		int sw = sw_csum(skb);
++
++		if (ok && sw == 0)
++			rx_csum_wrong++;
++		else if (!ok && sw == 1)
++			rx_csum_missed++;
++		return false;		/* the stack checks everything */
++	}
++	return ok && (dev->features & NETIF_F_RXCSUM) && skb->protocol == htons(ETH_P_IP) &&
++	       !ip_is_fragment(iph);
++}
++
++static int rx_poll(struct net_device *dev, int budget)
+ {
+ 	int n;
+ 
+-	for (n = 0; n < RING; n++) {
++	for (n = 0; n < budget; n++) {
+ 		volatile struct m4d *d = rxd[rx_cur];
+ 		u32 ctl = d->ctl, st = d->stat, len = st & 0xffff;
+ 		struct sk_buff *skb = rxs[rx_cur], *nskb;
+@@ -503,7 +569,7 @@ static void rx_poll(struct net_device *dev)
+ 		}
+ 		if ((ctl & (D_ERR | D_RXOVR)) || !(st & S_RXOK) || len < 60 || len > RXBUF - 2) {
+ 			dev->stats.rx_errors++;
+-		} else if (!(nskb = rx_alloc())) {
++		} else if (!(nskb = rx_alloc(&gnapi))) {
+ 			dev->stats.rx_dropped++;
+ 		} else {
+ 			padre_flush_dcache_range((unsigned long)skb->data,
+@@ -511,9 +577,11 @@ static void rx_poll(struct net_device *dev)
+ 			skb_reserve(skb, 2);
+ 			skb_put(skb, len - 4);	/* without the CRC */
+ 			skb->protocol = eth_type_trans(skb, dev);	/* also sets skb->dev */
++			if (rx_csum(dev, skb, ctl))
++				skb->ip_summed = CHECKSUM_UNNECESSARY;
+ 			dev->stats.rx_packets++;
+ 			dev->stats.rx_bytes += len - 4;
+-			netif_rx(skb);
++			napi_gro_receive(&gnapi, skb);
+ 			rxs[rx_cur] = nskb;
+ 		}
+ 		rx_arm(rx_cur);
+@@ -523,10 +591,17 @@ static void rx_poll(struct net_device *dev)
+ 		M4_set(M_FLO_CNT, n);	/* receive credits (?), like the original */
+ 	if (M4_get(M_RX_CTRL) & 2)
+ 		M4_set(M_RX_CTRL, 1);
++	return n;
++}
++
++static unsigned int tx_free(void)
++{
++	return (tx_tail - tx_head - 1) & RMASK;
+ }
+ 
+-static void tx_clean(struct net_device *dev)
++static void tx_clean(struct net_device *dev, int budget)
+ {
++	spin_lock(&glock);		/* uniprocessor: against reset_task */
+ 	while (tx_tail != tx_head && !(txd[tx_tail]->ctl & D_OWN)) {
+ 		struct sk_buff *skb = txs[tx_tail];
+ 
+@@ -538,52 +613,61 @@ static void tx_clean(struct net_device *dev)
+ 			dev->stats.tx_packets++;
+ 			dev->stats.tx_bytes += skb->len;
+ 		}
+-		dev_kfree_skb_any(skb);
++		napi_consume_skb(skb, budget);
+ 		txs[tx_tail] = NULL;
+ 		tx_tail = (tx_tail + 1) & RMASK;
+ 	}
+-	if (netif_queue_stopped(dev) && ((tx_tail - tx_head - 1) & RMASK) > 16)
++	if (netif_queue_stopped(dev) && tx_free() > TX_WAKE)
+ 		netif_wake_queue(dev);
++	spin_unlock(&glock);
+ }
+ 
+-static irqreturn_t gm_irq(int irq, void *dev_id)
++static int gm_poll(struct napi_struct *napi, int budget)
+ {
+-	struct net_device *dev = dev_id;
+-	int i, done = 0;
+-	u32 p;
++	struct net_device *dev = napi->dev;
++	int done;
+ 
+-	for (i = 0; i < 8; i++) {
+-		p = M4_get(M_IPEND) & (I_RX | I_TX);
+-		if (!p)
+-			break;
+-		done = 1;
+-		M4_set(M_ICLR, p);		/* acknowledge before handling */
+-		if (p & I_TX) {
+-			spin_lock(&glock);
+-			tx_clean(dev);
+-			spin_unlock(&glock);
++	tx_clean(dev, budget);
++	done = rx_poll(dev, budget);
++	if (done < budget && napi_complete_done(napi, done)) {
++		M4_set(M_IMASK, I_RX | I_TX);
++		/* work that came while the interrupt was masked */
++		if ((!(rxd[rx_cur]->ctl & D_OWN) ||
++		     (tx_tail != tx_head && !(txd[tx_tail]->ctl & D_OWN))) &&
++		    napi_schedule_prep(napi)) {
++			M4_set(M_IMASK, 0);
++			__napi_schedule(napi);
+ 		}
+-		if (p & I_RX)
+-			rx_poll(dev);
+ 	}
+-	return IRQ_RETVAL(done);
++	return done;
++}
++
++static irqreturn_t gm_irq(int irq, void *dev_id)
++{
++	u32 p = M4_get(M_IPEND) & (I_RX | I_TX);
++
++	if (!p)
++		return IRQ_NONE;
++	M4_set(M_IMASK, 0);		/* until the poll is over */
++	M4_set(M_ICLR, p);
++	napi_schedule(&gnapi);
++	return IRQ_HANDLED;
+ }
+ 
+ static netdev_tx_t gm_xmit(struct sk_buff *skb, struct net_device *dev)
+ {
++	unsigned long a = (unsigned long)skb->data;
+ 	volatile struct m4d *d;
+-	unsigned long f, a;
+ 
+-	if (skb->len > RXBUF || skb_linearize(skb)) {
++	if (skb->len > RXBUF) {
+ 		dev->stats.tx_dropped++;
+ 		dev_kfree_skb_any(skb);
+ 		return NETDEV_TX_OK;
+ 	}
+-	a = (unsigned long)skb->data;
+-	spin_lock_irqsave(&glock, f);
+-	if (((tx_tail - tx_head - 1) & RMASK) == 0) {
++	spin_lock(&glock);		/* called with bottom halves off */
++	if (!tx_free()) {
+ 		netif_stop_queue(dev);
+-		spin_unlock_irqrestore(&glock, f);
++		spin_unlock(&glock);
+ 		return NETDEV_TX_BUSY;
+ 	}
+ 	padre_clean_dcache_range(a, a + skb->len);	/* the DMA reads memory */
+@@ -593,12 +677,12 @@ static netdev_tx_t gm_xmit(struct sk_buff *skb, struct net_device *dev)
+ 	d->stat = 0;
+ 	d->ctl = D_OWN | D_SOP | D_EOP | D_INTR0 | skb->len;
+ 	tx_head = (tx_head + 1) & RMASK;
+-	if (((tx_tail - tx_head - 1) & RMASK) == 0)
++	if (!tx_free())
+ 		netif_stop_queue(dev);
+ 	if (M4_get(M_TX_CTRL) & 2)
+ 		M4_set(M_TX_CTRL, 1);	/* restart a stopped channel */
+ 	netif_trans_update(dev);
+-	spin_unlock_irqrestore(&glock, f);
++	spin_unlock(&glock);
+ 	return NETDEV_TX_OK;
+ }
+ 
+@@ -672,11 +756,13 @@ static void reset_task(struct work_struct *unused)
+ 	netdev_warn(gdev, "transmit timeout, resetting (ctrl=%08x tx=%u/%u)\n",
+ 		    GM_get(G_CTRL), tx_tail, tx_head);
+ 	disable_irq(gm_irq_nr);
++	napi_disable(&gnapi);
+ 	netif_stop_queue(gdev);
+ 	dma_stop();
+ 	tx_drop();
+ 	hw_start(gdev);
+ 	glink = 0;			/* link_poll redoes speed/duplex */
++	napi_enable(&gnapi);
+ 	enable_irq(gm_irq_nr);
+ 	netif_wake_queue(gdev);
+ }
+@@ -708,7 +794,7 @@ static int gm_open(struct net_device *dev)
+ 
+ 	M4_set(M_IMASK, 0);
+ 	for (i = 0; i < RING; i++)
+-		if (!(rxs[i] = rx_alloc())) {
++		if (!(rxs[i] = rx_alloc(NULL))) {
+ 			rx_free();
+ 			return -ENOMEM;
+ 		}
+@@ -719,6 +805,7 @@ static int gm_open(struct net_device *dev)
+ 	}
+ 	glink = 0;
+ 	netif_carrier_off(dev);
++	napi_enable(&gnapi);
+ 	hw_start(dev);
+ 	netif_start_queue(dev);
+ 	schedule_delayed_work(&link_work, 1);
+@@ -732,6 +819,7 @@ static int gm_close(struct net_device *dev)
+ 	netif_stop_queue(dev);
+ 	cancel_delayed_work_sync(&link_work);
+ 	cancel_work_sync(&reset_work);
++	napi_disable(&gnapi);
+ 	dma_stop();
+ 	free_irq(gm_irq_nr, dev);
+ 	for (n = 0; n < 10 && (M4_get(M_RX_CTRL) & 2); n++)
+@@ -793,8 +881,34 @@ static int gm_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
+ 	return -EOPNOTSUPP;
+ }
+ 
++static const char gm_stat_names[][ETH_GSTRING_LEN] = {
++	"rx_csum_ok", "rx_csum_bad", "rx_csum_wrong", "rx_csum_missed",
++};
++
++static int gm_sset_count(struct net_device *dev, int sset)
++{
++	return sset == ETH_SS_STATS ? ARRAY_SIZE(gm_stat_names) : -EOPNOTSUPP;
++}
++
++static void gm_get_strings(struct net_device *dev, u32 sset, u8 *buf)
++{
++	if (sset == ETH_SS_STATS)
++		memcpy(buf, gm_stat_names, sizeof(gm_stat_names));
++}
++
++static void gm_get_ethtool_stats(struct net_device *dev, struct ethtool_stats *st, u64 *v)
++{
++	v[0] = rx_csum_ok;
++	v[1] = rx_csum_bad;
++	v[2] = rx_csum_wrong;
++	v[3] = rx_csum_missed;
++}
++
+ static const struct ethtool_ops gm_ethtool = {
+-	.get_link = ethtool_op_get_link,
++	.get_link		= ethtool_op_get_link,
++	.get_sset_count		= gm_sset_count,
++	.get_strings		= gm_get_strings,
++	.get_ethtool_stats	= gm_get_ethtool_stats,
+ };
+ 
+ static const struct net_device_ops gm_ops = {
+@@ -868,6 +982,9 @@ static int __init gm_init(void)
+ 	dev->netdev_ops = &gm_ops;
+ 	dev->ethtool_ops = &gm_ethtool;
+ 	dev->watchdog_timeo = 5 * HZ;
++	dev->hw_features = NETIF_F_RXCSUM;
++	dev->features = NETIF_F_RXCSUM;
++	netif_napi_add(dev, &gnapi, gm_poll);
+ 	INIT_DELAYED_WORK(&link_work, link_poll);
+ 	INIT_WORK(&reset_work, reset_task);
+ 

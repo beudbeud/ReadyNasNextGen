@@ -1,0 +1,36 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 05/23] sparc: math-emu: fix the fmovs/fabss/fnegs result
+
+The instruction type of FMOVS/FABSS/FNEGS (r=1, no packing) makes
+do_one_mathemu() write rd->s = IR at the end, so the result computed
+straight into rd->s was overwritten by an uninitialised IR. Compute it
+into IR instead. Harmless with a real FPU (these are never emulated),
+fatal on a CPU without one: uClibc printf("%f") copies its doubles with
+fmovs.
+---
+ arch/sparc/math-emu/math_32.c | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/arch/sparc/math-emu/math_32.c b/arch/sparc/math-emu/math_32.c
+index d5beec856146088e06a77bf59df49145203df10f..55c5df6f15736ef93121aeb3a15e90d2345f4acd 100644
+--- a/arch/sparc/math-emu/math_32.c
++++ b/arch/sparc/math-emu/math_32.c
+@@ -449,9 +449,15 @@ static int do_one_mathemu(u32 insn, unsigned long *pfsr, unsigned long *fregs)
+ 	case FSQRTD: FP_SQRT_D (DR, DB); break;
+ 	case FSQRTQ: FP_SQRT_Q (QR, QB); break;
+ 	/* mov */
+-	case FMOVS: rd->s = rs2->s; break;
+-	case FABSS: rd->s = rs2->s & 0x7fffffff; break;
+-	case FNEGS: rd->s = rs2->s ^ 0x80000000; break;
++	/* Result in IR: the type (r=1, no packing) makes the code below
++	 * write rd->s = IR, which overwrote rd->s (IR uninitialised).
++	 * Harmless on a real FPU (fmovs is never emulated there), fatal on
++	 * the Padre, which emulates everything: uClibc printf("%f") copies
++	 * its doubles with fmovs (_fpmaxtostr).
++	 */
++	case FMOVS: IR = rs2->s; break;
++	case FABSS: IR = rs2->s & 0x7fffffff; break;
++	case FNEGS: IR = rs2->s ^ 0x80000000; break;
+ 	/* float to int */
+ 	case FSTOI: FP_TO_INT_S (IR, SB, 32, 1); break;
+ 	case FDTOI: FP_TO_INT_D (IR, DB, 32, 1); break;

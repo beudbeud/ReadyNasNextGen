@@ -17,6 +17,8 @@ jobs:
         run: sh package/xraid-compat/tests/test.sh
       - name: smart-lite
         run: sh package/smart-lite/tests/test.sh
+      - name: padre_nand (read-only flash driver)
+        run: sh board/readynas-duo-v1/tests/test-padre-nand.sh
       - name: relay add-ons
         # The real padre_relay.ko needs the SPARC cross toolchain and qemu
         # (build-module.sh); the add-on tests only copy and compare it, so a stand-in is used.

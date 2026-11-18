@@ -1,0 +1,293 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 13/23] platform: padre: add the TWSI I2C controller
+
+Adds drivers/platform/padre for the ReadyNAS Duo v1 on-board devices,
+starting with the SoC "TWSI" I2C controller, ported from the GPL 2.6.17
+driver with the same exported access functions (i2c_readb_idx...,
+CMOS_READ/WRITE) used by the clock, sensor and Ethernet drivers.
+---
+ arch/sparc/include/asm/padre_i2c.h |  19 +++
+ drivers/platform/Kconfig           |   2 +
+ drivers/platform/Makefile          |   1 +
+ drivers/platform/padre/Kconfig     |  12 ++
+ drivers/platform/padre/Makefile    |   2 +
+ drivers/platform/padre/padre_i2c.c | 197 +++++++++++++++++++++++++++++
+ 6 files changed, 233 insertions(+)
+ create mode 100644 arch/sparc/include/asm/padre_i2c.h
+ create mode 100644 drivers/platform/padre/Kconfig
+ create mode 100644 drivers/platform/padre/Makefile
+ create mode 100644 drivers/platform/padre/padre_i2c.c
+
+diff --git a/arch/sparc/include/asm/padre_i2c.h b/arch/sparc/include/asm/padre_i2c.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..f7428b611a1f23cd46dee9d8812a16f1d2cf087b
+--- /dev/null
++++ b/arch/sparc/include/asm/padre_i2c.h
+@@ -0,0 +1,19 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/* Infrant Padre I2C (TWSI) access, drivers/platform/padre/padre_i2c.c */
++#ifndef _ASM_SPARC_PADRE_I2C_H
++#define _ASM_SPARC_PADRE_I2C_H
++#include <linux/types.h>
++
++int i2c_device_exist(u8 dev_id);
++void i2c_writeb(u8 dev_id, u8 data);
++u8 i2c_readb(u8 dev_id);
++void i2c_writew(u8 dev_id, u16 data);
++u16 i2c_readw(u8 dev_id);
++void i2c_writeb_idx(u8 dev_id, u8 idx, u8 data);
++u8 i2c_readb_idx(u8 dev_id, u8 idx);
++void i2c_writew_idx(u8 dev_id, u8 idx, u16 data);
++u16 i2c_readw_idx(u8 dev_id, u8 idx);
++u32 i2c_readl_idx(u8 dev_id, u8 idx);
++u8 CMOS_READ(u8 reg);
++void CMOS_WRITE(u8 val, u8 reg);
++#endif
+diff --git a/drivers/platform/Kconfig b/drivers/platform/Kconfig
+index 960fd6a82450a4c7b97d51ea3bc29795ee74efd1..4c98b92ef5f8f5466ebb56f19fffbc66130ecf83 100644
+--- a/drivers/platform/Kconfig
++++ b/drivers/platform/Kconfig
+@@ -18,3 +18,5 @@ source "drivers/platform/surface/Kconfig"
+ source "drivers/platform/x86/Kconfig"
+ 
+ source "drivers/platform/arm64/Kconfig"
++
++source "drivers/platform/padre/Kconfig"
+diff --git a/drivers/platform/Makefile b/drivers/platform/Makefile
+index 19ac54648586eb617af0f8a69e3205bd83e8c35b..402b266703393dacaa00b1f049cfdfb7bfe57cd5 100644
+--- a/drivers/platform/Makefile
++++ b/drivers/platform/Makefile
+@@ -13,3 +13,4 @@ obj-$(CONFIG_CHROME_PLATFORMS)	+= chrome/
+ obj-$(CONFIG_CZNIC_PLATFORMS)	+= cznic/
+ obj-$(CONFIG_SURFACE_PLATFORMS)	+= surface/
+ obj-$(CONFIG_ARM64_PLATFORM_DEVICES)	+= arm64/
++obj-$(CONFIG_SPARC_PADRE)	+= padre/
+diff --git a/drivers/platform/padre/Kconfig b/drivers/platform/padre/Kconfig
+new file mode 100644
+index 0000000000000000000000000000000000000000..cdbe992434c3c5979a6dcce709f9d4c300c9947a
+--- /dev/null
++++ b/drivers/platform/padre/Kconfig
+@@ -0,0 +1,12 @@
++# SPDX-License-Identifier: GPL-2.0
++menu "Infrant Padre drivers (ReadyNAS Duo v1)"
++	depends on SPARC_PADRE
++
++config PADRE_I2C
++	bool "TWSI I2C controller"
++	default y
++	help
++	  I2C access on the SoC (DS1337 clock, LM75, ICS clock generator),
++	  ported from the GPL i2c driver for 2.6.17.
++
++endmenu
+diff --git a/drivers/platform/padre/Makefile b/drivers/platform/padre/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..f82c8514c431d9097786d601f29d47ed0a1fe269
+--- /dev/null
++++ b/drivers/platform/padre/Makefile
+@@ -0,0 +1,2 @@
++# SPDX-License-Identifier: GPL-2.0
++obj-$(CONFIG_PADRE_I2C)		+= padre_i2c.o
+diff --git a/drivers/platform/padre/padre_i2c.c b/drivers/platform/padre/padre_i2c.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..3a7d003b5bf60f3c986edf499f867f6b08c45f96
+--- /dev/null
++++ b/drivers/platform/padre/padre_i2c.c
+@@ -0,0 +1,197 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * padre_i2c.c: "TWSI" I2C controller of the IT3107 "Padre".
++ *
++ * Ported from the GPL i2c driver for 2.6.17 (padre_i2c_libre.c, a free
++ * driver written for 2.6.17 from the functional I2C description) to 6.18:
++ * same access functions (i2c_readb_idx..., CMOS_READ...), exported for the
++ * other Padre drivers (LEDs, sensors, Ethernet).
++ * Not carried over: the /proc/sys/dev/{spd,ecc,ics,dbg} files (old sysctl
++ * API); P0 detection (g_sys_type) no longer exists, the driver assumes a
++ * ReadyNAS Duo/NV+ v1.
++ *
++ * Copyright (C) 2026 the ReadyNasNextGen authors
++ */
++
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/spinlock.h>
++#include <linux/delay.h>
++#include <linux/io.h>
++
++#include <asm/padre.h>
++#include <asm/padre_i2c.h>
++
++#define TWSI(o)		((void __iomem *)(PADRE_APB + (o)))
++#define TWSI_CMD	TWSI(0xd0)
++#define TWSI_CLK	TWSI(0xd4)
++#define TWSI_DATA0	TWSI(0xd8)	/* bytes 0-3, byte 0 in 31-24 */
++#define TWSI_DATA1	TWSI(0xdc)	/* bytes 4-7 */
++#define TWSI_STAT	TWSI(0xe0)
++
++#define ST_BUSY		0x1
++#define ST_NODEV	0x2	/* address not acknowledged */
++
++#define CMD_READ	0x0001
++#define CMD_GO		0x2800	/* bits 11 and 13, always 1 */
++#define CMD_COMB	0x8000	/* index (DATA0[31:24]), repeated START, read */
++#define CMD(addr, n)	(CMD_GO | (((n) - 1) << 8) | ((addr) << 1))
++
++#define TWSI_CLK_VAL	0x0c
++#define RTC_ADDR	0x68
++
++/* ponytail: ~20 ms worst case (8 bytes at 100 kHz = 0.8 ms); measure on the NAS */
++#define BUSY_LOOPS	10000
++#define BUSY_STEP_US	2
++
++static DEFINE_SPINLOCK(twsi_lock);
++static unsigned long twsi_timeouts;
++
++/* waits for STAT bit 0 = 0; returns STAT, or -1 on timeout. twsi_lock held. */
++static int twsi_wait(void)
++{
++	int i;
++	u32 s;
++
++	for (i = 0; i < BUSY_LOOPS; i++) {
++		s = __raw_readl(TWSI_STAT);
++		if (!(s & ST_BUSY))
++			return s;
++		udelay(BUSY_STEP_US);
++	}
++	twsi_timeouts++;
++	return -1;
++}
++
++/* One complete transaction under the lock, interrupts masked */
++static int twsi_xfer(u32 cmd, u32 w0, u32 w1, u32 *d0, u32 *d1)
++{
++	unsigned long flags;
++	int s;
++
++	spin_lock_irqsave(&twsi_lock, flags);
++	s = twsi_wait();
++	if (s >= 0) {
++		__raw_writel(w0, TWSI_DATA0);
++		__raw_writel(w1, TWSI_DATA1);
++		__raw_writel(cmd, TWSI_CMD);
++		s = twsi_wait();
++		if (d0)
++			*d0 = __raw_readl(TWSI_DATA0);
++		if (d1)
++			*d1 = __raw_readl(TWSI_DATA1);
++	}
++	spin_unlock_irqrestore(&twsi_lock, flags);
++	return s;
++}
++
++static void twsi_write(u8 addr, int n, u32 w0)
++{
++	twsi_xfer(CMD(addr, n), w0, 0, NULL, NULL);
++}
++
++static u32 twsi_read(u8 addr, int n)
++{
++	u32 d0 = 0;
++
++	twsi_xfer(CMD(addr, n) | CMD_READ, 0, 0, &d0, NULL);
++	return d0;
++}
++
++static u32 twsi_read_idx(u8 addr, u8 idx, int n)
++{
++	u32 d0 = 0;
++
++	twsi_xfer(CMD(addr, n) | CMD_COMB, (u32)idx << 24, 0, &d0, NULL);
++	return d0;
++}
++
++int i2c_device_exist(u8 dev_id)
++{
++	int s = twsi_xfer(CMD(dev_id, 1) | CMD_READ, 0, 0, NULL, NULL);
++
++	return s >= 0 && !(s & ST_NODEV);
++}
++EXPORT_SYMBOL(i2c_device_exist);
++
++void i2c_writeb(u8 dev_id, u8 data)
++{
++	twsi_write(dev_id, 1, (u32)data << 24);
++}
++EXPORT_SYMBOL(i2c_writeb);
++
++u8 i2c_readb(u8 dev_id)
++{
++	return twsi_read(dev_id, 1) >> 24;
++}
++EXPORT_SYMBOL(i2c_readb);
++
++void i2c_writew(u8 dev_id, u16 data)
++{
++	twsi_write(dev_id, 2, (u32)data << 16);
++}
++EXPORT_SYMBOL(i2c_writew);
++
++u16 i2c_readw(u8 dev_id)
++{
++	return twsi_read(dev_id, 2) >> 16;
++}
++EXPORT_SYMBOL(i2c_readw);
++
++void i2c_writeb_idx(u8 dev_id, u8 idx, u8 data)
++{
++	twsi_write(dev_id, 2, ((u32)idx << 24) | ((u32)data << 16));
++}
++EXPORT_SYMBOL(i2c_writeb_idx);
++
++u8 i2c_readb_idx(u8 dev_id, u8 idx)
++{
++	return twsi_read_idx(dev_id, idx, 1) >> 24;
++}
++EXPORT_SYMBOL(i2c_readb_idx);
++
++void i2c_writew_idx(u8 dev_id, u8 idx, u16 data)
++{
++	twsi_write(dev_id, 3, ((u32)idx << 24) | ((u32)data << 8));
++}
++EXPORT_SYMBOL(i2c_writew_idx);
++
++u16 i2c_readw_idx(u8 dev_id, u8 idx)
++{
++	return twsi_read_idx(dev_id, idx, 2) >> 16;
++}
++EXPORT_SYMBOL(i2c_readw_idx);
++
++/* like the original: two transactions (index, then 4 bytes) */
++u32 i2c_readl_idx(u8 dev_id, u8 idx)
++{
++	twsi_write(dev_id, 1, (u32)idx << 24);
++	return twsi_read(dev_id, 4);
++}
++EXPORT_SYMBOL(i2c_readl_idx);
++
++u8 CMOS_READ(u8 reg)
++{
++	return i2c_readb_idx(RTC_ADDR, reg);
++}
++EXPORT_SYMBOL(CMOS_READ);
++
++void CMOS_WRITE(u8 val, u8 reg)
++{
++	i2c_writeb_idx(RTC_ADDR, reg, val);
++}
++EXPORT_SYMBOL(CMOS_WRITE);
++
++static int __init padre_i2c_init(void)
++{
++	if (padre_disabled("i2c"))
++		return 0;
++	pr_info("padre_i2c: start\n");
++	__raw_writel(TWSI_CLK_VAL, TWSI_CLK);	/* before any transaction */
++	pr_info("padre_i2c: TWSI ready (CLK=0x%02x), RTC %s\n", TWSI_CLK_VAL,
++		i2c_device_exist(RTC_ADDR) ? "present" : "absent");
++
++	return 0;
++}
++arch_initcall(padre_i2c_init);

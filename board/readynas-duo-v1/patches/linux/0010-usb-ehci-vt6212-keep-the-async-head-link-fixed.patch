@@ -1,0 +1,120 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 10/23] usb: ehci: VT6212 on Padre, keep the async head link fixed
+
+The VIA VT6212 on the Padre never re-reads the horizontal link of the
+async head QH once the CPU has rewritten it: only the first linked QH
+was walked (enumeration failed with -60). A permanent dummy QH (halted,
+no qTD) follows the head; real QHs are linked and unlinked after it and
+the head link is never rewritten again (async_head_hw()). Only enabled
+with CONFIG_SPARC_PADRE.
+---
+ drivers/usb/host/ehci-hcd.c | 23 +++++++++++++++++++++++
+ drivers/usb/host/ehci-mem.c |  4 ++++
+ drivers/usb/host/ehci-q.c   | 15 ++++++++++++---
+ drivers/usb/host/ehci.h     |  1 +
+ 4 files changed, 40 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/usb/host/ehci-hcd.c b/drivers/usb/host/ehci-hcd.c
+index 6d1d190c914d488a0c66dcfc8247d821cc05c46d..4cd36470da1e37bcfe37aadb3e55c8df76d5e180 100644
+--- a/drivers/usb/host/ehci-hcd.c
++++ b/drivers/usb/host/ehci-hcd.c
+@@ -528,6 +528,29 @@ static int ehci_init(struct usb_hcd *hcd)
+ 	ehci->async->qh_state = QH_STATE_LINKED;
+ 	hw->hw_alt_next = QTD_NEXT(ehci, ehci->async->dummy->qtd_dma);
+ 
++	/* Padre: the VIA VT6212 never re-reads the horizontal link of the
++	 * head QH (H=1) once the CPU has rewritten it: only the first linked
++	 * QH was walked, never the following ones (enumeration fails with -60).
++	 * So a permanent dummy QH (H=0, halted, no qTD, never active) follows
++	 * the head; real QHs are inserted and removed after it, and the head
++	 * link is never rewritten again (async_head_hw()).
++	 */
++	if (IS_ENABLED(CONFIG_SPARC_PADRE) && !ehci->async_fixed) {
++		struct ehci_qh *f = ehci_qh_alloc(ehci, GFP_KERNEL);
++
++		if (!f)
++			return -ENOMEM;
++		f->hw->hw_info1 = cpu_to_hc32(ehci, QH_HIGH_SPEED | (64 << 16));
++		f->hw->hw_info2 = cpu_to_hc32(ehci, 1 << 30);
++		f->hw->hw_token = cpu_to_hc32(ehci, QTD_STS_HALT);
++		f->hw->hw_qtd_next = EHCI_LIST_END(ehci);
++		f->hw->hw_alt_next = EHCI_LIST_END(ehci);
++		f->hw->hw_next = hw->hw_next;	/* = the head */
++		wmb();
++		hw->hw_next = QH_NEXT(ehci, f->qh_dma);
++		ehci->async_fixed = f;
++	}
++
+ 	/* clear interrupt enables, set irq latency */
+ 	if (log2_irq_thresh < 0 || log2_irq_thresh > 6)
+ 		log2_irq_thresh = 0;
+diff --git a/drivers/usb/host/ehci-mem.c b/drivers/usb/host/ehci-mem.c
+index 4c6c08b675b5c70f53c3815a460cd1b90d929678..96168330f3b492480d0331129bd1595fdf56f273 100644
+--- a/drivers/usb/host/ehci-mem.c
++++ b/drivers/usb/host/ehci-mem.c
+@@ -109,6 +109,10 @@ static void ehci_mem_cleanup (struct ehci_hcd *ehci)
+ 		qh_destroy(ehci, ehci->async);
+ 	ehci->async = NULL;
+ 
++	if (ehci->async_fixed)
++		qh_destroy(ehci, ehci->async_fixed);
++	ehci->async_fixed = NULL;
++
+ 	if (ehci->dummy)
+ 		qh_destroy(ehci, ehci->dummy);
+ 	ehci->dummy = NULL;
+diff --git a/drivers/usb/host/ehci-q.c b/drivers/usb/host/ehci-q.c
+index ba37a9fcab92b8a84a78a02c953cea9d3762526f..a724cd9aed09cff5cad56b5859184109dd2a4121 100644
+--- a/drivers/usb/host/ehci-q.c
++++ b/drivers/usb/host/ehci-q.c
+@@ -947,6 +947,14 @@ qh_make (
+ 
+ /*-------------------------------------------------------------------------*/
+ 
++/* Horizontal link the CPU rewrites to insert or remove a QH right after
++ * the head: the dummy QH's one on Padre (VT6212, see ehci_init()).
++ */
++static inline struct ehci_qh_hw *async_head_hw(struct ehci_hcd *ehci)
++{
++	return ehci->async_fixed ? ehci->async_fixed->hw : ehci->async->hw;
++}
++
+ static void enable_async(struct ehci_hcd *ehci)
+ {
+ 	if (ehci->async_count++)
+@@ -992,11 +1000,11 @@ static void qh_link_async (struct ehci_hcd *ehci, struct ehci_qh *qh)
+ 	/* splice right after start */
+ 	head = ehci->async;
+ 	qh->qh_next = head->qh_next;
+-	qh->hw->hw_next = head->hw->hw_next;
++	qh->hw->hw_next = async_head_hw(ehci)->hw_next;
+ 	wmb ();
+ 
+ 	head->qh_next.qh = qh;
+-	head->hw->hw_next = dma;
++	async_head_hw(ehci)->hw_next = dma;
+ 
+ 	qh->qh_state = QH_STATE_LINKED;
+ 	qh->xacterrs = 0;
+@@ -1264,7 +1272,8 @@ static void single_unlink_async(struct ehci_hcd *ehci, struct ehci_qh *qh)
+ 	while (prev->qh_next.qh != qh)
+ 		prev = prev->qh_next.qh;
+ 
+-	prev->hw->hw_next = qh->hw->hw_next;
++	(prev == ehci->async ? async_head_hw(ehci) : prev->hw)->hw_next =
++		qh->hw->hw_next;
+ 	prev->qh_next = qh->qh_next;
+ 	if (ehci->qh_scan_next == qh)
+ 		ehci->qh_scan_next = qh->qh_next.qh;
+diff --git a/drivers/usb/host/ehci.h b/drivers/usb/host/ehci.h
+index d7a3c8d13f6b8a873c8997af85f562db7fc712e3..34adaa4d6f63b5e47eb090b80ca6abb3a7681596 100644
+--- a/drivers/usb/host/ehci.h
++++ b/drivers/usb/host/ehci.h
+@@ -139,6 +139,7 @@ struct ehci_hcd {			/* one per controller */
+ 
+ 	/* async schedule support */
+ 	struct ehci_qh		*async;
++	struct ehci_qh		*async_fixed;	/* Padre (VIA VT6212), see ehci_init() */
+ 	struct ehci_qh		*dummy;		/* For AMD quirk use */
+ 	struct list_head	async_unlink;
+ 	struct list_head	async_idle;

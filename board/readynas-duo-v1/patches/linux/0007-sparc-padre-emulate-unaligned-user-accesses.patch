@@ -1,0 +1,92 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 07/23] sparc: Padre: emulate unaligned user accesses
+
+Stock sparc32 sends SIGBUS on an unaligned user access; 2.6.17 on the
+Padre (and sparc64) emulates integer ones, and userland relies on it
+(lvm2: "Bus error" as soon as a PV is read). Emulate integer loads and
+stores; floating point and swap/ldstub still get SIGBUS. The first 10
+emulated accesses are logged.
+---
+ arch/sparc/kernel/unaligned_32.c | 66 ++++++++++++++++++++++++++++++++
+ 1 file changed, 66 insertions(+)
+
+diff --git a/arch/sparc/kernel/unaligned_32.c b/arch/sparc/kernel/unaligned_32.c
+index 455f0258c745e60203c5e6109ef82bf9a8219e19..b75320d944c263b8c8b7cde664891cdcb26c94b2 100644
+--- a/arch/sparc/kernel/unaligned_32.c
++++ b/arch/sparc/kernel/unaligned_32.c
+@@ -274,9 +274,75 @@ asmlinkage void kernel_unaligned_trap(struct pt_regs *regs, unsigned int insn)
+ 	}
+ }
+ 
++#ifdef CONFIG_SPARC_PADRE
++/* Padre: unaligned integer user accesses are emulated, as in 2.6.17
++ * (arch/padre/kernel/unaligned.c) and on sparc64; stock sparc32 sends
++ * SIGBUS (lvm2: "Bus error" as soon as a PV is read).
++ * Still SIGBUS: floating point (emulated separately on Padre), swap/ldstub.
++ * The first 10 emulated accesses are logged in dmesg (command, pc, address).
++ */
++static int padre_set_ureg(struct pt_regs *regs, unsigned int reg, unsigned long v)
++{
++	struct reg_window32 __user *win;
++
++	if (!reg)
++		return 0;
++	if (reg < 16) {
++		regs->u_regs[reg] = v;
++		return 0;
++	}
++	/* window already flushed to the stack by safe_compute_effective_address() */
++	win = (struct reg_window32 __user *)regs->u_regs[UREG_FP];
++	return put_user(v, &win->locals[reg - 16]);
++}
++
++asmlinkage void user_unaligned_trap(struct pt_regs *regs, unsigned int insn)
++{
++	static unsigned int logged;
++	enum direction dir = decode_direction(insn);
++	unsigned int rd = (insn >> 25) & 0x1f;
++	unsigned long addr, val[2] = { 0, 0 };
++	int size;
++
++	addr = safe_compute_effective_address(regs, insn);
++	if (((insn >> 30) & 3) != 3 || floating_point_load_or_store_p(insn) ||
++	    dir == both)
++		goto sigbus;
++	size = decode_access_size(insn);
++	if (!access_ok((void __user *)addr, size))
++		goto sigbus;
++	perf_sw_event(PERF_COUNT_SW_ALIGNMENT_FAULTS, 1, regs, addr);
++	if (logged < 10) {
++		logged++;
++		pr_info("padre: emulated unaligned access, %s[%d] pc %08lx addr %08lx size %d\n",
++			current->comm, task_pid_nr(current), regs->pc, addr, size);
++	}
++	if (dir == load) {
++		if (do_int_load(val, size, (unsigned long *)addr,
++				decode_signedness(insn)) ||
++		    padre_set_ureg(regs, rd, val[0]) ||
++		    (size == 8 && padre_set_ureg(regs, rd + 1, val[1])))
++			goto segv;
++	} else {
++		val[0] = rd ? safe_fetch_reg(rd, regs) : 0;
++		if (size == 8)
++			val[1] = safe_fetch_reg(rd + 1, regs);
++		if (__do_int_store((unsigned long *)addr, size, val))
++			goto segv;
++	}
++	advance(regs);
++	return;
++segv:
++	force_sig_fault(SIGSEGV, SEGV_MAPERR, (void __user *)addr);
++	return;
++sigbus:
++	send_sig_fault(SIGBUS, BUS_ADRALN, (void __user *)addr, current);
++}
++#else
+ asmlinkage void user_unaligned_trap(struct pt_regs *regs, unsigned int insn)
+ {
+ 	send_sig_fault(SIGBUS, BUS_ADRALN,
+ 		       (void __user *)safe_compute_effective_address(regs, insn),
+ 		       current);
+ }
++#endif

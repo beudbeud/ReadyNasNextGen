@@ -1,0 +1,385 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 09/23] sparc: Padre: PCI host bridge
+
+The PCI bridge of the IT3107 carries the VIA VT6212 USB controller of
+the ReadyNAS Duo v1. padre_pci.c (after 2.6.17 pcic.c/setup.c):
+configuration cycles, bus reset, PCI_FEATURE/PCI_SWAP setup (the bridge
+swaps CPU accesses, padre_pciswap), memory window, INTA interrupt; DMA
+addresses are bus addresses. The Sun PCIC driver is excluded.
+---
+ arch/sparc/Kconfig             |   2 +-
+ arch/sparc/include/asm/padre.h |   1 +
+ arch/sparc/kernel/Makefile     |   3 +
+ arch/sparc/kernel/padre_pci.c  | 324 +++++++++++++++++++++++++++++++++
+ 4 files changed, 329 insertions(+), 1 deletion(-)
+ create mode 100644 arch/sparc/kernel/padre_pci.c
+
+diff --git a/arch/sparc/Kconfig b/arch/sparc/Kconfig
+index d2a0c9ff2d62067694d4a90126f075cefc4a9c7b..5b4e622780dd7e08c22bbada6362cf4f1139f5aa 100644
+--- a/arch/sparc/Kconfig
++++ b/arch/sparc/Kconfig
+@@ -430,7 +430,7 @@ config SUN_LDOMS
+ 
+ config PCIC_PCI
+ 	bool
+-	depends on PCI && SPARC32 && !SPARC_LEON
++	depends on PCI && SPARC32 && !SPARC_LEON && !SPARC_PADRE
+ 	default y
+ 
+ config LEON_PCI
+diff --git a/arch/sparc/include/asm/padre.h b/arch/sparc/include/asm/padre.h
+index aede587a92383afeb2da51ba5ce80704105816be..57acffebf2c9d24dc50deaf79f6fb34486fb2819 100644
+--- a/arch/sparc/include/asm/padre.h
++++ b/arch/sparc/include/asm/padre.h
+@@ -150,6 +150,7 @@ void padre_init_IRQ(void);
+ bool padre_disabled(const char *name);
+ /* raw console write by polling the UART, lockless (interrupt safe) */
+ int padre_prom_write(int fd, const char *buf, int len);
++extern u32 padre_pciswap;	/* PCI_SWAP value set (0x4444, or 0 like iboot) */
+ void padre_flush_dcache_all(void);
+ void padre_handler_irq(unsigned int pil);
+ void padre_clean_dcache_range(unsigned long start, unsigned long end);
+diff --git a/arch/sparc/kernel/Makefile b/arch/sparc/kernel/Makefile
+index 4ffd43c3dead82d62c71f396f2352556589f180b..0641d22a43c26343ed85d9f82679dfb57d2540e3 100644
+--- a/arch/sparc/kernel/Makefile
++++ b/arch/sparc/kernel/Makefile
+@@ -28,6 +28,9 @@ obj-y                   += traps_$(BITS).o
+ obj-y                   += irq_$(BITS).o
+ obj-$(CONFIG_SPARC32)   += sun4m_irq.o sun4d_irq.o
+ obj-$(CONFIG_SPARC_PADRE) += padre_kernel.o padre_prom.o padre_lpram.o
++ifdef CONFIG_SPARC_PADRE
++obj-$(CONFIG_PCI)         += padre_pci.o
++endif
+ 
+ obj-y                   += process_$(BITS).o
+ obj-y                   += process.o
+diff --git a/arch/sparc/kernel/padre_pci.c b/arch/sparc/kernel/padre_pci.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..aa35c95d8bdf3486a765c22e256a5e439e8a2f76
+--- /dev/null
++++ b/arch/sparc/kernel/padre_pci.c
+@@ -0,0 +1,324 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * padre_pci.c: PCI bridge of the Infrant IT3107 "Padre" (VIA USB of the
++ * ReadyNAS Duo v1: UHCI 00:17.0/1, EHCI 00:17.2).
++ *
++ * Based on arch/padre/kernel/pcic.c and setup.c of the GPL 2.6.17 kernel:
++ *   - configuration through CONFIG_ADDRESS/CONFIG_DATA (0x6...: bus
++ *     0x1000_0cf8/0x1000_0cfc, seen at 0x5000_0cf8/cfc), 32-bit words
++ *     read as is;
++ *   - bus reset (SYS_CTRL bit 16) and PCI_FEATURE = 0x302c on "P0" boards
++ *     (the Duo); PCI_SWAP = 0x4444: the bridge swaps CPU accesses, so the
++ *     card registers are read without software swapping (hence
++ *     big_endian_mmio for EHCI);
++ *   - PCI memory 0x1001_0000... seen by the CPU at 0x5c01_0000...
++ *     (Linux "physical" address 0x1c01_0000..., i.e. PCI + 0x0c00_0000);
++ *     PCI I/O is not handled (no UHCI);
++ *   - IRQ: INTA pin (source 27) for the VIA USB on the Duo (FireDance).
++ *   - DMA: PCI address = Linux physical address (AHB bus, DDR 0x4...).
++ *
++ * Not verified on the hardware.
++ */
++
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/pci.h>
++#include <linux/io.h>
++#include <linux/spinlock.h>
++#include <linux/delay.h>
++#include <linux/printk.h>
++#include <linux/dma-map-ops.h>
++#include <linux/dma-mapping.h>
++#include <linux/slab.h>
++
++#include <asm/padre.h>
++
++#define PCI_CFG_ADDR	((void __iomem *)0x50000cf8UL)
++#define PCI_CFG_DATA	((void __iomem *)0x50000cfcUL)
++#define PCI_CFG_EN	0x80000000
++#define PADRE_PCI_SWAP	((void __iomem *)(PADRE_APB + 0x104))
++#define PADRE_PCI_FEAT	((void __iomem *)(PADRE_APB + 0x10c))
++
++#define PCI_MEM_CPU	0x1c010000UL	/* Linux physical address */
++#define PCI_MEM_BUS	0x10010000UL	/* PCIBIOS_MIN_MEM of 2.6.17 */
++#define PCI_MEM_SIZE	0x00ff0000UL
++
++#define HWIRQ_PINTA	27
++#define HWIRQ_PINTB	26
++
++static DEFINE_RAW_SPINLOCK(padre_pci_lock);
++
++static u32 cfg_cmd(struct pci_bus *bus, unsigned int devfn, int where)
++{
++	return PCI_CFG_EN | (bus->number << 16) | (devfn << 8) | (where & 0xfc);
++}
++
++static int padre_pci_rd(struct pci_bus *bus, unsigned int devfn, int where,
++			int size, u32 *val)
++{
++	unsigned long flags;
++	u32 v;
++
++	if (bus->number != 0)
++		return PCIBIOS_DEVICE_NOT_FOUND;
++	raw_spin_lock_irqsave(&padre_pci_lock, flags);
++	__raw_writel(cfg_cmd(bus, devfn, where), PCI_CFG_ADDR);
++	v = __raw_readl(PCI_CFG_DATA);
++	__raw_writel(0, PCI_CFG_ADDR);
++	raw_spin_unlock_irqrestore(&padre_pci_lock, flags);
++
++	switch (size) {
++	case 1:
++		*val = (v >> (8 * (where & 3))) & 0xff;
++		break;
++	case 2:
++		*val = (v >> (8 * (where & 2))) & 0xffff;
++		break;
++	default:
++		*val = v;
++	}
++	return PCIBIOS_SUCCESSFUL;
++}
++
++static int padre_pci_wr(struct pci_bus *bus, unsigned int devfn, int where,
++			int size, u32 val)
++{
++	unsigned long flags;
++	u32 v = 0, shift = 8 * (where & 3);
++
++	if (bus->number != 0)
++		return PCIBIOS_DEVICE_NOT_FOUND;
++	if (size != 4)
++		padre_pci_rd(bus, devfn, where, 4, &v);
++	if (size == 1)
++		v = (v & ~(0xff << shift)) | ((val & 0xff) << shift);
++	else if (size == 2)
++		v = (v & ~(0xffff << shift)) | ((val & 0xffff) << shift);
++	else
++		v = val;
++
++	raw_spin_lock_irqsave(&padre_pci_lock, flags);
++	__raw_writel(cfg_cmd(bus, devfn, where), PCI_CFG_ADDR);
++	__raw_writel(v, PCI_CFG_DATA);
++	__raw_writel(0, PCI_CFG_ADDR);
++	raw_spin_unlock_irqrestore(&padre_pci_lock, flags);
++	return PCIBIOS_SUCCESSFUL;
++}
++
++static struct pci_ops padre_pci_ops = {
++	.read	= padre_pci_rd,
++	.write	= padre_pci_wr,
++};
++
++/* pcibios_fixup_irqs of 2.6.17: slots 21/22 = INTA/INTB; elsewhere INTB
++ * goes to INTA on board 1 (Duo), to INTB on the others.
++ */
++static int padre_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
++{
++	unsigned int hw;
++
++	if (slot == 21)
++		hw = HWIRQ_PINTA;
++	else if (slot == 22)
++		hw = HWIRQ_PINTB;
++	else if (pin == 2 && padre_boot_param.vpd_extend[0] != 1)
++		hw = HWIRQ_PINTB;
++	else
++		hw = HWIRQ_PINTA;
++	return padre_irq_virq(hw);
++}
++
++/* padre.pcibus=<8 hex digits>: offset added (modulo 2^32) to the Linux
++ * physical address of the DDR (0x4000_0000...) to get the address seen
++ * from the PCI bus by the masters (EHCI). 00000000 = bus address = AHB
++ * address, like 2.6.17 virt_to_bus; c0000000 = DDR seen at 0 on the PCI bus.
++ * Test 15:50: "Received Master Abort" on the first read of a QH at
++ * 0x4f80_0000: nobody decodes that address on the PCI side.
++ */
++static u32 padre_pcibus;
++
++static int __init padre_pcibus_param(char *s)
++{
++	return s ? kstrtou32(s, 16, &padre_pcibus) : 0;
++}
++early_param("padre.pcibus", padre_pcibus_param);
++
++/* padre.pcifeat=<4 hex>: PCI_FEATURE value. 302c = as 2.6.17 on IT3107
++ * ("PZERO"): PCI bus reset then 0x302c; any other value is written
++ * WITHOUT a reset (0128 = value left by iboot, which reads the USB stick
++ * by DMA; 002e = other branch of 2.6.17).
++ */
++static u32 padre_pcifeat = 0x302c;
++
++static int __init padre_pcifeat_param(char *s)
++{
++	return s ? kstrtou32(s, 16, &padre_pcifeat) : 0;
++}
++early_param("padre.pcifeat", padre_pcifeat_param);
++
++/* padre.pciswap=<4 hex>: PCI_SWAP set after enumeration. 4444 = 2.6.17
++ * (EHCI registers read without swapping: big_endian_mmio); 0000 = like
++ * iboot (standard little-endian accesses, readl swaps). Read by ehci-pci.
++ */
++u32 padre_pciswap = 0x4444;
++
++static int __init padre_pciswap_param(char *s)
++{
++	return s ? kstrtou32(s, 16, &padre_pciswap) : 0;
++}
++early_param("padre.pciswap", padre_pciswap_param);
++
++/* set_ahbarb() of 2.6.17 (setup.c): AHB arbitration, CONFIG_PADRE_AHBARB = 7
++ * (asm-padre/io.h), written as is: writel(7 << 16, SYS_STRAP). 6.18 did
++ * not do it (SYS_STRAP was 0x76); without arbitration for the PCI master,
++ * its DDR accesses might never be served (Master Abort).
++ * padre.ahbarb=<0|1|3|7>, any other value = write nothing.
++ */
++static u32 padre_ahbarb = 7;
++
++static int __init padre_ahbarb_param(char *s)
++{
++	return s ? kstrtou32(s, 16, &padre_ahbarb) : 0;
++}
++early_param("padre.ahbarb", padre_ahbarb_param);
++
++/* pcibios_set_master of 2.6.17 (pcic.c): latency 128 */
++void pcibios_set_master(struct pci_dev *dev)
++{
++	pci_write_config_byte(dev, PCI_LATENCY_TIMER, 128);
++}
++
++/* Registers of the Padre PCI bridge (APB + 0x100...0x13c) and of the
++ * system, to understand the PCI->DDR inbound window (debugging). */
++static void __init padre_pci_regs(const char *when)
++{
++	void __iomem *r = (void __iomem *)(PADRE_APB + 0x100);
++	int i;
++
++	for (i = 0; i < 0x40; i += 0x10)
++		pr_info("padre_pci: %s: bridge +%02x: %08x %08x %08x %08x\n", when,
++			0x100 + i, __raw_readl(r + i), __raw_readl(r + i + 4),
++			__raw_readl(r + i + 8), __raw_readl(r + i + 12));
++	pr_info("padre_pci: %s: SYS_ID %08x SYS_CTRL %08x SYS_STRAP %08x\n", when,
++		__raw_readl((void __iomem *)PADRE_SYS_ID),
++		__raw_readl((void __iomem *)PADRE_SYS_CTRL),
++		__raw_readl((void __iomem *)(PADRE_APB + 0x98)));
++}
++
++static struct resource padre_pci_mem = {
++	.name	= "Padre PCI memory",
++	.start	= PCI_MEM_CPU,
++	.end	= PCI_MEM_CPU + PCI_MEM_SIZE - 1,
++	.flags	= IORESOURCE_MEM,
++};
++
++static struct resource padre_pci_busn = {
++	.name	= "Padre PCI bus",
++	.start	= 0,
++	.end	= 0,
++	.flags	= IORESOURCE_BUS,
++};
++
++static int __init padre_pci_init(void)
++{
++	struct pci_host_bridge *bridge;
++	int ret;
++
++	u32 sys;
++
++	if (padre_disabled("pci"))
++		return 0;
++	padre_pci_regs("before");
++	if (padre_ahbarb == 0 || padre_ahbarb == 1 || padre_ahbarb == 3 ||
++	    padre_ahbarb == 7) {
++		__raw_writel(padre_ahbarb << 16, (void __iomem *)(PADRE_APB + 0x98));
++		pr_info("padre_pci: AHB arbitration %u (SYS_STRAP <- %08x, read back %08x)\n",
++			padre_ahbarb, padre_ahbarb << 16,
++			__raw_readl((void __iomem *)(PADRE_APB + 0x98)));
++	}
++	sys = __raw_readl((void __iomem *)PADRE_SYS_CTRL);
++	pr_info("padre_pci: start (SYS_CTRL=%08x PCI_FEATURE=%08x PCI_SWAP=%08x)\n", sys,
++		__raw_readl(PADRE_PCI_FEAT), __raw_readl(PADRE_PCI_SWAP));
++	/* 2.6.17 setup.c, P0 boards: same writes of the whole register
++	 * (0x10000 then 0). No read-modify-write: bit 13 (0x2000, set by
++	 * head_32.S) starts the LP, writing it again could restart it.
++	 */
++	if (padre_pcifeat == 0x302c) {
++		__raw_writel(0x10000, (void __iomem *)PADRE_SYS_CTRL);
++		__raw_writel(0x302c, PADRE_PCI_FEAT);
++		__raw_writel(0, (void __iomem *)PADRE_SYS_CTRL);
++		msleep(200);	/* PCI: >= 100 ms before the first configuration */
++	} else {
++		__raw_writel(padre_pcifeat, PADRE_PCI_FEAT);
++		msleep(10);
++	}
++	pr_info("padre_pci: PCI_FEATURE=%04x (%s)\n", padre_pcifeat,
++		padre_pcifeat == 0x302c ? "with bus reset" :
++		"without reset");
++	pr_info("padre_pci: bus reset, enumerating\n");
++
++	bridge = pci_alloc_host_bridge(0);
++	if (!bridge)
++		return -ENOMEM;
++	if (request_resource(&iomem_resource, &padre_pci_mem))
++		pr_warn("padre_pci: memory window already taken\n");
++	pci_add_resource_offset(&bridge->windows, &padre_pci_mem,
++				PCI_MEM_CPU - PCI_MEM_BUS);
++	pci_add_resource(&bridge->windows, &padre_pci_busn);
++	bridge->busnr = 0;
++	bridge->ops = &padre_pci_ops;
++	bridge->map_irq = padre_map_irq;
++	bridge->swizzle_irq = pci_common_swizzle;
++
++	ret = pci_scan_root_bus_bridge(bridge);
++	if (ret) {
++		pci_free_host_bridge(bridge);
++		return ret;
++	}
++	pci_assign_unassigned_bus_resources(bridge->bus);
++	/* as 2.6.17: swapping set after enumeration and address assignment */
++	__raw_writel(padre_pciswap, PADRE_PCI_SWAP);
++	pr_info("padre_pci: PCI_SWAP=0x%04x, adding devices\n", padre_pciswap);
++	padre_pci_regs("after");
++	if (padre_pcibus) {
++		struct pci_dev *pdev;
++
++		/* DMA address = physical address + offset, for 1 GB of DDR */
++		list_for_each_entry(pdev, &bridge->bus->devices, bus_list)
++			if (dma_direct_set_offset(&pdev->dev, PADRE_PHYS_DDR,
++						  (u32)(PADRE_PHYS_DDR + padre_pcibus),
++						  0x40000000))
++				pci_warn(pdev, "padre: DMA offset refused\n");
++	}
++	pr_info("padre_pci: DMA address = physical + %08x (DDR seen at %08x on the PCI bus)\n",
++		padre_pcibus, (u32)(PADRE_PHYS_DDR + padre_pcibus));
++	{
++		/* self-test: streaming mapping and coherent allocation for each
++		 * device (test 16:08: dma_map failed silently)
++		 */
++		struct pci_dev *pdev;
++
++		list_for_each_entry(pdev, &bridge->bus->devices, bus_list) {
++			void *b = kmalloc(64, GFP_KERNEL), *c;
++			dma_addr_t a = DMA_MAPPING_ERROR, h = 0;
++
++			if (b)
++				a = dma_map_single(&pdev->dev, b, 64, DMA_TO_DEVICE);
++			c = dma_alloc_coherent(&pdev->dev, 4096, &h, GFP_KERNEL);
++			pci_info(pdev, "padre: DMA test: kmalloc %08lx -> %s %08x; coherent %08lx -> %08x\n",
++				 b ? (unsigned long)__pa(b) : 0UL,
++				 dma_mapping_error(&pdev->dev, a) ? "FAILED" : "dma",
++				 (u32)a, c ? (unsigned long)__pa(c) : 0UL, (u32)h);
++			if (b && !dma_mapping_error(&pdev->dev, a))
++				dma_unmap_single(&pdev->dev, a, 64, DMA_TO_DEVICE);
++			if (c)
++				dma_free_coherent(&pdev->dev, 4096, c, h);
++			kfree(b);
++		}
++	}
++	pci_bus_add_devices(bridge->bus);
++	pr_info("padre_pci: done\n");
++
++	return 0;
++}
++subsys_initcall(padre_pci_init);

@@ -1,0 +1,193 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 14/23] platform: padre: add the DS1337 hardware clock
+
+The DS1337 RTC at I2C address 0x68, accessed through padre_i2c, exposed
+as /dev/rtc0 (rtc class); with RTC_HCTOSYS the time is restored at boot.
+---
+ drivers/platform/padre/Kconfig     |   8 ++
+ drivers/platform/padre/Makefile    |   1 +
+ drivers/platform/padre/padre_rtc.c | 150 +++++++++++++++++++++++++++++
+ 3 files changed, 159 insertions(+)
+ create mode 100644 drivers/platform/padre/padre_rtc.c
+
+diff --git a/drivers/platform/padre/Kconfig b/drivers/platform/padre/Kconfig
+index cdbe992434c3c5979a6dcce709f9d4c300c9947a..643a74369394ee7250f9857d5a5e3a3e10015b12 100644
+--- a/drivers/platform/padre/Kconfig
++++ b/drivers/platform/padre/Kconfig
+@@ -9,4 +9,12 @@ config PADRE_I2C
+ 	  I2C access on the SoC (DS1337 clock, LM75, ICS clock generator),
+ 	  ported from the GPL i2c driver for 2.6.17.
+ 
++config PADRE_RTC
++	bool "DS1337 hardware clock (/dev/rtc0)"
++	depends on PADRE_I2C && RTC_CLASS
++	default y
++	help
++	  Dallas DS1337 RTC at I2C address 0x68, through the padre_i2c TWSI
++	  accesses; with RTC_HCTOSYS the time is restored at boot.
++
+ endmenu
+diff --git a/drivers/platform/padre/Makefile b/drivers/platform/padre/Makefile
+index f82c8514c431d9097786d601f29d47ed0a1fe269..2013a9add70c226016b61404f446c7f7d21bdfea 100644
+--- a/drivers/platform/padre/Makefile
++++ b/drivers/platform/padre/Makefile
+@@ -1,2 +1,3 @@
+ # SPDX-License-Identifier: GPL-2.0
+ obj-$(CONFIG_PADRE_I2C)		+= padre_i2c.o
++obj-$(CONFIG_PADRE_RTC)		+= padre_rtc.o
+diff --git a/drivers/platform/padre/padre_rtc.c b/drivers/platform/padre/padre_rtc.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..87d86a566706610ff541e096053321a11c22b65b
+--- /dev/null
++++ b/drivers/platform/padre/padre_rtc.c
+@@ -0,0 +1,150 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * padre_rtc.c: hardware clock of the ReadyNAS Duo v1, a Dallas/Maxim
++ * DS1337 at I2C address 0x68 (registers from include/asm-padre/ds1337.h of
++ * NETGEAR's GPL 2.6.17 kernel, which drove it with drivers/i2c/chips/
++ * ds1337.c). Accessed through the padre_i2c TWSI functions (CMOS_READ/WRITE),
++ * exposed as /dev/rtc0 by the rtc class.
++ *
++ * Registers (BCD): 0 sec, 1 min, 2 hour (bit 6 = 12 h, bit 5 = PM), 3 day of
++ * week 1-7, 4 date, 5 month (bit 7 = century), 6 year 00-99; 0x0e control
++ * (bit 7 /EOSC: 1 = oscillator stopped on battery), 0x0f status (bit 7 OSF:
++ * oscillator stopped since, time invalid).
++ * Years 2000 to 2199 (century bit), as rtc-ds1307 does for the DS1337.
++ */
++
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/bcd.h>
++#include <linux/rtc.h>
++#include <linux/platform_device.h>
++
++#include <asm/padre.h>
++#include <asm/padre_i2c.h>
++
++#define RTC_ADDR	0x68
++#define REG_SEC		0x00
++#define REG_HOUR	0x02
++#define REG_MONTH	0x05
++#define REG_CTRL	0x0e
++#define REG_STATUS	0x0f
++#define HOUR_12		0x40
++#define HOUR_PM		0x20
++#define MONTH_CENTURY	0x80
++#define CTRL_EOSC	0x80
++#define STATUS_OSF	0x80
++
++static void padre_rtc_read_regs(u8 r[7])
++{
++	int i;
++
++	for (i = 0; i < 7; i++)
++		r[i] = CMOS_READ(i);
++}
++
++static int padre_rtc_read_time(struct device *dev, struct rtc_time *tm)
++{
++	u8 r[7], s;
++	int try;
++
++	if (CMOS_READ(REG_STATUS) & STATUS_OSF) {
++		dev_warn_once(dev, "oscillator stopped (OSF): time invalid, set it (hwclock -w)\n");
++		return -EINVAL;
++	}
++	/* ponytail: byte by byte (validated one-byte TWSI accesses); read again
++	 * if the seconds changed during the read (carry in progress).
++	 */
++	for (try = 0; try < 3; try++) {
++		padre_rtc_read_regs(r);
++		s = CMOS_READ(REG_SEC);
++		if (s == r[0])
++			break;
++	}
++	tm->tm_sec = bcd2bin(r[0] & 0x7f);
++	tm->tm_min = bcd2bin(r[1] & 0x7f);
++	if (r[2] & HOUR_12) {
++		tm->tm_hour = bcd2bin(r[2] & 0x1f) % 12;
++		if (r[2] & HOUR_PM)
++			tm->tm_hour += 12;
++	} else {
++		tm->tm_hour = bcd2bin(r[2] & 0x3f);
++	}
++	tm->tm_wday = bcd2bin(r[3] & 0x07) - 1;
++	tm->tm_mday = bcd2bin(r[4] & 0x3f);
++	tm->tm_mon = bcd2bin(r[5] & 0x1f) - 1;
++	tm->tm_year = bcd2bin(r[6]) + 100 + ((r[5] & MONTH_CENTURY) ? 100 : 0);
++	return 0;
++}
++
++static int padre_rtc_set_time(struct device *dev, struct rtc_time *tm)
++{
++	u8 r[7], c;
++	int i;
++
++	r[0] = bin2bcd(tm->tm_sec);
++	r[1] = bin2bcd(tm->tm_min);
++	r[2] = bin2bcd(tm->tm_hour);			/* 24 h mode */
++	r[3] = bin2bcd(tm->tm_wday + 1);
++	r[4] = bin2bcd(tm->tm_mday);
++	r[5] = bin2bcd(tm->tm_mon + 1) | (tm->tm_year >= 200 ? MONTH_CENTURY : 0);
++	r[6] = bin2bcd(tm->tm_year % 100);
++
++	/* oscillator running, even on battery */
++	c = CMOS_READ(REG_CTRL);
++	if (c & CTRL_EOSC)
++		CMOS_WRITE(c & ~CTRL_EOSC, REG_CTRL);
++	/* seconds first: writing them resets the divider, the rest is
++	 * written within the same second
++	 */
++	for (i = 0; i < 7; i++)
++		CMOS_WRITE(r[i], i);
++	CMOS_WRITE(CMOS_READ(REG_STATUS) & ~STATUS_OSF, REG_STATUS);
++	return 0;
++}
++
++static const struct rtc_class_ops padre_rtc_ops = {
++	.read_time	= padre_rtc_read_time,
++	.set_time	= padre_rtc_set_time,
++};
++
++static int padre_rtc_probe(struct platform_device *pdev)
++{
++	struct rtc_device *rtc = devm_rtc_allocate_device(&pdev->dev);
++	u8 r[16];
++	int i;
++
++	for (i = 0; i < 16; i++)
++		r[i] = CMOS_READ(i);
++	dev_info(&pdev->dev, "DS1337 0x%02x, registers 00-0f: %16ph\n", RTC_ADDR, r);
++	if (IS_ERR(rtc))
++		return PTR_ERR(rtc);
++	rtc->ops = &padre_rtc_ops;
++	rtc->range_min = RTC_TIMESTAMP_BEGIN_2000;
++	rtc->range_max = mktime64(2199, 12, 31, 23, 59, 59);
++	return devm_rtc_register_device(rtc);
++}
++
++static struct platform_driver padre_rtc_driver = {
++	.probe	= padre_rtc_probe,
++	.driver	= { .name = "padre-rtc" },
++};
++
++static int __init padre_rtc_init(void)
++{
++	struct platform_device *pdev;
++	int r;
++
++	if (padre_disabled("rtc") || !i2c_device_exist(RTC_ADDR))
++		return 0;
++	r = platform_driver_register(&padre_rtc_driver);
++	if (r)
++		return r;
++	pdev = platform_device_register_simple("padre-rtc", -1, NULL, 0);
++	if (IS_ERR(pdev)) {
++		platform_driver_unregister(&padre_rtc_driver);
++		return PTR_ERR(pdev);
++	}
++	return 0;
++}
++device_initcall(padre_rtc_init);

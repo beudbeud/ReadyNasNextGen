@@ -1,0 +1,68 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 11/23] usb: ehci-pci, pci-quirks: Padre PCI bridge byte order
+
+The Padre PCI bridge (PCI_SWAP = 0x4444) already presents the EHCI
+registers in CPU order: use big_endian_mmio (descriptors stay
+little-endian), and skip the early USB handoff quirk, which has no BIOS
+to take over from and would swap with readl/writel. The VT6212 EHCI
+sleep time register is left as under 2.6.17.
+---
+ drivers/usb/host/ehci-pci.c   | 13 ++++++++++++-
+ drivers/usb/host/pci-quirks.c |  6 ++++++
+ 2 files changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/usb/host/ehci-pci.c b/drivers/usb/host/ehci-pci.c
+index 889dc4426271173f5a5bcb7a445d7089426284b1..ed3a8949e695f8ff75cb54f4da0f29ca047b897c 100644
+--- a/drivers/usb/host/ehci-pci.c
++++ b/drivers/usb/host/ehci-pci.c
+@@ -13,6 +13,9 @@
+ 
+ #include "ehci.h"
+ #include "pci-quirks.h"
++#ifdef CONFIG_SPARC_PADRE
++#include <asm/padre.h>
++#endif
+ 
+ #define DRIVER_DESC "EHCI PCI platform driver"
+ 
+@@ -95,6 +98,12 @@ static int ehci_pci_setup(struct usb_hcd *hcd)
+ 	int			retval;
+ 
+ 	ehci->caps = hcd->regs;
++#ifdef CONFIG_SPARC_PADRE
++	/* Padre PCI bridge with PCI_SWAP = 0x4444 (default): registers already
++	 * in CPU byte order (2.6.17: native readl); descriptors little-endian.
++	 */
++	ehci->big_endian_mmio = padre_pciswap != 0;
++#endif
+ 
+ 	/*
+ 	 * ehci_init() causes memory for DMA transfers to be
+@@ -173,7 +182,9 @@ static int ehci_pci_setup(struct usb_hcd *hcd)
+ 		}
+ 		break;
+ 	case PCI_VENDOR_ID_VIA:
+-		if (pdev->device == 0x3104 && (pdev->revision & 0xf0) == 0x60) {
++		/* Padre: register 0x4b left as under 2.6.17 (0x09) */
++		if (!IS_ENABLED(CONFIG_SPARC_PADRE) &&
++		    pdev->device == 0x3104 && (pdev->revision & 0xf0) == 0x60) {
+ 			u8 tmp;
+ 
+ 			/* The VT6212 defaults to a 1 usec EHCI sleep time which
+diff --git a/drivers/usb/host/pci-quirks.c b/drivers/usb/host/pci-quirks.c
+index 0404489c2f6a9cd40faa46da151b1f65d0319c80..8844527b9d7ffbb768b2ae42210a9239efd18d9d 100644
+--- a/drivers/usb/host/pci-quirks.c
++++ b/drivers/usb/host/pci-quirks.c
+@@ -1260,6 +1260,12 @@ static void quirk_usb_handoff_xhci(struct pci_dev *pdev)
+ 
+ static void quirk_usb_early_handoff(struct pci_dev *pdev)
+ {
++	/* Padre: no BIOS to take over from; this quirk accesses registers
++	 * with readl/writel, which swap bytes on sparc32 whereas the Padre
++	 * PCI bridge (PCI_SWAP = 0x4444) already presents them in order.
++	 */
++	if (IS_ENABLED(CONFIG_SPARC_PADRE))
++		return;
+ 	struct device_node *parent;
+ 	bool is_rpi;
+ 

@@ -1,0 +1,588 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 15/23] platform: padre: add the LEDs and backup button
+
+Ported from the GPL 2.6.17 led_button driver, same interface
+(/proc/sys/dev/led, /proc/sys/dev/button, uevent_helper "button" on
+press). The 2.6.17 padre_led_handler hooks become padre_led_set() and
+padre_led_ata_activity() (asm/padre.h, stubs when the driver is off).
+---
+ arch/sparc/include/asm/padre.h     |   9 +
+ drivers/platform/padre/Kconfig     |   7 +
+ drivers/platform/padre/Makefile    |   1 +
+ drivers/platform/padre/padre_led.c | 522 +++++++++++++++++++++++++++++
+ 4 files changed, 539 insertions(+)
+ create mode 100644 drivers/platform/padre/padre_led.c
+
+diff --git a/arch/sparc/include/asm/padre.h b/arch/sparc/include/asm/padre.h
+index 57acffebf2c9d24dc50deaf79f6fb34486fb2819..eb5054e96f071b44bae75a2435aa841cdd51db47 100644
+--- a/arch/sparc/include/asm/padre.h
++++ b/arch/sparc/include/asm/padre.h
+@@ -156,6 +156,15 @@ void padre_handler_irq(unsigned int pil);
+ void padre_clean_dcache_range(unsigned long start, unsigned long end);
+ void padre_flush_dcache_range(unsigned long start, unsigned long end);
+ void padre_flush_icache_all(void);
++
++/* drivers/platform/padre/padre_led.c (formerly the padre_led_handler hooks) */
++#ifdef CONFIG_PADRE_LED
++void padre_led_set(int led, int st);
++void padre_led_ata_activity(int ch);
++#else
++static inline void padre_led_set(int led, int st) { }
++static inline void padre_led_ata_activity(int ch) { }
++#endif
+ #endif
+ 
+ #endif /* _ASM_SPARC_PADRE_H */
+diff --git a/drivers/platform/padre/Kconfig b/drivers/platform/padre/Kconfig
+index 643a74369394ee7250f9857d5a5e3a3e10015b12..14bf546bdc576b71691eb3d0207342e8a039f56b 100644
+--- a/drivers/platform/padre/Kconfig
++++ b/drivers/platform/padre/Kconfig
+@@ -17,4 +17,11 @@ config PADRE_RTC
+ 	  Dallas DS1337 RTC at I2C address 0x68, through the padre_i2c TWSI
+ 	  accesses; with RTC_HCTOSYS the time is restored at boot.
+ 
++config PADRE_LED
++	bool "LEDs and backup button"
++	default y
++	help
++	  /proc/sys/dev/led and /proc/sys/dev/button, ported from the
++	  GPL led_button driver for 2.6.17.
++
+ endmenu
+diff --git a/drivers/platform/padre/Makefile b/drivers/platform/padre/Makefile
+index 2013a9add70c226016b61404f446c7f7d21bdfea..d4bfd4fce8937fd4980ee7d18cf1680be3280b60 100644
+--- a/drivers/platform/padre/Makefile
++++ b/drivers/platform/padre/Makefile
+@@ -1,3 +1,4 @@
+ # SPDX-License-Identifier: GPL-2.0
+ obj-$(CONFIG_PADRE_I2C)		+= padre_i2c.o
+ obj-$(CONFIG_PADRE_RTC)		+= padre_rtc.o
++obj-$(CONFIG_PADRE_LED)		+= padre_led.o
+diff --git a/drivers/platform/padre/padre_led.c b/drivers/platform/padre/padre_led.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..da7939cc9c34ef68d6e2a7f1d521dea6fb0849de
+--- /dev/null
++++ b/drivers/platform/padre/padre_led.c
+@@ -0,0 +1,522 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * padre_led.c: LEDs (ASIO, GPIO 5) and backup button (GPIO 0) of the
++ * ReadyNAS Duo v1.
++ *
++ * Ported from padre_led_libre.c (GPL driver for 2.6.17, validated on the
++ * NAS under 2.6.17, written from the functional LED_BOUTON description)
++ * to 6.18, keeping the same interface:
++ *   /proc/sys/dev/led/{disk_1_fault...disk_4_fault,disk_activity,power,
++ *                      backup_status,set_pwm,get_pwm,ata_led_off}
++ *   /proc/sys/dev/button/{emulate,status,backup}
++ * and the uevent_helper call ("button", BUTTON=backup ACTION=down|up
++ * DUR=ms) on press. The padre_led_handler hooks of the 2.6.17 kernel are
++ * replaced by padre_led_set() / padre_led_ata_activity() (asm/padre.h).
++ *
++ * Copyright (C) 2026 the ReadyNasNextGen authors
++ */
++
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/sysctl.h>
++#include <linux/interrupt.h>
++#include <linux/timer.h>
++#include <linux/workqueue.h>
++#include <linux/kobject.h>
++#include <linux/umh.h>
++#include <linux/spinlock.h>
++#include <linux/io.h>
++
++#include <asm/padre.h>
++
++#define R(o)		((void __iomem *)(PADRE_APB + (o)))
++#define GPIO_DATA	R(0xc0)		/* pin levels */
++#define GPIO_DIR	R(0xc4)		/* 1 = output */
++#define GPIO_ICFG	R(0xc8)		/* IEN 0-9, IPOL 10-19, IMODE 20-29 */
++#define GPIO_ISTAT	R(0xcc)		/* pending; write 1 = acknowledge */
++#define ASIO_CTRL	R(0x800)
++#define ASIO_PWM	R(0x804)	/* 4 bits/channel, (brightness+1)&15 */
++#define ASIO_LFM	R(0x808)	/* 4 bits/channel, blink pattern */
++#define ASIO_OUT	R(0x80c)	/* bit c = channel on */
++#define UART1_CTRL	R(0x78)		/* UART 0x6000_0070: shared pins */
++
++#define IEN(n)		(1 << (n))
++#define IPOL(n)		(1 << (10 + (n)))
++#define IMODE(n)	(1 << (20 + (n)))
++
++#define NASIO		6
++#define CH_ACT		4	/* disk_activity */
++#define CH_POWER	5	/* power */
++#define BKLED_GPIO	5	/* backup LED, active low */
++#define BKLED_IDX	(30 + BKLED_GPIO)
++#define BTN_GPIO	0	/* backup button, active low */
++#define BTN_HWIRQ	(16 + BTN_GPIO)
++#define BTN_INDEX	8	/* "backup" button number for emulate */
++
++#define ST_BREATH	0x13
++#define BREATH_TICK	7	/* jiffies (HZ = 100) */
++#define ACT_GAP		12
++
++struct led {
++	u8 state, pwm, pwmmax, up;
++	unsigned long expires;
++};
++
++static struct led asio[NASIO], bkled;
++static u32 asio_out;		/* copy of ASIO_OUT (the activity flash leaves it unchanged) */
++static unsigned long act_next = INITIAL_JIFFIES;	/* not 0: jiffies starts at -300 s */
++static int ata_led_off;
++static int pwm_packed;		/* max brightness, channel 0 in the low nibble */
++static DEFINE_SPINLOCK(hw_lock);
++static struct timer_list led_timer;
++static bool led_ready;
++
++static int btn_state;		/* 1 = pressed */
++static unsigned long btn_last, btn_dur;
++static struct timer_list btn_timer;
++
++static inline u32 rd(void __iomem *r) { return __raw_readl(r); }
++static inline void wr(void __iomem *r, u32 v) { __raw_writel(v, r); }
++
++/* ---------- ASIO ---------- */
++
++static void nibble(void __iomem *r, int ch, u32 v)
++{
++	wr(r, (rd(r) & ~(0xfu << (ch << 2))) | ((v & 0xf) << (ch << 2)));
++}
++
++static void asio_on(int ch, int on)
++{
++	if (on)
++		asio_out |= 1 << ch;
++	else
++		asio_out &= ~(1 << ch);
++	wr(ASIO_OUT, asio_out);
++}
++
++static void led_timer_kick(unsigned long when)
++{
++	if (!timer_pending(&led_timer) || time_before(when, led_timer.expires))
++		mod_timer(&led_timer, when);
++}
++
++/* hw_lock held */
++static void asio_set(int ch, int st)
++{
++	struct led *l = &asio[ch];
++
++	if (st == 0 || st == 1) {
++		nibble(ASIO_LFM, ch, 0);
++		nibble(ASIO_PWM, ch, l->pwmmax + 1);
++		l->pwm = l->pwmmax;
++		asio_on(ch, st);
++	} else if (st == 2 || st == 3) {
++		nibble(ASIO_LFM, ch, st == 2 ? 10 : 12);
++		asio_on(ch, 1);
++	} else if (st > 0x40 && st < 0x50) {
++		nibble(ASIO_LFM, ch, st - 0x40);
++		asio_on(ch, 1);
++	} else if (st == 4 && ch >= CH_ACT) {
++		asio_on(ch, 0);		/* one-shot: the flash comes from padre_led_ata_activity */
++		nibble(ASIO_LFM, ch, 3);
++	} else if (st == ST_BREATH && ch >= CH_ACT) {
++		nibble(ASIO_LFM, ch, 0);
++		l->pwm = 0;
++		l->up = 1;
++		l->expires = jiffies + 1;
++		led_timer_kick(l->expires);
++	} else
++		return;
++	l->state = st;
++}
++
++static int asio_fault_state(int ch)
++{
++	u32 lfm = (rd(ASIO_LFM) >> (ch << 2)) & 0xf;
++
++	return lfm ? 0x40 + lfm : (asio_out >> ch) & 1;
++}
++
++static void breathe(int ch)
++{
++	struct led *l = &asio[ch];
++	int d = (l->pwm >> 1) + 1;
++
++	if (l->up) {
++		if (!(asio_out & (1 << ch)))
++			asio_on(ch, 1);
++		l->pwm += d;
++		if (l->pwm >= l->pwmmax) {
++			l->pwm = l->pwmmax;
++			l->up = 0;
++		}
++	} else if (l->pwm < d) {
++		l->pwm = 0;
++		l->up = 1;
++		asio_on(ch, 0);
++	} else
++		l->pwm -= d;
++	nibble(ASIO_PWM, ch, l->pwm + 1);
++	l->expires = jiffies + BREATH_TICK;
++}
++
++/* ---------- GPIO LED (backup) ---------- */
++
++static void bkled_set(int st)
++{
++	if (st < 0 || st > 3)
++		return;
++	bkled.state = st;
++	if (st == 1)
++		wr(GPIO_DATA, rd(GPIO_DATA) & ~(1 << BKLED_GPIO));
++	else
++		wr(GPIO_DATA, rd(GPIO_DATA) | (1 << BKLED_GPIO));
++	if (st >= 2) {
++		bkled.expires = jiffies + 1;
++		led_timer_kick(bkled.expires);
++	}
++}
++
++static void led_timer_fn(struct timer_list *unused)
++{
++	unsigned long flags, now = jiffies, next = now + 3600 * HZ;
++	int ch, armed = 0;
++
++	spin_lock_irqsave(&hw_lock, flags);
++	for (ch = 0; ch < NASIO; ch++) {
++		if (asio[ch].state != ST_BREATH)
++			continue;
++		if (!time_before(now, asio[ch].expires))
++			breathe(ch);
++		if (time_before(asio[ch].expires, next))
++			next = asio[ch].expires;
++		armed = 1;
++	}
++	if (bkled.state >= 2) {
++		if (!time_before(now, bkled.expires)) {
++			wr(GPIO_DATA, rd(GPIO_DATA) ^ (1 << BKLED_GPIO));
++			bkled.expires = now + (bkled.state == 2 ? 50 : 25);
++		}
++		if (time_before(bkled.expires, next))
++			next = bkled.expires;
++		armed = 1;
++	}
++	if (armed)
++		mod_timer(&led_timer, next);
++	spin_unlock_irqrestore(&hw_lock, flags);
++}
++
++/* ---------- API for the other drivers (ex padre_led_handler) ---------- */
++
++void padre_led_set(int led, int st)
++{
++	unsigned long flags;
++
++	if (!led_ready)
++		return;
++	spin_lock_irqsave(&hw_lock, flags);
++	if (led >= 0 && led < NASIO)
++		asio_set(led, st);
++	else if (led == BKLED_IDX)	/* ponytail: GPIO 5 only; never GPIO 2 (power off) */
++		bkled_set(st);
++	spin_unlock_irqrestore(&hw_lock, flags);
++}
++EXPORT_SYMBOL(padre_led_set);
++
++/* activity LED flash, at most one every ACT_GAP jiffies */
++void padre_led_ata_activity(int ch)
++{
++	if (!led_ready || ch < 0 || ch > 3 || ata_led_off ||
++	    time_before(jiffies, act_next))
++		return;
++	wr(ASIO_OUT, asio_out | (1 << CH_ACT));	/* the copy stays unchanged */
++	act_next = jiffies + ACT_GAP;
++}
++EXPORT_SYMBOL(padre_led_ata_activity);
++
++/* ---------- backup button ---------- */
++
++static void btn_event(int down)
++{
++#ifdef CONFIG_UEVENT_HELPER
++	char dur[24], *argv[3], *envp[7];
++	int i = 0;
++
++	if (!uevent_helper[0])
++		return;
++	sprintf(dur, "DUR=%lu", btn_dur);
++	argv[0] = uevent_helper;
++	argv[1] = "button";
++	argv[2] = NULL;
++	envp[i++] = "HOME=/";
++	envp[i++] = "PATH=/sbin:/bin:/usr/sbin:/usr/bin";
++	envp[i++] = "BUTTON=backup";
++	envp[i++] = down ? "ACTION=down" : "ACTION=up";
++	envp[i++] = dur;
++	envp[i] = NULL;
++	/* UMH_WAIT_EXEC: argv/envp (stack) valid until the exec */
++	call_usermodehelper(uevent_helper, argv, envp, UMH_WAIT_EXEC);
++#endif
++}
++
++static void btn_work_fn(struct work_struct *unused)
++{
++	unsigned long flags;
++	int down = !(rd(GPIO_DATA) & (1 << BTN_GPIO));
++
++	if (down != btn_state) {
++		btn_state = down;
++		btn_last = jiffies;
++		if (down) {
++			btn_dur = 0;
++			mod_timer(&btn_timer, jiffies + HZ);
++		} else
++			timer_delete(&btn_timer);
++		btn_event(down);
++	}
++	spin_lock_irqsave(&hw_lock, flags);
++	/* next polarity = current level (IPOL 1 = triggers on low level) */
++	if (down)
++		wr(GPIO_ICFG, (rd(GPIO_ICFG) & ~IPOL(BTN_GPIO)) | IEN(BTN_GPIO));
++	else
++		wr(GPIO_ICFG, rd(GPIO_ICFG) | IPOL(BTN_GPIO) | IEN(BTN_GPIO));
++	spin_unlock_irqrestore(&hw_lock, flags);
++}
++static DECLARE_WORK(btn_work, btn_work_fn);
++
++static irqreturn_t btn_irq(int irq, void *dev)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&hw_lock, flags);
++	wr(GPIO_ICFG, (rd(GPIO_ICFG) ^ IPOL(BTN_GPIO)) & ~IEN(BTN_GPIO));
++	wr(GPIO_ISTAT, 1 << BTN_GPIO);
++	spin_unlock_irqrestore(&hw_lock, flags);
++	schedule_work(&btn_work);
++	return IRQ_HANDLED;
++}
++
++/* long press: +1000 ms per second, second "down" at 5000 ms */
++static void btn_long_fn(struct work_struct *unused)
++{
++	if (btn_state && btn_dur == 5000)
++		btn_event(1);
++}
++static DECLARE_WORK(btn_long_work, btn_long_fn);
++
++static void btn_timer_fn(struct timer_list *unused)
++{
++	if (!btn_state)
++		return;
++	btn_dur += 1000;
++	if (btn_dur == 5000)
++		schedule_work(&btn_long_work);
++	mod_timer(&btn_timer, jiffies + HZ);
++}
++
++/* ---------- /proc/sys (kernel buffers since 5.8) ---------- */
++
++static int out_str(const char *s, int len, void *buf, size_t *lenp, loff_t *ppos)
++{
++	if (!*lenp || *ppos) {
++		*lenp = 0;
++		return 0;
++	}
++	if (len > *lenp)
++		len = *lenp;
++	memcpy(buf, s, len);
++	*lenp = len;
++	*ppos += len;
++	return 0;
++}
++
++static void in_str(char *k, int size, const void *buf, size_t *lenp, loff_t *ppos)
++{
++	int len = *lenp < size - 1 ? *lenp : size - 1;
++
++	memcpy(k, buf, len);
++	k[len] = 0;
++	*ppos += *lenp;
++}
++
++static int proc_led(const struct ctl_table *t, int write, void *buf,
++		    size_t *lenp, loff_t *ppos)
++{
++	int idx = (long)t->extra1, len;
++	unsigned long flags;
++	char k[96];
++
++	if (write) {
++		int st;
++
++		in_str(k, sizeof(k), buf, lenp, ppos);
++		st = simple_strtoul(k, NULL, 0);
++		if (idx < 4) {
++			if (idx <= CH_ACT)
++				padre_led_set(idx, st);
++		} else
++			padre_led_set(idx, st);
++		return 0;
++	}
++	spin_lock_irqsave(&hw_lock, flags);
++	if (idx < 4)
++		len = sprintf(k, "0x%02x\n", asio_fault_state(idx));
++	else if (idx < NASIO)
++		len = sprintf(k, "state=0x%02x pwm=%x expired=%lu jiffies=%lu\n",
++			      asio[idx].state, asio[idx].pwm, asio[idx].expires, jiffies);
++	else
++		len = sprintf(k, "state=0x%02x expired=%lu jiffies=%lu\n",
++			      bkled.state, bkled.expires, jiffies);
++	spin_unlock_irqrestore(&hw_lock, flags);
++	return out_str(k, len, buf, lenp, ppos);
++}
++
++static void pwm_apply(void)
++{
++	int ch;
++
++	for (ch = 0; ch < NASIO; ch++) {
++		asio[ch].pwmmax = (pwm_packed >> (ch << 2)) & 0xf;
++		if (asio[ch].state != ST_BREATH) {
++			asio[ch].pwm = asio[ch].pwmmax;
++			nibble(ASIO_PWM, ch, asio[ch].pwmmax + 1);
++		}
++	}
++}
++
++static int proc_set_pwm(const struct ctl_table *t, int write, void *buf,
++			size_t *lenp, loff_t *ppos)
++{
++	unsigned long flags;
++	int r = proc_dointvec(t, write, buf, lenp, ppos);
++
++	if (write && !r) {
++		spin_lock_irqsave(&hw_lock, flags);
++		pwm_apply();
++		spin_unlock_irqrestore(&hw_lock, flags);
++	}
++	return r;
++}
++
++static int proc_btn(const struct ctl_table *t, int write, void *buf,
++		    size_t *lenp, loff_t *ppos)
++{
++	char k[96], *p;
++	int len;
++
++	if (!write) {
++		if (t->extra1)	/* status */
++			len = sprintf(k, "name=backup,pin=%d,state=%d,last_event_t=%lu,dur=%lu\n\n",
++				      BTN_GPIO, btn_state, btn_last, btn_dur);
++		else		/* backup */
++			len = sprintf(k, "%d\n", btn_state);
++		return out_str(k, len, buf, lenp, ppos);
++	}
++	in_str(k, sizeof(k), buf, lenp, ppos);
++	p = k;
++	if (t->extra1) {	/* emulate: "index state" */
++		if (simple_strtoul(p, &p, 0) != BTN_INDEX)
++			return 0;
++		while (*p == ' ')
++			p++;
++	}
++	btn_event(simple_strtoul(p, NULL, 0) != 0);
++	return 0;
++}
++
++#define LED(name, idx) { .procname = name, .mode = 0600, \
++			 .proc_handler = proc_led, .extra1 = (void *)(idx) }
++static const struct ctl_table led_table[] = {
++	LED("disk_1_fault", 0),
++	LED("disk_2_fault", 1),
++	LED("disk_3_fault", 2),
++	LED("disk_4_fault", 3),
++	LED("disk_activity", CH_ACT),
++	LED("power", CH_POWER),
++	LED("backup_status", BKLED_IDX),
++	{ .procname = "set_pwm", .data = &pwm_packed, .maxlen = sizeof(int),
++	  .mode = 0200, .proc_handler = proc_set_pwm },
++	{ .procname = "get_pwm", .data = &pwm_packed, .maxlen = sizeof(int),
++	  .mode = 0400, .proc_handler = proc_dointvec },
++	{ .procname = "ata_led_off", .data = &ata_led_off, .maxlen = sizeof(int),
++	  .mode = 0600, .proc_handler = proc_dointvec },
++};
++
++static const struct ctl_table btn_table[] = {
++	{ .procname = "emulate", .mode = 0200, .proc_handler = proc_btn, .extra1 = (void *)1 },
++	{ .procname = "status", .mode = 0400, .proc_handler = proc_btn, .extra1 = (void *)1 },
++	{ .procname = "backup", .mode = 0600, .proc_handler = proc_btn },
++};
++
++/* ---------- setup ---------- */
++
++static void hw_init(void)
++{
++	u8 *vpd = padre_boot_param.vpd_extend;
++	int ch;
++
++	/* max brightness: VPD if product_features bit 18, otherwise 15 */
++	pwm_packed = 0xffffff;
++	if (padre_boot_param.product_features & (1 << 18)) {
++		pwm_packed = 0;
++		for (ch = 0; ch < NASIO; ch++) {
++			u8 b = vpd[0x136 - 0xe4 + (ch >> 1)];
++
++			pwm_packed |= ((ch & 1) ? b & 0xf : b >> 4) << (ch << 2);
++		}
++	}
++
++	wr(UART1_CTRL, 0);
++	wr(GPIO_DIR, rd(GPIO_DIR) | 0x3f00 | (1 << BKLED_GPIO));
++	wr(GPIO_DATA, rd(GPIO_DATA) | (1 << BKLED_GPIO));	/* backup LED off */
++	wr(ASIO_CTRL, 0);
++	wr(ASIO_CTRL, 6);
++	wr(ASIO_LFM, 3 << (CH_ACT << 2));		/* activity in one-shot mode */
++	wr(ASIO_PWM, 0);
++	asio_out = rd(ASIO_OUT) & 0x3f;			/* state left by iboot */
++	for (ch = 0; ch < NASIO; ch++)
++		asio[ch].state = (asio_out >> ch) & 1;
++	pwm_apply();
++}
++
++static int __init padre_led_init(void)
++{
++	unsigned long flags;
++	int r;
++
++	if (padre_disabled("led"))
++		return 0;
++	pr_info("padre_led: start\n");
++	if (padre_boot_param.vpd_extend[0] != 1) {
++		pr_err("padre_led: not a ReadyNAS Duo (BOARDID %u)\n",
++		       padre_boot_param.vpd_extend[0]);
++		return -ENODEV;
++	}
++	timer_setup(&led_timer, led_timer_fn, 0);
++	timer_setup(&btn_timer, btn_timer_fn, 0);
++
++	spin_lock_irqsave(&hw_lock, flags);
++	hw_init();
++	spin_unlock_irqrestore(&hw_lock, flags);
++
++	register_sysctl("dev/led", led_table);
++	register_sysctl("dev/button", btn_table);
++
++	pr_info("padre_led: button IRQ (GPIO 0, source 16)\n");
++	wr(GPIO_ISTAT, 1 << BTN_GPIO);
++	r = request_irq(padre_irq_virq(BTN_HWIRQ), btn_irq, 0, "backup", NULL);
++	if (!r) {
++		btn_state = !(rd(GPIO_DATA) & (1 << BTN_GPIO));
++		btn_last = jiffies;
++		wr(GPIO_ICFG, (rd(GPIO_ICFG) & ~(IMODE(BTN_GPIO) | IPOL(BTN_GPIO)))
++		   | (btn_state ? 0 : IPOL(BTN_GPIO)) | IEN(BTN_GPIO));
++	}
++
++	led_ready = true;
++	padre_led_set(CH_POWER, ST_BREATH);
++	pr_info("padre_led: done, LEDs ready, button %s\n", r ? "unavailable" : "on GPIO 0 IRQ");
++
++	return 0;
++}
++device_initcall(padre_led_init);

@@ -1,0 +1,160 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 04/23] sparc: Padre: avoid the broken sdiv instruction
+
+On this CPU sdiv gives wrong results; udiv, umul and smul are correct.
+C code is compiled with -mcpu=v7, so gcc calls .mul/.umul/.div/.udiv/
+.rem/.urem, provided by padre_muldiv.S (signed division done unsigned,
+signs handled apart). The assembler keeps -Av8 for the existing .S.
+---
+ arch/sparc/Makefile           |   9 +++
+ arch/sparc/lib/Makefile       |   3 +
+ arch/sparc/lib/padre_muldiv.S | 105 ++++++++++++++++++++++++++++++++++
+ 3 files changed, 117 insertions(+)
+ create mode 100644 arch/sparc/lib/padre_muldiv.S
+
+diff --git a/arch/sparc/Makefile b/arch/sparc/Makefile
+index 0400078076e588be93a702d1c64eb9fd34466075..d33c6af3af576a535055375431cd8dce0f3d7567 100644
+--- a/arch/sparc/Makefile
++++ b/arch/sparc/Makefile
+@@ -29,7 +29,16 @@ UTS_MACHINE    := sparc
+ # versions of gcc.  Some gcc versions won't pass -Av8 to binutils when you
+ # give -mcpu=v8.  This silently worked with older bintutils versions but
+ # does not any more.
++ifeq ($(CONFIG_SPARC_PADRE),y)
++# Infrant Padre: the sdiv instruction gives wrong results. C is compiled
++# as v7 (gcc calls .div/.udiv/.mul..., see lib/padre_muldiv.S, which use
++# udiv/umul/smul, correct on this CPU); the assembler keeps -Av8 for the
++# existing .S sources (umul, udiv, swap...).
++
++KBUILD_CFLAGS  += -m32 -mcpu=v7 -pipe -mno-fpu $(call cc-option,-fcall-used-g5) $(call cc-option,-fcall-used-g7)
++else
+ KBUILD_CFLAGS  += -m32 -mcpu=v8 -pipe -mno-fpu $(call cc-option,-fcall-used-g5) $(call cc-option,-fcall-used-g7)
++endif
+ KBUILD_CFLAGS  += -Wa,-Av8
+ 
+ KBUILD_AFLAGS  += -m32 -Wa,-Av8
+diff --git a/arch/sparc/lib/Makefile b/arch/sparc/lib/Makefile
+index 783bdec0d7be056a4a8bce950e48432a9046dfd5..7d8cee72e68fc0ab4bbd24374c1d8da04d9b8e5c 100644
+--- a/arch/sparc/lib/Makefile
++++ b/arch/sparc/lib/Makefile
+@@ -11,6 +11,9 @@ lib-y                 += checksum_$(BITS).o
+ lib-$(CONFIG_SPARC32) += blockops.o
+ lib-y                 += memscan_$(BITS).o memcmp.o strncmp_$(BITS).o
+ lib-$(CONFIG_SPARC32) += divdi3.o udivdi3.o
++# Padre: sdiv is broken, code compiled as v7 -> gcc .mul/.div... routines
++
++obj-$(CONFIG_SPARC_PADRE) += padre_muldiv.o
+ lib-$(CONFIG_SPARC32) += copy_user.o locks.o
+ lib-$(CONFIG_SPARC64) += atomic_64.o
+ lib-$(CONFIG_SPARC32) += lshrdi3.o ashldi3.o
+diff --git a/arch/sparc/lib/padre_muldiv.S b/arch/sparc/lib/padre_muldiv.S
+new file mode 100644
+index 0000000000000000000000000000000000000000..a49da3fd5b1999be05754a09222911eeca9c6454
+--- /dev/null
++++ b/arch/sparc/lib/padre_muldiv.S
+@@ -0,0 +1,105 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * padre_muldiv.S: .mul .umul .div .udiv .rem .urem routines called by
++ * gcc -mcpu=v7, for the Infrant IT3107 "Padre".
++ *
++ * On this CPU the sdiv instruction (signed division) gives wrong
++ * results; udiv, umul and smul are correct (measured on the NAS).
++ * Signed division is therefore done unsigned, with signs handled apart.
++ * gcc convention: arguments in %o0/%o1, result in %o0 (64-bit product:
++ * high word in %o1), leaf routines without a register window.
++ *
++ * Limitation: kbuild cannot export a symbol whose name starts with a
++ * dot, so a module (.ko) that multiplies or divides will not load. The
++ * Padre drivers are built into the kernel (=y).
++ */
++
++#include <linux/linkage.h>
++
++	.text
++	.align	4
++
++/* signed product: %o1:%o0 = %o0 * %o1 */
++	.globl	.mul
++.mul:
++	smul	%o0, %o1, %o0
++	retl
++	 rd	%y, %o1
++
++/* unsigned product */
++	.globl	.umul
++.umul:
++	umul	%o0, %o1, %o0
++	retl
++	 rd	%y, %o1
++
++/* unsigned quotient: %o0 = %o0 / %o1 */
++	.globl	.udiv
++.udiv:
++	wr	%g0, 0, %y
++	nop
++	nop
++	nop
++	retl
++	 udiv	%o0, %o1, %o0
++
++/* unsigned remainder: %o0 = %o0 % %o1 */
++	.globl	.urem
++.urem:
++	wr	%g0, 0, %y
++	nop
++	nop
++	nop
++	udiv	%o0, %o1, %o2
++	umul	%o2, %o1, %o2
++	retl
++	 sub	%o0, %o2, %o0
++
++/* signed quotient, truncated towards zero (C) */
++	.globl	.div
++.div:
++	xor	%o0, %o1, %o3		! sign of the result in bit 31
++	tst	%o0
++	bge	1f
++	 tst	%o1
++	neg	%o0
++	tst	%o1
++1:	bge	2f
++	 nop
++	neg	%o1
++2:	wr	%g0, 0, %y
++	nop
++	nop
++	nop
++	udiv	%o0, %o1, %o0
++	tst	%o3
++	bl,a	3f
++	 neg	%o0
++3:	retl
++	 nop
++
++/* signed remainder, with the sign of the dividend (C) */
++	.globl	.rem
++.rem:
++	mov	%o0, %o3		! sign of the dividend
++
++	tst	%o0
++	bge	1f
++	 tst	%o1
++	neg	%o0
++	tst	%o1
++1:	bge	2f
++	 nop
++	neg	%o1
++2:	wr	%g0, 0, %y
++	nop
++	nop
++	nop
++	udiv	%o0, %o1, %o2
++	umul	%o2, %o1, %o2
++	sub	%o0, %o2, %o0
++	tst	%o3
++	bl,a	3f
++	 neg	%o0
++3:	retl
++	 nop

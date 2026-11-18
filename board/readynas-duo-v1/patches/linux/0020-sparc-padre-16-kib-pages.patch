@@ -1,4 +1,5 @@
-sparc: Padre: 16 KiB pages, like the stock 2.6.17 kernel
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 20/23] sparc: Padre: 16 KiB pages, like the stock 2.6.17 kernel
 
 A Linux page is 4 consecutive 4 KiB entries of the Infrant MMU
 (2.6.17 CONFIG_PADRE_16K_PAGE): pte_t holds the 4 hardware words,
@@ -8,10 +9,51 @@ Directories and tables are 4 KiB blocks of the uncached pool; the TLB
 probe of a page covers its 4 entries; the kernel stack is one page;
 AT_PAGESZ = 16384. The kernel then mounts the ext3 volumes with 16 KiB
 blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
+---
+ arch/sparc/Kconfig                        |  6 ++-
+ arch/sparc/include/asm/elf_32.h           |  5 ++
+ arch/sparc/include/asm/page_32.h          | 39 ++++++++++++--
+ arch/sparc/include/asm/pgtable_32_padre.h | 43 ++++++++++-----
+ arch/sparc/include/asm/thread_info_32.h   |  8 +++
+ arch/sparc/kernel/padre_kernel.c          |  2 +-
+ arch/sparc/mm/fault_32.c                  |  2 +-
+ arch/sparc/mm/padre_mm.c                  | 65 +++++++++++++----------
+ 8 files changed, 123 insertions(+), 47 deletions(-)
 
+diff --git a/arch/sparc/Kconfig b/arch/sparc/Kconfig
+index 5b4e622780dd7e08c22bbada6362cf4f1139f5aa..959ebf8abd2ad65fb4cfc9e1b155b7e4a1d57725 100644
+--- a/arch/sparc/Kconfig
++++ b/arch/sparc/Kconfig
+@@ -61,7 +61,7 @@ config SPARC32
+ 	select GENERIC_LIB_CMPDI2
+ 	select GENERIC_LIB_UCMPDI2
+ 	select HAVE_UID16
+-	select HAVE_PAGE_SIZE_4KB
++	select HAVE_PAGE_SIZE_4KB if !SPARC_PADRE
+ 	select LOCK_MM_AND_FIND_VMA
+ 	select OLD_SIGACTION
+ 	select ZONE_DMA
+@@ -354,11 +354,15 @@ config SPARC_PADRE
+ 	select ARCH_HAS_SYNC_DMA_FOR_DEVICE
+ 	select ARCH_HAS_DMA_PREP_COHERENT
+ 	select ARCH_HAS_DMA_ALLOC
++	select HAVE_PAGE_SIZE_16KB
+ 	select USB_EHCI_BIG_ENDIAN_MMIO if USB_EHCI_HCD
+ 	help
+ 	  Kernel for the Infrant IT3107 SoC (ReadyNAS Duo v1, NV+ v1): two-level
+ 	  Infrant MMU (not SRMMU), no PROM (iboot), raw kernel linked at
+ 	  0x80004000, C code compiled as SPARC v7 (sdiv is broken).
++	  16 KiB pages (4 hardware entries of 4 KiB each, like the stock
++	  2.6.17 kernel): the kernel mounts the ext3 volumes with 16 KiB
++	  blocks made by RAIDiator.
+ 	  A Padre kernel does not boot on any other machine.
+ 
+ 
+diff --git a/arch/sparc/include/asm/elf_32.h b/arch/sparc/include/asm/elf_32.h
+index 37a6016c9ccdf0d5822539ed8368d5358ba419f2..52cc52aff3b89a13dc0a8d524a391b5a20f6458a 100644
 --- a/arch/sparc/include/asm/elf_32.h
 +++ b/arch/sparc/include/asm/elf_32.h
-@@ -105,7 +105,12 @@
+@@ -105,7 +105,12 @@ typedef struct {
  #define ELF_CLASS	ELFCLASS32
  #define ELF_DATA	ELFDATA2MSB
  
@@ -24,9 +66,11 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
  
  
  /* This is the location that an ET_DYN program is loaded if exec'ed.  Typical
+diff --git a/arch/sparc/include/asm/page_32.h b/arch/sparc/include/asm/page_32.h
+index 4b4acccaeec0d155e86cc2731da441ca99eadbf6..22be0a8ecb620ae7443b7a1ae0ac3f1ba9c08da4 100644
 --- a/arch/sparc/include/asm/page_32.h
 +++ b/arch/sparc/include/asm/page_32.h
-@@ -78,7 +78,15 @@
+@@ -78,7 +78,15 @@ typedef struct { unsigned long iopgprot; } iopgprot_t;
  /*
   * .. while these make it easier on the compiler
   */
@@ -42,7 +86,7 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
  typedef unsigned long iopte_t;
  #ifndef CONFIG_SPARC_PADRE	/* Padre: folded pmd (pgtable-nopmd.h) */
  typedef unsigned long pmd_t;
-@@ -88,18 +96,18 @@
+@@ -88,18 +96,18 @@ typedef unsigned long ctxd_t;
  typedef unsigned long pgprot_t;
  typedef unsigned long iopgprot_t;
  
@@ -64,10 +108,11 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
  #define __pmd(x)	(x)
  #endif
  #define __iopte(x)	(x)
-@@ -113,6 +121,31 @@
+@@ -112,6 +120,31 @@ typedef unsigned long iopgprot_t;
+ 
  typedef pte_t *pgtable_t;
  
- #ifdef CONFIG_SPARC_PADRE
++#ifdef CONFIG_SPARC_PADRE
 +#include <asm/padre.h>
 +
 +/* Entry 0 + the accessed/dirty bits written by the MMU in entries 1-3 */
@@ -92,10 +137,11 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
 +}
 +#endif
 +
-+#ifdef CONFIG_SPARC_PADRE
+ #ifdef CONFIG_SPARC_PADRE
  #define TASK_UNMAPPED_BASE	0x20000000
  #else
- #define TASK_UNMAPPED_BASE	0x50000000
+diff --git a/arch/sparc/include/asm/pgtable_32_padre.h b/arch/sparc/include/asm/pgtable_32_padre.h
+index b48b5bafe297f51ebd11aacb8d4a4b707213810d..45eccd2f7a1caaf51ff9a2d2bf109f5f48ff708b 100644
 --- a/arch/sparc/include/asm/pgtable_32_padre.h
 +++ b/arch/sparc/include/asm/pgtable_32_padre.h
 @@ -7,9 +7,11 @@
@@ -113,7 +159,7 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
   * The kernel itself (0x8000_0000, I/O at 0x4000_0000) needs no tables:
   * fixed windows. Only user space and vmalloc go through the
   * tables.
-@@ -49,11 +51,12 @@
+@@ -49,11 +51,12 @@ void paging_init(void);
  #define pmd_ERROR(e)   __builtin_trap()
  #define pgd_ERROR(e)   __builtin_trap()
  
@@ -129,7 +175,7 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
  
  /* Software bit, only when V = 0: PROT_NONE (page "present" for Linux,
   * invalid for the MMU). Bits 10 and 11 are unused by the hardware
-@@ -84,10 +87,26 @@
+@@ -84,10 +87,26 @@ extern unsigned long pfn_base;
  extern unsigned long empty_zero_page[PAGE_SIZE / sizeof(unsigned long)];
  #define ZERO_PAGE(vaddr) (virt_to_page(empty_zero_page))
  
@@ -158,7 +204,7 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
  }
  
  static inline int pte_present(pte_t pte)
-@@ -114,7 +133,7 @@
+@@ -114,7 +133,7 @@ static inline int pmd_none(pmd_t pmd)
  
  static inline int pmd_bad(pmd_t pmd)
  {
@@ -167,7 +213,7 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
  }
  
  static inline int pmd_present(pmd_t pmd)
-@@ -139,7 +158,7 @@
+@@ -139,7 +158,7 @@ static inline struct page *pmd_page(pmd_t pmd)
  
  static inline unsigned long pmd_page_vaddr(pmd_t pmd)
  {
@@ -176,7 +222,7 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
  }
  
  #define __pmd_page(pmd)		pmd_page_vaddr(pmd)
-@@ -264,7 +283,7 @@
+@@ -264,7 +283,7 @@ static inline swp_entry_t __swp_entry(unsigned long type, unsigned long offset)
  }
  
  #define __pte_to_swp_entry(pte)		((swp_entry_t) { pte_val(pte) })
@@ -185,7 +231,7 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
  
  static inline bool pte_swp_exclusive(pte_t pte)
  {
-@@ -284,7 +303,7 @@
+@@ -284,7 +303,7 @@ static inline pte_t pte_swp_clear_exclusive(pte_t pte)
  #define __HAVE_ARCH_PTEP_SET_ACCESS_FLAGS
  #define ptep_set_access_flags(__vma, __address, __ptep, __entry, __dirty) \
  ({									  \
@@ -194,9 +240,11 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
  	if (__changed) {						  \
  		set_pte(__ptep, __entry);				  \
  		flush_tlb_page(__vma, __address);			  \
+diff --git a/arch/sparc/include/asm/thread_info_32.h b/arch/sparc/include/asm/thread_info_32.h
+index fdaf7b171e0acc6ae2019c3bf6efb9df667400d6..53bd5cc61252708b86d09785bd8bca80d2c31709 100644
 --- a/arch/sparc/include/asm/thread_info_32.h
 +++ b/arch/sparc/include/asm/thread_info_32.h
-@@ -70,12 +70,20 @@
+@@ -70,12 +70,20 @@ register struct thread_info *current_thread_info_reg asm("g6");
  /*
   * thread information allocation
   */
@@ -217,36 +265,11 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
  
  /*
   * Offsets in thread_info structure, used in assembly code
---- a/arch/sparc/Kconfig
-+++ b/arch/sparc/Kconfig
-@@ -61,7 +61,7 @@
- 	select GENERIC_LIB_CMPDI2
- 	select GENERIC_LIB_UCMPDI2
- 	select HAVE_UID16
--	select HAVE_PAGE_SIZE_4KB
-+	select HAVE_PAGE_SIZE_4KB if !SPARC_PADRE
- 	select LOCK_MM_AND_FIND_VMA
- 	select OLD_SIGACTION
- 	select ZONE_DMA
-@@ -354,11 +354,15 @@
- 	select ARCH_HAS_SYNC_DMA_FOR_DEVICE
- 	select ARCH_HAS_DMA_PREP_COHERENT
- 	select ARCH_HAS_DMA_ALLOC
-+	select HAVE_PAGE_SIZE_16KB
- 	select USB_EHCI_BIG_ENDIAN_MMIO if USB_EHCI_HCD
- 	help
- 	  Kernel for the Infrant IT3107 SoC (ReadyNAS Duo v1, NV+ v1): two-level
- 	  Infrant MMU (not SRMMU), no PROM (iboot), raw kernel linked at
- 	  0x80004000, C code compiled as SPARC v7 (sdiv is broken).
-+	  16 KiB pages (4 hardware entries of 4 KiB each, like the stock
-+	  2.6.17 kernel): the kernel mounts the ext3 volumes with 16 KiB
-+	  blocks made by RAIDiator.
- 	  A Padre kernel does not boot on any other machine.
- 
- 
+diff --git a/arch/sparc/kernel/padre_kernel.c b/arch/sparc/kernel/padre_kernel.c
+index 9d3f597a95a48e803dd8c46256a40a8f83b8b475..2d84ebc4fdd3e3082846966adf34fc86db0638c5 100644
 --- a/arch/sparc/kernel/padre_kernel.c
 +++ b/arch/sparc/kernel/padre_kernel.c
-@@ -298,7 +298,7 @@
+@@ -298,7 +298,7 @@ static void padre_watchdog(struct pt_regs *regs)
  		struct reg_window32 *rw = (struct reg_window32 *)fp;
  
  		if (fp < base + sizeof(struct thread_info) ||
@@ -255,9 +278,11 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
  			break;
  		padre_raw("[watchdog]   %08lx %pS\n", rw->ins[7], (void *)rw->ins[7]);
  		fp = rw->ins[6];
+diff --git a/arch/sparc/mm/fault_32.c b/arch/sparc/mm/fault_32.c
+index 859a5406be34bbc9bc3f98a0c650bdc4696c25a2..5bc996117e899ab4c22bb9c14bf914de20694cd1 100644
 --- a/arch/sparc/mm/fault_32.c
 +++ b/arch/sparc/mm/fault_32.c
-@@ -130,7 +130,7 @@
+@@ -130,7 +130,7 @@ static void padre_trace_pte(const char *what, unsigned long address, unsigned lo
  	if (mm && mm->pgd) {
  		pgd = pgd_val(*pgd_offset(mm, address));
  		if (pgd & 1)
@@ -266,9 +291,11 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
  	}
  	pr_info("padre fault %s %s[%d] addr %08lx pc %08lx pgd %08lx pte %08lx\n",
  		what, current->comm, task_pid_nr(current), address, pc, pgd, pte);
+diff --git a/arch/sparc/mm/padre_mm.c b/arch/sparc/mm/padre_mm.c
+index 910390bb91036f80c0c7b040234646b0fe981f63..2e3692036f22d0158c8181de9e2e889736c92c15 100644
 --- a/arch/sparc/mm/padre_mm.c
 +++ b/arch/sparc/mm/padre_mm.c
-@@ -191,7 +191,7 @@
+@@ -191,7 +191,7 @@ asmlinkage void padre_user_flush(struct pt_regs *regs)
  	pmd = pmd_off(mm, ea);
  	if (pmd_none(*pmd))
  		goto all;
@@ -277,7 +304,7 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
  	if (!pte_present(pte) || !pfn_valid(pte_pfn(pte)))
  		goto all;
  	k = (unsigned long)__va(pte_pfn(pte) << PAGE_SHIFT) + (ea & ~PAGE_MASK);
-@@ -216,11 +216,11 @@
+@@ -216,11 +216,11 @@ EXPORT_SYMBOL(padre_flush_icache_range);
  void update_mmu_cache_range(struct vm_fault *vmf, struct vm_area_struct *vma,
  			    unsigned long address, pte_t *ptep, unsigned int nr)
  {
@@ -292,7 +319,7 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
  	padre_flush_icache_range(kaddr, kaddr + nr * PAGE_SIZE);
  }
  
-@@ -278,7 +278,19 @@
+@@ -278,7 +278,19 @@ static void padre_tlb_range(struct vm_area_struct *vma, unsigned long start,
  
  /* 2.6.17: the TLB probe may write the entry back to memory, so restore
   * the value read before (flush_tlb_page in asm-padre/tlbflush.h).
@@ -312,7 +339,7 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
  static void padre_tlb_page(struct vm_area_struct *vma, unsigned long addr)
  {
  	struct mm_struct *mm = vma->vm_mm;
-@@ -292,16 +304,12 @@
+@@ -292,16 +304,12 @@ static void padre_tlb_page(struct vm_area_struct *vma, unsigned long addr)
  	pmd = pmd_off(mm, addr);
  	local_irq_save(flags);
  	if (pmd_none(*pmd)) {
@@ -333,7 +360,7 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
  	}
  	local_irq_restore(flags);
  }
-@@ -327,13 +335,15 @@
+@@ -327,13 +335,15 @@ void __init load_mmu(void)
  
  /* ---------------------------------------------------------------------
   * Uncached area (last 16 MB of DDR, threshold set in head_32.S):
@@ -351,7 +378,7 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
  
  unsigned long padre_nocache_phys;
  static void *padre_pt_pool;
-@@ -352,12 +362,12 @@
+@@ -352,12 +362,12 @@ void *padre_get_nocache_page(void)
  	if (i < PADRE_PT_PAGES) {
  		__set_bit(i, padre_pt_map);
  		padre_pt_used++;
@@ -366,7 +393,7 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
  	else
  		pr_err("padre: out of uncached pages for page tables\n");
  	return p;
-@@ -366,7 +376,7 @@
+@@ -366,7 +376,7 @@ void *padre_get_nocache_page(void)
  void padre_free_nocache_page(void *addr)
  {
  	unsigned long flags;
@@ -375,7 +402,7 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
  
  	BUG_ON(addr < padre_pt_pool || i >= PADRE_PT_PAGES);
  	spin_lock_irqsave(&padre_pt_lock, flags);
-@@ -386,7 +396,7 @@
+@@ -386,7 +396,7 @@ void padre_free_nocache_page(void *addr)
   * DMA address = Linux physical address (DDR at 0x4000_0000 on the bus,
   * like 2.6.17 virt_to_bus).
   */
@@ -384,7 +411,7 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
  
  static DECLARE_BITMAP(padre_dma_map, PADRE_DMA_PAGES);
  static DEFINE_SPINLOCK(padre_dma_lock);
-@@ -407,7 +417,7 @@
+@@ -407,7 +417,7 @@ void *arch_dma_alloc(struct device *dev, size_t size, dma_addr_t *dma_handle,
  		pr_err_ratelimited("padre: coherent DMA exhausted (%zu bytes)\n", size);
  		return NULL;
  	}
@@ -393,7 +420,7 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
  	memset(va, 0, n * PAGE_SIZE);
  	*dma_handle = phys_to_dma(dev, __pa(va));
  	return va;
-@@ -416,7 +426,7 @@
+@@ -416,7 +426,7 @@ void *arch_dma_alloc(struct device *dev, size_t size, dma_addr_t *dma_handle,
  void arch_dma_free(struct device *dev, size_t size, void *cpu_addr,
  		   dma_addr_t dma_handle, unsigned long attrs)
  {
@@ -402,7 +429,7 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
  	unsigned int n = PAGE_ALIGN(size) >> PAGE_SHIFT;
  	unsigned long flags, i = (cpu_addr - base) >> PAGE_SHIFT;
  
-@@ -442,20 +452,17 @@
+@@ -442,20 +452,17 @@ void pgd_free(struct mm_struct *mm, pgd_t *pgd)
  	padre_free_nocache_page(pgd);
  }
  
@@ -428,7 +455,7 @@ blocks made by RAIDiator (X-RAID /c, system volume) without fuse2fs.
  	padre_free_nocache_page(ptep);
  }
  
-@@ -481,7 +488,7 @@
+@@ -481,7 +488,7 @@ void switch_mm(struct mm_struct *old_mm, struct mm_struct *mm,
  void mmu_info(struct seq_file *m)
  {
  	seq_printf(m, "MMU type\t: %s\n"
