@@ -20,10 +20,13 @@ two SATA disks.
 | 16 KiB pages (`patches/linux/0020`, like the stock 2.6.17 kernel) | works: boot, services, kernel ext4 mount of the X-RAID `/c` (read-write through the Storage switch, validated) and of the system volume `xr-p1` (read-only), ext3 with 16 KiB blocks; see [below](#16-kib-pages) |
 | FPU emulation (the Padre has none): hardware floating-point programs, `printf("%f")`, awk | works (fmovs/fnegs/fabss fixed in `math-emu/math_32.c`: the Padre emulates everything, including these copies) |
 | Built-in initramfs, `/init`, busybox, fork/exec, page faults | works |
-| SATA disks (libata, DMA through the LP coprocessor, on by default) | works: raw read 14.9 MB/s in PIO, 35.5 MB/s in DMA |
+| SATA disks (libata, DMA through the LP coprocessor, on by default) | works: raw read 14.9 MB/s in PIO, 35.5 MB/s in DMA (about 70 MB/s per disk with direct I/O); always `sda` (bay 1) and `sdb` (bay 2), the USB stick after them (`patches/linux/0027`) |
+| Both LP channels at once (`patches/linux/0025`, `padre_sata.lp_parallel`, on by default) | works: reading both disks ×1.75 (15.2 s → 8.7 s for 2 × 512 MB), X-RAID writes +10–16 %; reads compared with PIO, written files and both mirror legs compared byte for byte; see [Parallel LP channels](#parallel-lp-channels-patcheslinux0025) |
 | Ethernet, LEDs, button, fan/temperature (`drivers/platform/padre`) | ported, to be validated |
 | Ethernet NAPI, GRO, receive checksum by the engine (`patches/linux/0022`) | works: 2 GB written over SMB with the engine checked against a software checksum, 0 disagreements; see [Network driver](#network-driver-padre_gmac) |
-| Ethernet transmit checksum by the engine, scatter-gather (`patches/linux/0023`) | written, builds, **off by default, never run on the NAS**: see [Transmit checksum](#transmit-checksum-by-the-engine-patcheslinux0023) and its trial plan |
+| Ethernet transmit checksum by the engine, scatter-gather (`patches/linux/0023`) | works, on by default: loopback experiment as expected, TCP/SSH/SMB transfers byte for byte, no checksum error on the peer; see [Transmit checksum](#transmit-checksum-by-the-engine-patcheslinux0023) |
+| SMB reads without copy (`patches/linux/0026`, ksmbd `zerocopy_read`) | works, on by default: SMB reads 17–20 MiB/s instead of 5–7 (Wi-Fi), system time ÷ 10; see [SMB](#smb-zero-copy-reads-and-signing) |
+| SMB signing, AES-CMAC for SPARC v7 (`patches/linux/0024`) | works: `cmac-aes-sparc32` passes the kernel self-tests; signed reads 3.4–3.6 MiB/s instead of 2.2–2.3 |
 | USB EHCI (VIA VT6212) | works: AHB arbitration from 2.6.17 restored; the VT6212 never re-reads the horizontal link of the head QH once the CPU has rewritten it, so a permanent dummy QH follows the head and the real QHs are chained after it |
 | Boot from the USB stick (`/rootfs-6.18`), `quiet` console | works: root reached about 2.3 s after the kernel starts (see [Kernel tuning](#kernel-tuning)) |
 | Dynamic programs (ld-uClibc) | works: ld.so runs `flush` after rewriting the PLT (uClibc patch), the kernel handles this `flush` (D-cache write-back, I-cache invalidation) |
@@ -31,7 +34,7 @@ two SATA disks.
 | Hardware clock (Dallas DS1337, I2C 0x68) | works: `padre_rtc` (`/dev/rtc0`), time read at boot (`RTC_HCTOSYS`), written back after NTP (`S41time`, `hwclock -w`, and `RTC_SYSTOHC`); the 16 registers are shown in `dmesg` at boot |
 | LVM (lvm2 2.03.31) | works: `board/readynas-duo-v1/patches/lvm2/` aligns the `dm_task_get_device_list()` list on 8 bytes (64-bit `dev_t`: SIGBUS from `lvm pvs` on SPARC) |
 | NAND flash, read only (`padre_nand`, `patches-shelved/linux/`, not built; kernel modules: `patches/linux/0021`) | **shelved** (2026-11-18): chip read fine (ID `ec 76`, bad block table, ECC, `mtd0` read twice identical), but reading while the system runs from the USB stick loses the stick, with or without pausing EHCI; see [below](#nand-flash-read-only-backup-shelved) |
-| ksmbd, NFS v3/v4, mdadm | built, not tested |
+| ksmbd, NFS v3/v4, mdadm | ksmbd and md RAID 1 in daily use (see [SMB](#smb-zero-copy-reads-and-signing)); NFS built, not measured |
 | [DIET](DIET.md) web dashboard (lighttpd HTTPS) | works on the NAS (system updates, X-RAID write switch); every action tested in simulation (`test-api.sh`) |
 
 ## Build
@@ -148,11 +151,20 @@ emulation, then the drivers, then the later work on top of them.
 | `0020-sparc-padre-16-kib-pages` | 16 KiB pages, like the stock 2.6.17 kernel |
 | `0021-sparc-padre-modules-can-multiply-and-divide` | modules can use `.mul`/`.div`... (exported as `_Mul`...) |
 | `0022-padre_gmac-napi-gro-and-receive-checksum` | Ethernet NAPI, GRO, receive checksum by the engine |
-| `0023-padre_gmac-transmit-checksum-by-the-engine` | Ethernet transmit checksum and scatter-gather, off by default |
+| `0023-padre_gmac-transmit-checksum-by-the-engine` | Ethernet transmit checksum and scatter-gather by the engine, on by default (`tx_csum`, `sg`) |
+| `0024-crypto-sparc32-fast-aes-cmac-for-sparc-v7` | `cmac-aes-sparc32`: the whole CMAC chain in one function, 4 KiB of tables (SMB 3 signing) |
+| `0025-padre_sata-x-raid-writes-on-parallel-lp-channels` | one LP list per SATA channel at once (`lp_parallel`, on by default, back to one at a time on any LP error) |
+| `0026-ksmbd-zero-copy-reads-from-the-page-cache` | ksmbd sends SMB reads from the page cache (splice + `MSG_SPLICE_PAGES`, `zerocopy_read`) |
+| `0027-padre_sata-disks-named-before-the-usb-stick` | `padre_sata` at `fs_initcall`, usb-storage waits for the disk probes: disks `sda`/`sdb`, stick after them |
 
 0001 alone does not link (it needs the MMU code of 0002); from 0002 on, every step builds.
 Shelved, not applied: `board/readynas-duo-v1/patches-shelved/linux/padre_nand-read-only-nand-flash-for-backups.patch`
-(read-only NAND driver, see [below](#nand-flash-read-only-backup-shelved)); it applies on top of 0023.
+(read-only NAND driver, see [below](#nand-flash-read-only-backup-shelved)); it applied on top of 0023.
+
+`board/readynas-duo-v1/post-image.sh` refuses a kernel or a program with `sdiv`/`sdivcc`
+(wrong on the Padre) or `casa`; `sdiv …, %g0` is not refused: its result is thrown away, and
+jump tables in `.init.text` whose entries are kernel addresses `0x8079xxxx` decode exactly as
+that.
 
 ## 16 KiB pages
 
@@ -426,7 +438,7 @@ noted):
 | Cache | DMA not coherent: write-back + invalidate of each receive buffer, write-back of each sent frame (16-byte lines, about 1 µs per frame) | unchanged |
 | Interrupts | one line (41) for RX and TX, mask `M4 imask`; no coalescing register known | NAPI: the interrupt masks the engine and schedules the poll |
 | Receive checksum | GMT block (DJ 0x5040 = 4) + `GMAC_CTRL` bit 22: bits 17–22 of the descriptor say IPv4, L4 checked, IP or L4 error | used: `CHECKSUM_UNNECESSARY` for good unfragmented IPv4 TCP/UDP frames (`ethtool -K eth0 rx`) |
-| Transmit checksum, scatter-gather | "meta" descriptor switching the engine's checksum state, any number of fragment descriptors (buffers < 8 bytes aligned on 8) | `patches/linux/0023`, **off by default**, to be tried: see [below](#transmit-checksum-by-the-engine-patcheslinux0023) |
+| Transmit checksum, scatter-gather | "meta" descriptor switching the engine's checksum state, any number of fragment descriptors (buffers < 8 bytes aligned on 8) | `patches/linux/0023`, on by default: see [below](#transmit-checksum-by-the-engine-patcheslinux0023) |
 | TSO | meta command bit 7, segment size in GMT+4 (1500 on the NAS) | not tried |
 | Jumbo frames | receive buffers of 8000 / 9024 bytes, MFL = MTU + 36 | not done: the test PC is on Wi-Fi |
 
@@ -443,8 +455,8 @@ the PC (raw socket): all 800 flagged bad by the engine, and counted by the stack
 checksum, then the engine's checksum state became the opposite of the one the driver asked for:
 TCP frames sent with the pseudo-header seed only, ICMP replies with a zeroed checksum, so TCP
 stopped (ping answered, with a bad checksum). Once, the NAS stayed in that state until it was
-powered off. That code was not kept; what is known and what replaces it:
-[Transmit checksum](#transmit-checksum-by-the-engine-patcheslinux0023).
+powered off. The cause, found in 0.1.3: the command bytes were in the SRAM, where the engine
+misreads them; see [Transmit checksum](#transmit-checksum-by-the-engine-patcheslinux0023).
 
 **Results** (unsigned: 3 runs with NAPI, 2 before; signed: 1 run each; CPU s/MiB = busy CPU
 seconds over the transfer window / 500):
@@ -470,121 +482,125 @@ Robustness: 2 GB write + 3 × 500 MB write and read + signed runs, no error in `
 
 ### Transmit checksum by the engine (`patches/linux/0023`)
 
-Off by default, **never run on the NAS** (it builds; the trial plan is below). Reads over SMB
-are bound by the transmit path, so this is the only lead left for them.
+On by default since 0.1.3, with scatter-gather. Off: `padre_gmac.tx_csum=0` on the command
+line, `echo 0 > /sys/module/padre_gmac/parameters/tx_csum`, or `ethtool -K eth0 tx off`;
+scatter-gather alone: the `sg` parameter or `ethtool -K eth0 sg`.
 
-**How the 2.6.17 driver does it** (GMAC description §5.3, on by default there: checksum,
-scatter-gather and TSO):
+**How the 2.6.17 driver does it**, read on the NAS with `tools/gmpeek` (stock system started
+once with `touch /.relay_skip_once; reboot`; the tool only uses the register read call of the
+original driver, private ioctl 0x89f2, and needs `socketcall` there):
 
-- The engine has a checksum state, off after the reset done at open (GMT mode 2, MAC reset,
-  mode 4; `GMAC_CTRL` = `0x25600300`, bit 21 set; GMT+4 = 1500). The driver keeps a copy of it.
-- When an IPv4 frame needs the other state, a "meta" descriptor goes first: control bit 26,
-  size 2, no first/last/interrupt bit, buffer of two bytes `{previous command, new command}`
-  in uncached memory, one 16-byte slot per ring entry; command bit 6 = insert the checksum
-  (bit 7 = TSO, with the segment size in GMT+4). It is handed to the engine at once.
-- Then the frame: one descriptor per buffer (head with "first", page fragments, "last" on the
-  last one), all with the interrupt bit; the first one is handed over last; the channel is
-  restarted when `gmtx_ctrl` bit 1 says it stopped. A buffer under 8 bytes must be 8-byte
-  aligned.
-- State wanted: on for a frame the stack left to the device (TCP/UDP with the pseudo-header
-  sum in the field), off for any other IPv4 frame. Frames that are not IPv4 (ARP) never change
-  it. Nothing else is told to the engine: no offsets, it parses the frame itself. Short frames
-  are not padded by the driver (the MAC does it).
+- A "meta" descriptor goes before a frame that needs another engine state: control bit 26,
+  size 2, no first/last/interrupt bit, a buffer of two bytes `{previous command, new command}`
+  **in ordinary memory** (one 16-byte slot per ring entry). Once the engine is done the
+  descriptor reads `00000002`: bit 26 is gone.
+- Command bit 6 = insert the checksum, bit 7 = TSO (segment size in GMT+4 = 1500). Its resting
+  state is `c0`; it leaves it for one frame only: `c0→00` (frame) `00→c0`, `c0→80`/`80→c0`,
+  `00→40`/`40→c0`. It never sends `40→00`, and only TCP goes to the engine (UDP, ICMP: `00`).
+- Then the frame: one descriptor per buffer (66-byte header, then data), the first one handed
+  over last.
 
-**What the captures of the first attempt show**, read again
-(`tcpdump` on the PC):
+**Why the first attempt failed: the command bytes were in the SRAM after the rings.** Read from
+there, the engine misreads them: the frame right after a command came back (MAC loopback) with
+the 16-bit word before its checksum field copied into the field (`636a` = bytes 14–15 of the
+TCP header, `0800` = the ICMP type), and no command turned the engine off (only a reset did).
+With the bytes in RAM (`meta_ddr=1`, the default; `meta_ddr=0` brings the old behaviour back
+for comparison), every step of `tx_csum_verify` is as expected and 40 alternations `00↔c0` are
+all right, three runs out of three.
 
-- The engine, when on, sums the whole L4 part *including the field* and stores the complement:
-  an ICMP reply that already had its checksum went out with 0. It does not add a pseudo-header
-  (the stack's seed is needed) and it also acts on ICMP: a complete frame must go out with the
-  engine off.
-- The inverted state survived many commands in a row (ICMP zeroed after an "off", TCP not
-  summed after an "on"). A command that set the state could not stay wrong like that: either
-  the engine *flips* its state on a command (the two bytes old/new, one flip lost or doubled
-  earlier), or the driver's copy and the commands it built had drifted apart. That code is
-  gone, so this is open; the loopback experiment below settles the first point.
-- The "incorrect" checksums on 1504-byte frames were not errors: GRO on the PC merges
-  segments and leaves the pseudo-header sum in the field (`0x8ab2` = the seed of the bad small
-  frames plus the length difference). Captures must be taken with GRO off on the PC.
+What 0023 does: commands `c0` (TCP left to the engine, frames never above the 1500-byte
+segment size so TSO never splits) and `00` (any other frame), sent only when the state
+changes; UDP (summed wrong by the engine), IP options and fragments are summed in software.
+Every change of the feature restarts the MAC and the engine (GMT mode 2, FIFO flush, open
+sequence). The driver turns it off by itself, resets and logs (`transmit checksum by the engine
+turned off`) on a transmit timeout, 2 s without completion with frames pending, 8 FIFO
+underruns in a second, a descriptor still owned when reused, or TCP that only retransmits
+(`tx_guard`). `ethtool -S`: `tx_csum_hw`, `tx_csum_sw`, `tx_meta`, `tx_underrun`,
+`tx_csum_fallback`.
 
-**What 0023 does**
+`echo 1 > /sys/module/padre_gmac/parameters/tx_csum_verify` (link up, about 2 s without
+network, result in `dmesg`): test frames to ourselves in MAC loopback (PE-MCX `CFG1` bit 8)
+through the same transmit code, compared with a software checksum: `U` field untouched, `S`
+summed, `X` anything else, `L` lost. Expected `USSSSSUUUSUSUSUSSU` followed by 40 alternations
+`SU…`.
 
-- Same descriptors, order and command bytes as 2.6.17; command slots in the 2 KiB of SRAM
-  after the rings. The command always comes from the wanted state, and the driver's copy only
-  changes once the frame is certain to be queued. Only plain TCP/UDP over IPv4 (no options, no
-  fragment) is left to the engine; anything else is summed in software first. Scatter-gather
-  (`ethtool -K eth0 sg on`, separate, needs `tx`): fragments under 8 bytes and unaligned are
-  copied (`skb_linearize`). No TSO. GMT+4 = 1500 is written when the feature is on.
-- Switch: `padre_gmac.tx_csum=1` on the command line, `echo 1|0 >
-  /sys/module/padre_gmac/parameters/tx_csum`, or `ethtool -K eth0 tx on|off`. **Every change
-  restarts the MAC and the engine** (2.6.17 recovery: GMT mode 2, FIFO flush, open sequence,
-  about 0.2 s without network), so that turning it off never relies on the engine obeying.
-  With the feature off no command is ever sent.
-- The driver turns the feature off by itself, resets the same way and logs
-  (`transmit checksum by the engine turned off`), on: a transmit timeout; 2 s without a
-  completion while frames are pending; 8 FIFO underruns in a second; a descriptor still owned
-  when reused; TCP that only retransmits (`tx_guard`, default 4 retransmissions in 4 s making
-  at least half of the segments TCP sent; 0 = no such guard). The last one is the guard
-  against an inverted engine; it also fires when a client vanishes in the middle of a
-  transfer, which only costs the feature until it is turned on again.
-- `ethtool -S`: `tx_csum_hw` (frames left to the engine), `tx_csum_sw`, `tx_meta` (commands),
-  `tx_underrun`, `tx_csum_fallback`.
-- `echo 1 > /sys/module/padre_gmac/parameters/tx_csum_verify` (link up, about 2 s without
-  network, result in `dmesg`): test frames to ourselves in MAC loopback (PE-MCX `CFG1` bit 8),
-  through the same transmit code, come back through the receive ring and are compared with a
-  software checksum. One letter per step: `U` field untouched, `S` summed, `X` anything else,
-  `L` lost. Expected `USUSSSSU..S.SU`:
+**Results on the NAS** (Wi-Fi PC; every file read back compared with its source; the PC's
+`InCsumErrors` counters in `/proc/net/snmp` unchanged throughout, so no frame with a wrong
+checksum reached it; no `turned off` in `dmesg`):
 
-  | Step | Frame | Tells |
-  |---|---|---|
-  | 0, 1 | UDP after a reset; after command 00→40 | `U`, `S`: the engine sums on command |
-  | 2 | UDP after a reset done while on | `U`: a reset clears the engine, the way back is sound |
-  | 3–5 | UDP odd length, TCP without data, TCP 1460 bytes | `S` |
-  | 6 | ICMP with an empty field | `S` on the NAS so far |
-  | 7 | ARP type, engine on | `U`: other frames are left alone |
-  | 8, 9 | UDP with IP options; first fragment | whether the software path for these is needed |
-  | 10, 11 | command 40→40, then 00→40 while on | `SS`: a command sets the state; `SU`: it flips it when "old" is wrong; `U.`: any command flips it |
-  | 12, 13 | reset, 00→40, then 40→00 | `S`, `U`: off works |
+| 300 MB over raw TCP | write() | sendfile() | NAS CPU |
+|---|---|---|---|
+| off | 5.96 / 6.04 MiB/s | 12.4 / 11.6 MiB/s | 99–100 % |
+| checksum only | 5.81 / 5.85 MiB/s | 11.5 / 11.8 MiB/s | 99–100 % |
+| checksum + scatter-gather | 8.34 / 8.25 MiB/s (+38 %) | 19.6 / 18.6 MiB/s (+60 %) | 99 % / 80–88 % |
 
-  The sum the engine inserts cannot be seen on real frames: it is put in on the way out,
-  neither the buffer nor the descriptor keeps it. For those, capture on the peer. If nothing
-  comes back (`L`), the MAC loopback does not work on this wrapper and only the capture is
-  left. Unknown, hence to read in the result: a UDP sum of 0 (must be sent as `0xffff`).
+The checksum alone does not help (the copy into the socket sums for free); with scatter-gather
+the copy disappears. Ping (also fragmented), SSH, HTTPS and SMB work; no ping lost during
+transfers.
 
-**Trial plan** (console on the serial port, 9600 baud, `ttyS1`; the NAS in a trial slot that
-is never confirmed, so that a power cycle returns to the previous system):
+## SMB: zero-copy reads and signing
 
-1. *Stock system, read only.* `touch /.relay_skip_once; reboot` in 6.18 starts the stock
-   2.6.17 system once. Build `tools/gmpeek.c` (command in its header: static, no libc),
-   copy it over SSH (`ssh root@NAS 'cat > /tmp/gmpeek; chmod +x /tmp/gmpeek' < gmpeek`). It
-   reads through the register read call of the original driver and writes nothing.
-   `/tmp/gmpeek > /tmp/g0.txt` at rest, then `/tmp/gmpeek 50 > /tmp/g1.txt` while the PC
-   reads a large file from the NAS and runs `ping -i 0.2` (every reply needs the engine off).
-   To check: `gmac` first word = `0x25600300` plus the enable bits; `gmt` = `00000004
-   000005dc`; in the ring, descriptors with bit 26, size 2, placed just before a "first"
-   descriptor, and their two bytes (`0040…` on, `4000…` off, `c0`/`80` with TSO); frames in
-   several descriptors. A difference with the list above goes into the driver before going
-   further. Reboot: back to 6.18.
-2. *Loopback experiment in 6.18*, feature off: `echo 1 > …/tx_csum_verify`, three times.
-   Stop here if step 1 is not `S`, step 2 not `U` (the automatic way back could not be
-   trusted), step 7 not `U` or step 13 not `U`.
-3. *Short traffic.* On the PC: `ethtool -K <if> gro off`, `tcpdump -ni <if> -vv host <NAS>`.
-   On the console: `(sleep 120; echo 0 > /sys/module/padre_gmac/parameters/tx_csum) &` then
-   `echo 1 > …/tx_csum`. Ping (also `-s 2000`: fragments), one UDP exchange, an SSH login, the
-   dashboard; then `ping -i 0.2` during an SSH transfer (many state changes). Every frame from
-   the NAS must show a correct checksum; `tx_meta` grows with the alternations,
-   `tx_underrun` and `tx_csum_fallback` stay at 0.
-4. *Long transfers*: 3 × 500 MB read over SMB, file compared with its source; then `sg on`
-   and the same; CPU s/MiB against the table above.
-5. *The way back, on purpose*: `echo 0 > …/tx_csum` during a transfer (it goes on after the
-   restart); pull the PC's cable during a read and watch the guard turn the feature off.
+**Reads without copy (`patches/linux/0026`).** ksmbd answered an SMB2 READ by zeroing a buffer
+of up to 4 MiB (`kvzalloc`), copying the file into it (`kernel_read`) and copying it again into
+the socket (`kernel_sendmsg`). It now takes the page cache pages through splice
+(`splice_direct_to_actor`, as nfsd does), keeps a reference to them until the response is
+freed, points the response kvecs at them, and the TCP transport sends those with
+`MSG_SPLICE_PAGES` (zero copy with the scatter-gather of 0023). Signing covers the header and
+every data kvec. Not used for SMB 3 encryption (in place), compound requests, RDMA, streams,
+reads under one page: the copying path, which no longer zeroes its buffer. Switch:
+`/sys/module/ksmbd/parameters/zerocopy_read` (default 1).
 
-Stop at the first wrong checksum from the NAS in the capture, at any `turned off` line in
-`dmesg`, at a rising `tx_underrun`, or if ping loses packets. Way back, in order:
-`echo 0 > /sys/module/padre_gmac/parameters/tx_csum` on the console (resets the engine);
-`ifconfig eth0 down; ifconfig eth0 up` (full open sequence); `reboot` (the feature is off at
-boot: never put `padre_gmac.tx_csum=1` on the command line during the trial); power cycle
-(the unconfirmed trial slot gives the previous system back).
+**Signing (`patches/linux/0024`).** SMB 3 signing is `cmac(aes)`, which resolved to the
+`cmac` template over `aes-generic`: two calls per 16-byte block, byte loads and stores, an
+encryption unrolled for every key size over 8 KiB of tables. `cmac-aes-sparc32` (priority 200,
+`CONFIG_CRYPTO_CMAC_AES_SPARC32`) runs the whole chain in one function with the state in
+registers, encryption only, 4 KiB of tables. User-space bench on the NAS (same code): 4.90 MiB/s
+against 3.72 for today's path (×1.32), 2.15 for the fixed-time AES, 3.03 for HMAC-SHA256 (SMB
+2.x); bitsliced AES does not suit CMAC (one block at a time). The kernel self-tests pass
+(`/proc/crypto`: `selftest : passed`, with `CONFIG_CRYPTO_SELFTESTS_FULL` on a test kernel).
+Table-based like `aes-generic`, so the same cache-timing exposure, with half the tables.
+
+**`smb2 max read`:** the default (4 MiB) is the fastest: 9.6 / 8.8 MiB/s against 7.1 (1 MiB),
+5.6 (256 KiB) and 4.8–6.3 (64 KiB), measured before 0026: the cost per request dominates.
+
+**Results** (500 MB SMB3 reads from a Wi-Fi PC, files compared byte for byte):
+
+| | 0.1.2 | 0.1.3 |
+|---|---|---|
+| read, unsigned | 5–7 MiB/s, CPU 100 %, ~60–73 s system time | 17–20 MiB/s, CPU 88–92 %, 5–8 s system time |
+| read, signed | 2.2–2.3 MiB/s | 3.4–3.6 MiB/s |
+
+## Parallel LP channels (`patches/linux/0025`)
+
+The driver let only one port at a time have a list on the List Processor (`lp_owner` and
+`ATA_DEFER_PORT`), so both halves of every RAID 1 write went to the disks one after the other,
+and the deferred port only retried after a SCSI host-busy requeue (one jiffy at least). The LP
+firmware, disassembled again as big-endian SPARC, keeps one state machine per channel and, for
+lists without the "meta" flag (this driver never sets it), touches only that channel's SATA
+block, MC FIFO, DJ route and interrupt bit; only "meta" lists (the 2.6.17 X-RAID multi-disk
+commands) wait on the other disks.
+
+`padre_sata.lp_parallel` (default 1): one list per channel in flight; 0 = one at a time as
+before. Any LP timeout or DMA error sets it back to 0 with a warning. `dma_overlap` counts the
+lists started while the other channel had one.
+
+Tried on the NAS: both disks read with direct I/O, 2 × 512 MB, 15.2 s one after the other,
+8.6–8.8 s at once (×1.75, about 2 300 overlapping lists per run); 128 MB at four places read on
+both disks at once and in PIO, identical; 256 MB files written to `/c` 20.9 MiB/s serial, 22.9 /
+24.1 MiB/s parallel (the CPU, ext4 and md, is the limit there), read back identical, and both
+mirror legs (`dm-2`, `dm-3`) identical over every extent of the files (from `filefrag`); 32
+files of 1 MiB written during a concurrent read, all identical; no LP timeout, the mirror stayed
+`[UU]`.
+
+## Disk names
+
+With `usb-storage.delay_use=0` (fast boot, 0.1.2) the system stick was scanned before
+`padre_sata` even started, so it became `sda` and the disks `sdb`/`sdc`. `patches/linux/0027`
+starts `padre_sata` at `fs_initcall` (after libata and SCSI, before `sd`, EHCI and
+usb-storage), so the ports are probed in the background before USB is up, and usb-storage waits
+for pending async probes before scanning a device: the disks are always `sda` (bay 1) and `sdb`
+(bay 2), the stick `sdc`. The DIET interface and `nas-raid` find the disks by their ATA port,
+not their name, and never list a USB device as a disk.
 
 ## SSH (dropbear)
 

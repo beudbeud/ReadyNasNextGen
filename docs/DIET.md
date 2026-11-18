@@ -69,7 +69,7 @@ in `package/diet/src/`, laid out as on the target system.
 | Web server | busybox httpd behind a static lighttpd | lighttpd alone: mbedTLS TLS, `mod_auth` (SHA-512 htpasswd), `mod_cgi` |
 | Shares | Samba 3.6, `smb.conf` + `shares.conf`, `smbpasswd` | ksmbd: `/etc/ksmbd/ksmbd.conf`, `ksmbd.adduser` (password on standard input), `ksmbd.control -r` |
 | NFS | RAIDiator programs in a chroot (`diet-nfs`) | kernel nfsd + nfs-utils 2.x: the interface edits `/etc/exports` and runs `exportfs -ra` |
-| Storage | X-RAID (`/proc/xraid`), LVM `/dev/c/c` | md (`/proc/mdstat`, `mdadm --detail`), `df /c`, libata disks `sda`/`sdb` (bay = ata port); existing X-RAID through `nas-raid` (docs/XRAID.md); md: disabled for now (docs/XRAID-MIGRATION.md) |
+| Storage | X-RAID (`/proc/xraid`), LVM `/dev/c/c` | md (`/proc/mdstat`, `mdadm --detail`), `df /c`, libata disks `sda`/`sdb` (bay = ata port; the system USB stick is never listed); existing X-RAID through `nas-raid` (docs/XRAID.md); md: disabled for now (docs/XRAID-MIGRATION.md) |
 | Temperatures, SMART | `smartctl` every 5 min | temperatures from drivetemp (`/sys/block/sdX/device/hwmon/*/temp1_input`); SMART every 5 min by `smart-lite` (see [SMART](#smart)), `smartctl` preferred if present |
 | Fan | controlled by `diet-hwmon` | controlled by `padre-fan` (S03fan); the interface shows its state (`/var/run/fan.state`) and edits `/etc/fan.conf` (curve, period, thresholds), then restarts the service |
 | `diet-hwmon` | control, SMART, history, alerts, emergency shutdown | monitoring only: history, SMART (disks in standby left asleep), Telegram alerts. The emergency shutdown is done by `padre-fan` |
@@ -173,6 +173,7 @@ Services page; the NFS on/off is in the "NFS exports" card of the Shares page (A
 
 | Service | What the interface sets | Files |
 |---|---|---|
+| SMB | on/off of ksmbd (`S70ksmbd`, which does not start it while `SVC_SMB=0`, also after an SMB setting or an X-RAID remount); the Bonjour announcement of SMB is set aside while it is off; the dashboard shows SMB as "disabled" (grey, `smb_on` 0 in `?a=status`), not as failed. Shares and SMB settings stay on the Shares page | `/etc/ksmbd/ksmbd.conf` |
 | MiniDLNA | on/off; displayed name (`friendly_name`); folders (`media_dir`, one per line, optional prefix `A,` `V,` `P,`, existing folders under `/c`, letters, digits, space, `-` and `_`, no link that leaves `/c`); "Rescan" (`S60minidlnad force-reload` = `minidlnad -R`) | `/etc/minidlna.conf` (`.bak` copy), database in `/var/lib/minidlna` |
 | Avahi | on/off; the announced name (`<name>.local`) follows the NAS name (avahi is restarted when it changes) | `/etc/avahi/services/*.service` |
 | rsync | on/off; user accounts (see below); administrator module `[c]` (all of `/c`, as root, account `sauvegarde`) **only if checked** (`RSYNC_C=1`), with its password and the command `rsync -av folder/ sauvegarde@<name>.local::c/backups/` | `/etc/rsyncd.conf` (generated), `/etc/rsyncd.secrets` (600) |
@@ -183,9 +184,9 @@ State: running or stopped; for MiniDLNA, the number of indexed files
 (audio, video, images) read from its status page `http://127.0.0.1:8200/status` (no
 `sqlite3` process started) and the size of `files.db`.
 
-Persistence: `SVC_MINIDLNA`, `SVC_AVAHI`, `SVC_RSYNC`, `SVC_WEBDAV`, `SVC_NFS` in
+Persistence: `SVC_SMB`, `SVC_MINIDLNA`, `SVC_AVAHI`, `SVC_RSYNC`, `SVC_WEBDAV`, `SVC_NFS` in
 `/etc/diet.conf` (`0` = stopped, `1` or missing = running). The shipped `diet.conf` sets
-all five to `0`: out of the box only SMB (ksmbd), the web interface and SSH run, and rpcbind
+the last five to `0`: out of the box only SMB (ksmbd), the web interface and SSH run, and rpcbind
 (`S30rpcbind`) only starts with NFS. `S50avahi-daemon`,
 `S60minidlnad`, `S60nfs` (which replace the Buildroot ones; `S60nfs` also stops
 the nfsd kernel threads with `rpc.nfsd 0`, which the Buildroot `killall nfsd`

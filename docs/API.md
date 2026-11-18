@@ -133,7 +133,7 @@ bays, for the page and for scripts; it is computed from the `xraid` object
 | `smb_enc` | `on=0\|1` |
 | `smb_sign` | `v=auto\|mandatory` (`server signing` of ksmbd.conf, ksmbd restarted; `auto`: signed only for clients that require it, `mandatory`: every client signs; read back as `smbsign` in `sys`) |
 | `metrics_set` | `on=0\|1`, `open=0\|1` (restarts lighttpd) |
-| `svc_set` | `s=minidlna\|avahi\|rsync\|webdav\|nfs`, `on=0\|1` |
+| `svc_set` | `s=smb\|minidlna\|avahi\|rsync\|webdav\|nfs`, `on=0\|1` (`smb`: ksmbd, `SVC_SMB` in diet.conf; `services` answers `smb:{on,run}`, `status` answers `smb_on`) |
 | `dlna_set` | `name`, `dirs` (one folder per line) |
 | `rsync_pw` | `pw` |
 | `rsync_c` | `on=0\|1` |

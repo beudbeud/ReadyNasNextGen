@@ -13,6 +13,9 @@ touching the original firmware.
 ## What you get
 
 - **Network shares**: SMB 3 (Windows, macOS, Linux, through ksmbd), and NFS v3/v4.
+  Measured from a Wi-Fi PC (0.1.3): SMB reads 17–20 MiB/s, 3.4–3.6 MiB/s signed (Windows and
+  macOS sign by default), writes about 9 MiB/s
+  ([details](docs/DEVELOPMENT.md#smb-zero-copy-reads-and-signing)).
 - **Web interface** over HTTPS (French, German, English), derived from
   [DIET](https://github.com/mfe-/ReadyNASDuoSparc): NAS status, disks, shares, users,
   services, logs.
