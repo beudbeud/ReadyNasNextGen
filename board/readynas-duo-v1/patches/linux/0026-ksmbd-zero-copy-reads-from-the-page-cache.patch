@@ -1,0 +1,403 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 26/27] ksmbd: zero-copy reads from the page cache
+
+SMB2 READ zeroed a buffer (kvzalloc) of up to 4 MiB, copied the file into
+it (kernel_read) and copied it again into the socket buffers
+(kernel_sendmsg): three passes over every byte, which saturated the 280 MHz
+CPU of the ReadyNAS at 5-7 MiB/s.
+
+A read now takes the page cache pages through splice
+(splice_direct_to_actor, as nfsd does), keeps a reference to them in the
+work until it is freed, and points the response kvecs straight at them
+(no highmem on this platform); the TCP transport sends runs of page cache
+kvecs with MSG_SPLICE_PAGES, so the socket buffers reference the pages
+(with a scatter-gather NIC; otherwise TCP copies as before). Signing
+covers the header and every data kvec (read_iov_n), and works unchanged
+since the data stays addressable.
+
+Not used (the copying path below): SMB 3 encryption (it encrypts in
+place), compound requests (padding after the data), RDMA, streams, reads
+under one page, files without splice_read. The copying path no longer
+zeroes its buffer, only the padding bytes after the data.
+
+Run-time switch: /sys/module/ksmbd/parameters/zerocopy_read (default 1).
+Measured on the NAS (500 MB over Wi-Fi, files compared byte for byte):
+reads 17-20 MiB/s instead of 5-6, system time / 10, also when signed.
+---
+ fs/smb/server/ksmbd_work.c    |   38 +++++++++++++++
+ fs/smb/server/ksmbd_work.h    |    7 +++
+ fs/smb/server/smb2pdu.c       |   62 +++++++++++++++++++++---
+ fs/smb/server/transport_tcp.c |   40 +++++++++++++++
+ fs/smb/server/vfs.c           |  106 +++++++++++++++++++++++++++++++++++++++++
+ fs/smb/server/vfs.h           |    3 +
+ 6 files changed, 247 insertions(+), 9 deletions(-)
+
+diff --git a/fs/smb/server/ksmbd_work.c b/fs/smb/server/ksmbd_work.c
+index 4a71f46d7020be745ed9abe95b595028b43c23cd..08985797c5c94355f3fbc13e35e892ee1bff55ec 100644
+--- a/fs/smb/server/ksmbd_work.c
++++ b/fs/smb/server/ksmbd_work.c
+@@ -51,6 +51,9 @@ void ksmbd_free_work_struct(struct ksmbd_work *work)
+ 		list_del(&ar->entry);
+ 		kfree(ar);
+ 	}
++	while (work->zc_nr)
++		put_page(work->zc_pages[--work->zc_nr]);
++	kvfree(work->zc_pages);
+ 
+ 	kfree(work->tr_buf);
+ 	kvfree(work->request_buf);
+@@ -164,6 +167,41 @@ int ksmbd_iov_pin_rsp_read(struct ksmbd_work *work, void *ib, int len,
+ 	return __ksmbd_iov_pin_rsp(work, ib, len, aux_buf, aux_size);
+ }
+ 
++/* a read response whose data is n kvecs (page cache pages, zero-copy) */
++int ksmbd_iov_pin_rsp_pages(struct ksmbd_work *work, void *ib, int len,
++			    struct kvec *data, unsigned int n)
++{
++	unsigned int i, size = 0;
++
++	if (work->iov_alloc_cnt < work->iov_cnt + n + 2) {
++		int cnt = work->iov_cnt + n + 4;
++		struct kvec *new = krealloc(work->iov, sizeof(struct kvec) * cnt,
++					    KSMBD_DEFAULT_GFP | __GFP_ZERO);
++
++		if (!new)
++			return -ENOMEM;
++		work->iov = new;
++		work->iov_alloc_cnt = cnt;
++	}
++
++	if (!work->iov_idx) {
++		work->iov[work->iov_idx].iov_base = work->response_buf;
++		*(__be32 *)work->iov[0].iov_base = 0;
++		work->iov[work->iov_idx].iov_len = 4;
++		work->iov_cnt++;
++	}
++
++	__ksmbd_iov_pin(work, ib, len);
++	inc_rfc1001_len(work->iov[0].iov_base, len);
++	for (i = 0; i < n; i++) {
++		__ksmbd_iov_pin(work, data[i].iov_base, data[i].iov_len);
++		size += data[i].iov_len;
++	}
++	inc_rfc1001_len(work->iov[0].iov_base, size);
++	work->read_iov_n = n;
++	return 0;
++}
++
+ int allocate_interim_rsp_buf(struct ksmbd_work *work)
+ {
+ 	work->response_buf = kzalloc(MAX_CIFS_SMALL_BUFFER_SIZE, KSMBD_DEFAULT_GFP);
+diff --git a/fs/smb/server/ksmbd_work.h b/fs/smb/server/ksmbd_work.h
+index d36393ff8310cd7e9eb6ea6e18314a51ab15e76f..fe4fa39c33f01c405dec1cc0663a2bd47cd402b4 100644
+--- a/fs/smb/server/ksmbd_work.h
++++ b/fs/smb/server/ksmbd_work.h
+@@ -37,6 +37,11 @@ struct ksmbd_work {
+ 	void                            *response_buf;
+ 
+ 	struct list_head		aux_read_list;
++	/* zero-copy read: page cache pages the response points to */
++	struct page			**zc_pages;
++	unsigned int			zc_nr;
++	/* data kvecs after the header of a read response (0: one) */
++	unsigned int			read_iov_n;
+ 
+ 	struct kvec			*iov;
+ 	int				iov_alloc_cnt;
+@@ -130,5 +135,7 @@ bool ksmbd_queue_work(struct ksmbd_work *work);
+ int ksmbd_iov_pin_rsp_read(struct ksmbd_work *work, void *ib, int len,
+ 			   void *aux_buf, unsigned int aux_size);
+ int ksmbd_iov_pin_rsp(struct ksmbd_work *work, void *ib, int len);
++int ksmbd_iov_pin_rsp_pages(struct ksmbd_work *work, void *ib, int len,
++			    struct kvec *data, unsigned int n);
+ int allocate_interim_rsp_buf(struct ksmbd_work *work);
+ #endif /* __KSMBD_WORK_H__ */
+diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c
+index a8a42fde4ca022658aa193d0236be28bff55c718..511d7651e161665bbd3fca668edabfccb87b21bb 100644
+--- a/fs/smb/server/smb2pdu.c
++++ b/fs/smb/server/smb2pdu.c
+@@ -7064,6 +7064,12 @@ static ssize_t smb2_read_rdma_channel(struct ksmbd_work *work,
+  *
+  * Return:	0 on success, otherwise error
+  */
++/* reads sent from the page cache without copying (TCP, not encrypted, not
++ * in a compound): /sys/module/ksmbd/parameters/zerocopy_read
++ */
++static bool zerocopy_read = true;
++module_param(zerocopy_read, bool, 0644);
++
+ int smb2_read(struct ksmbd_work *work)
+ {
+ 	struct ksmbd_conn *conn = work->conn;
+@@ -7162,7 +7168,48 @@ int smb2_read(struct ksmbd_work *work)
+ 	ksmbd_debug(SMB, "filename %pD, offset %lld, len %zu\n",
+ 		    fp->filp, offset, length);
+ 
+-	aux_payload_buf = kvzalloc(ALIGN(length, 8), KSMBD_DEFAULT_GFP);
++	if (READ_ONCE(zerocopy_read) && !is_rdma_channel &&
++	    !work->next_smb2_rcv_hdr_off && !req->hdr.NextCommand &&
++	    !(work->sess && work->sess->enc && work->encrypted) &&	/* in place */
++	    length >= PAGE_SIZE) {
++		struct kvec *vec;
++		unsigned int nvec;
++
++		nbytes = ksmbd_vfs_splice_read(work, fp, length, &offset, &vec, &nvec);
++		if (nbytes == -EACCES || nbytes == -EAGAIN || nbytes == -ENOMEM) {
++			err = nbytes;
++			goto out;
++		}
++		if (nbytes >= 0) {
++			if ((nbytes == 0 && length != 0) || nbytes < mincount) {
++				kvfree(vec);
++				rsp->hdr.Status = STATUS_END_OF_FILE;
++				smb2_set_err_rsp(work);
++				ksmbd_fd_put(work, fp);
++				return 0;
++			}
++			rsp->StructureSize = cpu_to_le16(17);
++			rsp->DataOffset = 80;
++			rsp->Reserved = 0;
++			rsp->DataLength = cpu_to_le32(nbytes);
++			rsp->DataRemaining = 0;
++			rsp->Flags = 0;
++			err = ksmbd_iov_pin_rsp_pages(work, (void *)rsp,
++						      offsetof(struct smb2_read_rsp, Buffer),
++						      vec, nvec);
++			kvfree(vec);
++			if (err)
++				goto out;
++			ksmbd_fd_put(work, fp);
++			return 0;
++		}
++		/* -EOPNOTSUPP: the copying path below */
++	}
++
++	/* not zeroed: the read fills it; only the bytes after the data, which
++	 * a compound response may send as padding, are cleared below
++	 */
++	aux_payload_buf = kvmalloc(ALIGN(length, 8), KSMBD_DEFAULT_GFP);
+ 	if (!aux_payload_buf) {
+ 		err = -ENOMEM;
+ 		goto out;
+@@ -7174,6 +7221,7 @@ int smb2_read(struct ksmbd_work *work)
+ 		err = nbytes;
+ 		goto out;
+ 	}
++	memset(aux_payload_buf + nbytes, 0, ALIGN(length, 8) - nbytes);
+ 
+ 	if ((nbytes == 0 && length != 0) || nbytes < mincount) {
+ 		kvfree(aux_payload_buf);
+@@ -9273,9 +9321,9 @@ void smb2_set_sign_rsp(struct ksmbd_work *work)
+ 	hdr->Flags |= SMB2_FLAGS_SIGNED;
+ 	memset(hdr->Signature, 0, SMB2_SIGNATURE_SIZE);
+ 
+-	if (hdr->Command == SMB2_READ) {
+-		iov = &work->iov[work->iov_idx - 1];
+-		n_vec++;
++	if (hdr->Command == SMB2_READ) {	/* header and data kvecs */
++		iov = &work->iov[work->iov_idx - (work->read_iov_n ?: 1)];
++		n_vec += work->read_iov_n ?: 1;
+ 	} else {
+ 		iov = &work->iov[work->iov_idx];
+ 	}
+@@ -9379,9 +9427,9 @@ void smb3_set_sign_rsp(struct ksmbd_work *work)
+ 	hdr->Flags |= SMB2_FLAGS_SIGNED;
+ 	memset(hdr->Signature, 0, SMB2_SIGNATURE_SIZE);
+ 
+-	if (hdr->Command == SMB2_READ) {
+-		iov = &work->iov[work->iov_idx - 1];
+-		n_vec++;
++	if (hdr->Command == SMB2_READ) {	/* header and data kvecs */
++		iov = &work->iov[work->iov_idx - (work->read_iov_n ?: 1)];
++		n_vec += work->read_iov_n ?: 1;
+ 	} else {
+ 		iov = &work->iov[work->iov_idx];
+ 	}
+diff --git a/fs/smb/server/transport_tcp.c b/fs/smb/server/transport_tcp.c
+index a25237f82cd763d31df37fc76471b751a1fca0f4..51c039596ef6ca6e9dfdf082084ddc2463493ce7 100644
+--- a/fs/smb/server/transport_tcp.c
++++ b/fs/smb/server/transport_tcp.c
+@@ -443,14 +443,50 @@ static int ksmbd_tcp_read(struct ksmbd_transport *t, char *buf,
+ 	return ksmbd_tcp_readv(TCP_TRANS(t), &iov, 1, to_read, max_retries);
+ }
+ 
++/* a piece of a page cache page (zero-copy read), not slab or vmalloc memory */
++static bool ksmbd_tcp_page_cache(const struct kvec *v)
++{
++	struct folio *f;
++
++	if (!v->iov_len || !virt_addr_valid(v->iov_base))
++		return false;
++	f = virt_to_folio(v->iov_base);
++	return !folio_test_slab(f) && !folio_test_anon(f) && READ_ONCE(f->mapping) &&
++	       offset_in_page(v->iov_base) + v->iov_len <= PAGE_SIZE;
++}
++
+ static int ksmbd_tcp_writev(struct ksmbd_transport *t, struct kvec *iov,
+ 			    int nvecs, int size, bool need_invalidate,
+ 			    unsigned int remote_key)
+ 
+ {
+-	struct msghdr smb_msg = {.msg_flags = MSG_NOSIGNAL};
++	struct socket *sock = TCP_TRANS(t)->sock;
++	int i = 0, sent = 0;
+ 
+-	return kernel_sendmsg(TCP_TRANS(t)->sock, &smb_msg, iov, nvecs, size);
++	/* runs of kvecs: copied, or (page cache pages of a zero-copy read)
++	 * referenced by the socket buffers, MSG_SPLICE_PAGES
++	 */
++	while (i < nvecs) {
++		bool pc = ksmbd_tcp_page_cache(&iov[i]);
++		struct msghdr msg = {.msg_flags = MSG_NOSIGNAL};
++		int j = i, len = 0, r;
++
++		while (j < nvecs && ksmbd_tcp_page_cache(&iov[j]) == pc)
++			len += iov[j++].iov_len;
++		if (pc)
++			msg.msg_flags |= MSG_SPLICE_PAGES;
++		if (j < nvecs)
++			msg.msg_flags |= MSG_MORE;
++		iov_iter_kvec(&msg.msg_iter, ITER_SOURCE, &iov[i], j - i, len);
++		r = sock_sendmsg(sock, &msg);
++		if (r < 0)
++			return sent ?: r;
++		sent += r;
++		if (r < len)
++			return sent;
++		i = j;
++	}
++	return sent;
+ }
+ 
+ static void ksmbd_tcp_disconnect(struct ksmbd_transport *t)
+diff --git a/fs/smb/server/vfs.c b/fs/smb/server/vfs.c
+index 130dd0a4001f2c2d5d1d48aed7d9c7d7f17c0678..9d2ead74bf128f484b05fedda323dc1dbcf683cb 100644
+--- a/fs/smb/server/vfs.c
++++ b/fs/smb/server/vfs.c
+@@ -412,6 +412,112 @@ int ksmbd_vfs_read(struct ksmbd_work *work, struct ksmbd_file *fp, size_t count,
+ 	return nbytes;
+ }
+ 
++/* zero-copy read: one kvec per piece of page cache page, a reference held */
++struct ksmbd_zc {
++	struct kvec *vec;
++	struct page **pages;
++	unsigned int n, max;
++};
++
++static int ksmbd_zc_actor(struct pipe_inode_info *pipe, struct pipe_buffer *buf,
++			  struct splice_desc *sd)
++{
++	struct ksmbd_zc *zc = sd->u.data;
++	struct page *page = buf->page + buf->offset / PAGE_SIZE;	/* may be a compound one */
++	unsigned int off = buf->offset % PAGE_SIZE, left = sd->len;
++
++	if (PageHighMem(page))
++		return -EOPNOTSUPP;
++	while (left) {
++		unsigned int part = min_t(unsigned int, left, PAGE_SIZE - off);
++
++		if (zc->n == zc->max)
++			return sd->len - left ?: -ENOSPC;
++		get_page(page);
++		zc->pages[zc->n] = page;
++		zc->vec[zc->n].iov_base = page_address(page) + off;
++		zc->vec[zc->n].iov_len = part;
++		zc->n++;
++		left -= part;
++		off = 0;
++		page++;
++	}
++	return sd->len;
++}
++
++static int ksmbd_zc_direct_actor(struct pipe_inode_info *pipe,
++				 struct splice_desc *sd)
++{
++	return __splice_from_pipe(pipe, sd, ksmbd_zc_actor);
++}
++
++/**
++ * ksmbd_vfs_splice_read() - read without copying: the data stays in the page
++ * cache, *vec (kvfree it) points into its pages, whose references are kept in
++ * the work until it is freed. Same checks as ksmbd_vfs_read(); -EOPNOTSUPP:
++ * use ksmbd_vfs_read().
++ */
++ssize_t ksmbd_vfs_splice_read(struct ksmbd_work *work, struct ksmbd_file *fp,
++			      size_t count, loff_t *pos, struct kvec **vec,
++			      unsigned int *nvec)
++{
++	struct file *filp = fp->filp;
++	struct ksmbd_zc zc = { .max = count / PAGE_SIZE + 3 };
++	struct splice_desc sd = {
++		.total_len	= count,
++		.pos		= *pos,
++		.u.data		= &zc,
++	};
++	loff_t p = *pos;
++	ssize_t nbytes;
++
++	if (S_ISDIR(file_inode(filp)->i_mode) || ksmbd_stream_fd(fp) ||
++	    !filp->f_op->splice_read || work->zc_nr || !count)
++		return -EOPNOTSUPP;
++
++	if (work->conn->connection_type) {
++		if (!(fp->daccess & (FILE_READ_DATA_LE | FILE_EXECUTE_LE))) {
++			pr_err("no right to read(%pD)\n", fp->filp);
++			return -EACCES;
++		}
++	}
++
++	if (!work->tcon->posix_extensions) {
++		if (check_lock_range(filp, *pos, *pos + count - 1, READ)) {
++			pr_err("unable to read due to lock\n");
++			return -EAGAIN;
++		}
++	}
++
++	zc.vec = kvmalloc_array(zc.max, sizeof(*zc.vec), KSMBD_DEFAULT_GFP);
++	zc.pages = kvmalloc_array(zc.max, sizeof(*zc.pages), KSMBD_DEFAULT_GFP);
++	if (!zc.vec || !zc.pages) {
++		nbytes = -ENOMEM;
++		goto fail;
++	}
++
++	nbytes = rw_verify_area(READ, filp, &p, count);
++	if (!nbytes)
++		nbytes = splice_direct_to_actor(filp, &sd, ksmbd_zc_direct_actor);
++	if (nbytes < 0)
++		goto fail;
++
++	*pos += nbytes;
++	filp->f_pos = *pos;
++	work->zc_pages = zc.pages;
++	work->zc_nr = zc.n;
++	*vec = zc.vec;
++	*nvec = zc.n;
++	return nbytes;
++
++fail:
++	while (zc.n)
++		put_page(zc.pages[--zc.n]);
++	kvfree(zc.pages);
++	kvfree(zc.vec);
++	return nbytes == -ENOMEM ? nbytes : -EOPNOTSUPP;
++}
++
+ static int ksmbd_vfs_stream_write(struct ksmbd_file *fp, char *buf, loff_t *pos,
+ 				  size_t count)
+ {
+diff --git a/fs/smb/server/vfs.h b/fs/smb/server/vfs.h
+index e9a5798d7baedfd0cceb8ac859154dfa7176c992..15c426d2f42bebde4fd57b3ff1c7b36da69f0816 100644
+--- a/fs/smb/server/vfs.h
++++ b/fs/smb/server/vfs.h
+@@ -77,6 +77,9 @@ void ksmbd_vfs_query_maximal_access(struct mnt_idmap *idmap,
+ 				   struct dentry *dentry, __le32 *daccess);
+ int ksmbd_vfs_create(struct ksmbd_work *work, const char *name, umode_t mode);
+ int ksmbd_vfs_mkdir(struct ksmbd_work *work, const char *name, umode_t mode);
++ssize_t ksmbd_vfs_splice_read(struct ksmbd_work *work, struct ksmbd_file *fp,
++			      size_t count, loff_t *pos, struct kvec **vec,
++			      unsigned int *nvec);
+ int ksmbd_vfs_read(struct ksmbd_work *work, struct ksmbd_file *fp, size_t count,
+ 		   loff_t *pos, char *rbuf);
+ int ksmbd_vfs_write(struct ksmbd_work *work, struct ksmbd_file *fp,
