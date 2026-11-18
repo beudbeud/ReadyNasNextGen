@@ -1,0 +1,332 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 24/27] crypto: sparc32: fast AES-CMAC for sparc v7
+
+SMB 3 signing (ksmbd, ksmbd_sign_smb3_pdu) is cmac(aes), which resolved
+to the cmac template over aes-generic (priority 100; aes-fixed-time is
+not built). Per 16-byte block that path does crypto_xor() on the state
+in memory, crypto_cipher_encrypt_one() and the cipher through a pointer
+(two register windows), little-endian byte loads and stores of the block,
+and an encryption fully unrolled for 10/12/14 rounds (about 4 KiB of code
+for AES-128) that walks 8 KiB of tables: crypto_ft_tab for nine rounds,
+crypto_fl_tab for the last. On the Padre, whose caches are a few KiB,
+signing costs about 0.35 s of CPU per MiB, three times an unsigned
+transfer.
+
+cmac-aes-sparc32 (priority 200) registers cmac(aes) as one shash whose
+update runs the whole CBC-MAC chain in one function:
+
+- state in registers from the first block to the last, block loaded and
+  xored straight into it, no call per block;
+- encryption only, two rounds per loop iteration (about 1.2 KiB of code);
+- each table index built in two instructions (srl/sll, and 0x3fc: the
+  byte already scaled by 4), then one ld: about 70 instructions a round,
+  no spill (gcc -mcpu=v7 output checked);
+- the last round reads S[x] as byte 1 of crypto_ft_tab[0][x] (the same in
+  either byte order), so 4 KiB of tables in all instead of 8;
+- round keys from aes_expandkey(), tables from aes-generic: no new table,
+  no new key schedule. K1/K2 and the final block as crypto/cmac.c
+  (Jussi Kivilinna), block-only buffering left to the shash core.
+
+About 780 instructions per AES-128 block against about 1 010 (encrypt,
+xor, calls), with half the D-cache footprint and a third of the hot code.
+Estimated 1.4 to 1.8 times the CMAC throughput, i.e. signed SMB
+transfers from about 2.2 to 2.5-3 MiB/s, the rest being the unsigned
+path; to be confirmed on the NAS with the user-space benchmark built
+from this same file (cmacbench).
+
+Not constant time, like aes-generic which it replaces for this use: the
+table addresses depend on key and data. The constant-time choices are
+slower here: aes-fixed-time (lib/crypto/aes.c, S-box only, MixColumns
+computed) takes more instructions per round, and bitsliced or fixsliced
+AES needs several blocks in parallel where CBC-MAC has one. ksmbd only offers AES-CMAC and HMAC-SHA256
+(no AES-GMAC; GHASH without a multiplier would be slower anyway), and
+HMAC-SHA256 is not cheaper on this CPU.
+
+Checked: NIST SP 800-38B / RFC 4493 vectors (AES-128 and AES-256) and
+3000 random messages (128/192/256-bit keys, split in two kvecs, any
+alignment) against cmac(aes-generic), under qemu-sparc with mul/div
+disabled. With CONFIG_CRYPTO_SELFTESTS the crypto manager runs the
+cmac(aes) vectors on registration (and with _FULL compares against
+cmac(aes-generic) on random inputs).
+---
+ arch/sparc/crypto/Kconfig            |  18 ++-
+ arch/sparc/crypto/Makefile           |   1 +
+ arch/sparc/crypto/cmac-aes-sparc32.c | 225 +++++++++++++++++++++++++++
+ 3 files changed, 243 insertions(+), 1 deletion(-)
+
+diff --git a/arch/sparc/crypto/Kconfig b/arch/sparc/crypto/Kconfig
+index f755da97953462276a6411c0cf749a484196c334..da1f4f89b1ec3412181f5bbf4f5d657e7c84a348 100644
+--- a/arch/sparc/crypto/Kconfig
++++ b/arch/sparc/crypto/Kconfig
+@@ -1,6 +1,6 @@
+ # SPDX-License-Identifier: GPL-2.0
+ 
+-menu "Accelerated Cryptographic Algorithms for CPU (sparc64)"
++menu "Accelerated Cryptographic Algorithms for CPU (sparc)"
+ 
+ config CRYPTO_DES_SPARC64
+ 	tristate "Ciphers: DES and Triple DES EDE, modes: ECB/CBC"
+@@ -37,4 +37,20 @@ config CRYPTO_CAMELLIA_SPARC64
+ 
+ 	  Architecture: sparc64
+ 
++config CRYPTO_CMAC_AES_SPARC32
++	tristate "Hash functions: AES-CMAC (sparc32 v7)"
++	depends on SPARC32
++	select CRYPTO_AES
++	select CRYPTO_LIB_AES
++	select CRYPTO_HASH
++	help
++	  AES-CMAC (NIST SP 800-38B, RFC 4493) as one function per update:
++	  CBC-MAC state in registers, encryption only, 4 KiB of tables
++	  (crypto_ft_tab).  For CPUs with small caches and slow calls, such
++	  as the Infrant Padre: SMB 3 signing in ksmbd is cmac(aes).
++
++	  Table-based, like aes-generic: not constant time.
++
++	  Architecture: sparc32
++
+ endmenu
+diff --git a/arch/sparc/crypto/Makefile b/arch/sparc/crypto/Makefile
+index 7b4796842ddd7c52b66e6d196142e684b023a5bd..f8cbd28efc868ac09e4d3619b5a80ea64896c262 100644
+--- a/arch/sparc/crypto/Makefile
++++ b/arch/sparc/crypto/Makefile
+@@ -6,6 +6,7 @@
+ obj-$(CONFIG_CRYPTO_AES_SPARC64) += aes-sparc64.o
+ obj-$(CONFIG_CRYPTO_DES_SPARC64) += des-sparc64.o
+ obj-$(CONFIG_CRYPTO_CAMELLIA_SPARC64) += camellia-sparc64.o
++obj-$(CONFIG_CRYPTO_CMAC_AES_SPARC32) += cmac-aes-sparc32.o
+ 
+ aes-sparc64-y := aes_asm.o aes_glue.o
+ des-sparc64-y := des_asm.o des_glue.o
+diff --git a/arch/sparc/crypto/cmac-aes-sparc32.c b/arch/sparc/crypto/cmac-aes-sparc32.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..df864df26a4ac0db2e1d5059a9274537d063580b
+--- /dev/null
++++ b/arch/sparc/crypto/cmac-aes-sparc32.c
+@@ -0,0 +1,225 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * cmac(aes) for 32-bit SPARC v7 (Infrant Padre): the whole CBC-MAC chain
++ * in one function, state in registers between blocks, encryption only,
++ * 4 KiB of tables.
++ *
++ * The generic cmac(aes-generic) pays per 16-byte block: crypto_xor() on
++ * the state in memory, two calls (crypto_cipher_encrypt_one, then the
++ * cipher through a pointer, each with a register window), little-endian
++ * byte loads and stores of the block, and an encryption that walks
++ * 8 KiB of tables (crypto_ft_tab for nine rounds, crypto_fl_tab for the
++ * last one), which does not fit the small D-cache of this CPU.
++ *
++ * Here the state stays in registers for the whole update, each table
++ * index is built in two instructions (shift, and 0x3fc: already scaled
++ * by 4, so no extra shift), and the last round takes the S-box byte out
++ * of crypto_ft_tab[0] (byte 1 of each entry is S[x], whatever the
++ * endianness), so only the 4 KiB of crypto_ft_tab is touched.  Round
++ * keys come from aes_expandkey() and the tables from aes-generic, both
++ * in the same little-endian column convention.
++ *
++ * Like aes-generic this is a table implementation: the addresses it
++ * loads depend on the key and the data (cache-timing side channel).
++ * The constant-time options (aes-fixed-time, bitsliced code) are several
++ * times slower on this CPU and cannot use the parallel blocks a bitsliced
++ * AES needs, since CBC-MAC is sequential.
++ *
++ * Mode code follows crypto/cmac.c (Jussi Kivilinna).
++ */
++
++#ifdef CMAC_AES_SPARC32_BENCH	/* user-space benchmark build */
++#include "shim.h"
++#else
++#include <crypto/aes.h>
++#include <crypto/internal/hash.h>
++#include <crypto/utils.h>
++#include <linux/module.h>
++#include <linux/unaligned.h>
++#endif
++
++#define IX0(x)		(((x) << 2) & 0x3fc)
++#define IX1(x)		(((x) >> 6) & 0x3fc)
++#define IX2(x)		(((x) >> 14) & 0x3fc)
++#define IX3(x)		(((x) >> 22) & 0x3fc)
++#define TB(t, i)	(*(const u32 *)((const char *)(t) + (i)))
++#define SB(i)		((u32)sb[i])
++
++#define COL(a, b, c, d, k) \
++	(TB(t0, IX0(a)) ^ TB(t1, IX1(b)) ^ TB(t2, IX2(c)) ^ TB(t3, IX3(d)) ^ (k))
++
++#define ROUND(o0, o1, o2, o3, i0, i1, i2, i3, k) do {	\
++	o0 = COL(i0, i1, i2, i3, (k)[0]);		\
++	o1 = COL(i1, i2, i3, i0, (k)[1]);		\
++	o2 = COL(i2, i3, i0, i1, (k)[2]);		\
++	o3 = COL(i3, i0, i1, i2, (k)[3]);		\
++} while (0)
++
++#define LCOL(a, b, c, d, k) \
++	((SB(IX0(a)) | SB(IX1(b)) << 8 | SB(IX2(c)) << 16 | SB(IX3(d)) << 24) ^ (k))
++
++/*
++ * st = AES(st ^ block) for each of the nblocks blocks at src (any
++ * alignment).  rk: aes_expandkey() key_enc, st: 4 little-endian words.
++ */
++static void cmac_aes_sparc32_blocks(const u32 *rk, int rounds, u32 *st,
++				    const u8 *src, unsigned int nblocks)
++{
++	const u32 *t0 = crypto_ft_tab[0], *t1 = crypto_ft_tab[1];
++	const u32 *t2 = crypto_ft_tab[2], *t3 = crypto_ft_tab[3];
++	const u8 *sb = (const u8 *)crypto_ft_tab[0] + 1;
++	u32 s0 = st[0], s1 = st[1], s2 = st[2], s3 = st[3];
++	u32 u0, u1, u2, u3;
++
++	do {
++		const u32 *k = rk + 4;
++		int r = rounds >> 1;
++
++		s0 ^= get_unaligned_le32(src) ^ rk[0];
++		s1 ^= get_unaligned_le32(src + 4) ^ rk[1];
++		s2 ^= get_unaligned_le32(src + 8) ^ rk[2];
++		s3 ^= get_unaligned_le32(src + 12) ^ rk[3];
++		src += AES_BLOCK_SIZE;
++
++		for (;;) {
++			ROUND(u0, u1, u2, u3, s0, s1, s2, s3, k);
++			if (--r == 0)
++				break;
++			ROUND(s0, s1, s2, s3, u0, u1, u2, u3, k + 4);
++			k += 8;
++		}
++		k += 4;
++		s0 = LCOL(u0, u1, u2, u3, k[0]);
++		s1 = LCOL(u1, u2, u3, u0, k[1]);
++		s2 = LCOL(u2, u3, u0, u1, k[2]);
++		s3 = LCOL(u3, u0, u1, u2, k[3]);
++	} while (--nblocks);
++
++	st[0] = s0;
++	st[1] = s1;
++	st[2] = s2;
++	st[3] = s3;
++}
++
++struct cmac_aes_sparc32_ctx {
++	struct crypto_aes_ctx aes;
++	u8 k[2][AES_BLOCK_SIZE];	/* K1, K2 */
++};
++
++static int cmac_aes_sparc32_rounds(const struct cmac_aes_sparc32_ctx *ctx)
++{
++	return 6 + ctx->aes.key_length / 4;
++}
++
++static void cmac_aes_sparc32_out(const u32 *st, u8 *out)
++{
++	put_unaligned_le32(st[0], out);
++	put_unaligned_le32(st[1], out + 4);
++	put_unaligned_le32(st[2], out + 8);
++	put_unaligned_le32(st[3], out + 12);
++}
++
++static int cmac_aes_sparc32_setkey(struct crypto_shash *tfm, const u8 *key,
++				   unsigned int keylen)
++{
++	struct cmac_aes_sparc32_ctx *ctx = crypto_shash_ctx(tfm);
++	u32 st[4] = {};
++	u8 l[AES_BLOCK_SIZE];
++	u64 hi, lo, msb;
++	int err, i;
++
++	err = aes_expandkey(&ctx->aes, key, keylen);
++	if (err)
++		return err;
++
++	/* L = AES(0); K1 = L.u, K2 = L.u^2 in GF(2^128), as crypto/cmac.c */
++	cmac_aes_sparc32_blocks(ctx->aes.key_enc, cmac_aes_sparc32_rounds(ctx),
++				st, (const u8 *)st, 1);
++	cmac_aes_sparc32_out(st, l);
++	hi = get_unaligned_be64(l);
++	lo = get_unaligned_be64(l + 8);
++	for (i = 0; i < 2; i++) {
++		msb = ((s64)hi >> 63) & 0x87;
++		hi = (hi << 1) | (lo >> 63);
++		lo = (lo << 1) ^ msb;
++		put_unaligned_be64(hi, ctx->k[i]);
++		put_unaligned_be64(lo, ctx->k[i] + 8);
++	}
++
++	memzero_explicit(l, sizeof(l));
++	memzero_explicit(st, sizeof(st));
++	return 0;
++}
++
++static int cmac_aes_sparc32_init(struct shash_desc *desc)
++{
++	u32 *st = shash_desc_ctx(desc);
++
++	st[0] = st[1] = st[2] = st[3] = 0;
++	return 0;
++}
++
++/* Block-only: called with len >= 16, returns the bytes left over */
++static int cmac_aes_sparc32_update(struct shash_desc *desc, const u8 *p,
++				   unsigned int len)
++{
++	struct cmac_aes_sparc32_ctx *ctx = crypto_shash_ctx(desc->tfm);
++
++	cmac_aes_sparc32_blocks(ctx->aes.key_enc, cmac_aes_sparc32_rounds(ctx),
++				shash_desc_ctx(desc), p, len / AES_BLOCK_SIZE);
++	return len % AES_BLOCK_SIZE;
++}
++
++static int cmac_aes_sparc32_finup(struct shash_desc *desc, const u8 *src,
++				  unsigned int len, u8 *out)
++{
++	struct cmac_aes_sparc32_ctx *ctx = crypto_shash_ctx(desc->tfm);
++	u32 *st = shash_desc_ctx(desc);
++	u8 last[AES_BLOCK_SIZE] = {};
++
++	memcpy(last, src, len);
++	if (len != AES_BLOCK_SIZE)
++		last[len] = 0x80;
++	crypto_xor(last, ctx->k[len != AES_BLOCK_SIZE], AES_BLOCK_SIZE);
++	cmac_aes_sparc32_blocks(ctx->aes.key_enc, cmac_aes_sparc32_rounds(ctx),
++				st, last, 1);
++	cmac_aes_sparc32_out(st, out);
++	return 0;
++}
++
++static struct shash_alg cmac_aes_sparc32_alg = {
++	.digestsize		= AES_BLOCK_SIZE,
++	.descsize		= 4 * sizeof(u32),
++	.init			= cmac_aes_sparc32_init,
++	.update			= cmac_aes_sparc32_update,
++	.finup			= cmac_aes_sparc32_finup,
++	.setkey			= cmac_aes_sparc32_setkey,
++	.base = {
++		.cra_name		= "cmac(aes)",
++		.cra_driver_name	= "cmac-aes-sparc32",
++		.cra_priority		= 200,
++		.cra_flags		= CRYPTO_AHASH_ALG_BLOCK_ONLY |
++					  CRYPTO_AHASH_ALG_FINAL_NONZERO,
++		.cra_blocksize		= AES_BLOCK_SIZE,
++		.cra_ctxsize		= sizeof(struct cmac_aes_sparc32_ctx),
++		.cra_module		= THIS_MODULE,
++	},
++};
++
++static int __init cmac_aes_sparc32_mod_init(void)
++{
++	return crypto_register_shash(&cmac_aes_sparc32_alg);
++}
++
++static void __exit cmac_aes_sparc32_mod_exit(void)
++{
++	crypto_unregister_shash(&cmac_aes_sparc32_alg);
++}
++
++module_init(cmac_aes_sparc32_mod_init);
++module_exit(cmac_aes_sparc32_mod_exit);
++
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("AES-CMAC for 32-bit SPARC v7, tables in one function");
++MODULE_ALIAS_CRYPTO("cmac(aes)");
++MODULE_ALIAS_CRYPTO("cmac-aes-sparc32");

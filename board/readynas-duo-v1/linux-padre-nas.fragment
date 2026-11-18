@@ -37,6 +37,9 @@ CONFIG_MD_AUTODETECT=y
 CONFIG_EXT4_FS=y
 CONFIG_EXT4_USE_FOR_EXT2=y
 CONFIG_SMB_SERVER=y
+# SMB 3 signing is cmac(aes): one function per update, 4 KiB of tables,
+# instead of cmac(aes-generic) (patches/linux/0024)
+CONFIG_CRYPTO_CMAC_AES_SPARC32=y
 CONFIG_NETWORK_FILESYSTEMS=y
 CONFIG_NFSD=y
 CONFIG_NFSD_V4=y
