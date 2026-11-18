@@ -232,6 +232,12 @@ check "status: 2 disks, drivetemp, bays" "json '[d[\"temp\"] for d in j[\"disks\
 check "status: fan (padre-fan)" "json 'j[\"temp\"]==45 and j[\"fan\"]==1800 and j[\"pwm\"]==120 and j[\"svc\"][\"fan\"]==1'"
 check "status: services" "json 'j[\"svc\"][\"ksmbd\"]==1 and j[\"svc\"][\"nfs\"]==1 and j[\"svc\"][\"ntpd\"]==0 and j[\"svc\"][\"hwmon\"]==0'"
 check "status: /c and memory" "json 'j[\"c\"][\"size\"]==1922000000 and j[\"mem\"][\"avail\"]==180000 and j[\"ip\"]==\"10.0.0.2\"'"
+rm -f "$R"/var/run/diet/cnt.prev; api GET a=status
+check "status: no previous sample, rate null (the page waits for its own)" "json 'j[\"rate\"] is None'"
+echo "0 0 0 0 0 0 0" > "$R"/var/run/diet/cnt.prev; api GET a=status
+check "status: first answer carries rates since the previous sample (cpu %, bytes/s)" "json 'j[\"rate\"][\"dt\"]==j[\"t\"] and j[\"rate\"][\"cpu\"]==j[\"cnt\"][\"busy\"]*100//j[\"cnt\"][\"tot\"] and j[\"rate\"][\"rx\"]==j[\"cnt\"][\"rx\"]*100//j[\"t\"] and j[\"rate\"][\"rd\"]==j[\"cnt\"][\"rd\"]*51200//j[\"t\"]'"
+echo "x y" > "$R"/var/run/diet/cnt.prev; api GET a=status
+check "status: unreadable previous sample ignored, rewritten" "json 'j[\"rate\"] is None' && read -r a _ < \"\$R\"/var/run/diet/cnt.prev && [ \"\$a\" -gt 0 ]"
 echo "$DEGRADED" > "$R"/proc/mdstat
 api GET a=status
 check "status degraded: U_, sdb failed, resync" "json 'j[\"md\"][0][\"map\"]==\"U_\" and j[\"disks\"][1][\"faulty\"]==1 and j[\"disks\"][0][\"faulty\"]==0 and \"recovery\" in j[\"md\"][0][\"sync\"]'"
@@ -403,6 +409,32 @@ api POST a=smb_enc 'on=mandatory'
 check "smb_enc: invalid value refused" '[ "$ST" = 400 ]'
 api POST a=smb_enc 'on=1' ''
 check "smb_enc without X-Diet refused (403)" '[ "$ST" = 403 ] && grep -q "smb3 encryption = disabled" "$K"'
+# SMB signing (server signing of [global]): auto or mandatory
+api GET a=sys
+check "smb_sign: shipped ksmbd.conf read (auto)" "json 'j[\"smbsign\"]==\"auto\"'"
+: > "$R"/cmd.log
+api POST a=smb_sign 'v=mandatory'
+i=0; while [ $i -lt 20 ] && ! grep -q "S70ksmbd restart" "$R"/cmd.log; do sleep 0.1; i=$((i + 1)); done
+check "smb_sign mandatory: in [global], once, other lines kept, ksmbd restarted, journal" '[ "$ST" = 200 ] && [ "$(grep -c "server signing" "$K")" = 1 ] && grep -q "^	server signing = mandatory" "$K" && grep -q "smb3 encryption = disabled" "$K" && grep -q "netbios name = " "$K" && grep -q "S70ksmbd restart" "$R"/cmd.log && [ ! -e "$K".tmp ] && grep -q "SMB: server signing = mandatory" "$R"/var/log/diet.log'
+check "smb_sign: share sections untouched" '[ "$(shares)" = "$SH0" ]'
+api GET a=sys
+check "smb_sign: read back (mandatory)" "json 'j[\"smbsign\"]==\"mandatory\"'"
+api POST a=smb_sign 'v=auto'
+check "smb_sign auto: replaced in place" '[ "$ST" = 200 ] && [ "$(grep -c "server signing" "$K")" = 1 ] && grep -q "server signing = auto" "$K"'
+sed -i 's/server signing = auto/server signing = disabled/' "$K"
+api GET a=sys
+check "smb_sign: disabled in the file read as auto (same in ksmbd)" "json 'j[\"smbsign\"]==\"auto\"'"
+sed -i '/server signing/d' "$K"
+api GET a=sys
+check "smb_sign: key missing = auto" "json 'j[\"smbsign\"]==\"auto\"'"
+api POST a=smb_sign 'v=auto'
+check "smb_sign: missing key added inside [global]" '[ "$ST" = 200 ] && awk "/^\[global\]/ { g = 1; next } /^[ \t]*\[/ { g = 0 } g && /server signing = auto/ { f = 1 } END { exit !f }" "$K" && [ "$(shares)" = "$SH0" ]'
+for bad in disabled enabled '' 'auto%0Amandatory'; do
+	api POST a=smb_sign "v=$bad"
+	check "smb_sign: invalid value refused ($bad)" '[ "$ST" = 400 ] && grep -q "server signing = auto" "$K"'
+done
+api POST a=smb_sign 'v=mandatory' ''
+check "smb_sign without X-Diet refused (403)" '[ "$ST" = 403 ] && grep -q "server signing = auto" "$K"'
 awk '/^\[photos\]/ { exit } { print }' "$K" | sed '$ { /^$/d }' > "$K".t && mv "$K".t "$K"
 
 # ---------- services : MiniDLNA, Avahi, rsync, WebDAV ----------
@@ -517,12 +549,19 @@ stk() {	# stk scenario "content of nas-raid.mode"
 stk clean xraid-rw
 check "storage, clean X-RAID: rw, 2 sections, base/mirror" "json 'j[\"mode\"]==\"xraid-rw\" and j[\"xraid\"][\"mode\"]==\"rw\" and len(j[\"xraid\"][\"sections\"])==2 and j[\"xraid\"][\"mirror\"].endswith(\"sda.img\")'"
 check "storage: superblock state for the card (clean, counters, disk states, writer)" "json 'j[\"xraid\"][\"clean\"]==1 and j[\"xraid\"][\"failed_disks\"]==0 and [d[\"state\"] for d in j[\"xraid\"][\"disks\"]]==[\"online\",\"online\"] and j[\"sb_writer\"]==\"yes\"'"
+check "storage layout: raid1, one member per bay with its role and state, no rebuild" "json 'j[\"layout\"]=={\"level\":\"raid1\",\"members\":[{\"bay\":1,\"dev\":\"sda.img\",\"role\":\"mirror\",\"state\":\"online\"},{\"bay\":2,\"dev\":\"sdb.img\",\"role\":\"base\",\"state\":\"online\"}],\"rebuild\":None}'"
+MDSTAT_L=$(cat "$R"/proc/mdstat 2>/dev/null)
+printf 'md10 : active raid1 sdb3[1] sda3[0]\n      [=>...................]  recovery = 7.5%% (1/2) finish=1min\n' > "$R"/proc/mdstat
+api GET a=storage
+check "storage layout: rebuild = percentage of an md recovery" "json 'j[\"layout\"][\"rebuild\"]==7'"
+printf '%s\n' "$MDSTAT_L" > "$R"/proc/mdstat
 stk dirty 'xraid-ro unclean_shutdown'
 check "storage, dirty X-RAID: read-only, reason unclean_shutdown" "json 'j[\"mode\"]==\"xraid-ro\" and [r[\"code\"] for r in j[\"xraid\"][\"reasons\"]]==[\"unclean_shutdown\"]'"
 stk degraded 'xraid-ro missing_disk'
 check "storage, degraded X-RAID: read-only, a single disk" "json 'j[\"xraid\"][\"mirror\"]==\"\" and j[\"xraid\"][\"reasons\"][0][\"code\"]==\"missing_disk\"'"
+check "storage layout, degraded: the bay without its disk is missing" "json '[m[\"state\"] for m in j[\"layout\"][\"members\"]].count(\"missing\")==1 and len(j[\"layout\"][\"members\"])==2'"
 stk md md
-check "storage md: mode md" "json 'j[\"mode\"]==\"md\"'"
+check "storage md: mode md, no X-RAID layout" "json 'j[\"mode\"]==\"md\" and j[\"layout\"] is None'"
 stk clean xraid-rw
 # md wizards: disabled for now (409), nas-raid not started
 : > "$R"/cmd.log
@@ -601,8 +640,23 @@ for b in 'confirm=ACCEPT' 'yes=1' 'confirm=accept&yes=1'; do
 	api POST a=raid_quick_accept "$b"
 	check "raid_quick_accept refused ($b): 400, mark kept" '[ "$ST" = 400 ] && [ -e "$R"/var/lib/nas-raid/xraid-dirty ]'
 done
+echo XRAID_RW=yes > "$R"/etc/nas-raid.conf; : > "$R"/cmd.log
 api POST a=raid_quick_accept 'confirm=ACCEPT&yes=1'
-check "raid_quick_accept (ACCEPT + box): mark removed, state accepted" '[ "$ST" = 200 ] && [ ! -e "$R"/var/lib/nas-raid/xraid-dirty ] && grep -q "^accepted " "$R"/var/lib/nas-raid/quick.state'
+check "raid_quick_accept (ACCEPT + box): mark lifted (log), state accepted" '[ "$ST" = 200 ] && grep -q "quick check accepted by the administrator" "$R"/var/lib/nas-raid/log && grep -q "^accepted " "$R"/var/lib/nas-raid/quick.state'
+check "raid_quick_accept with writing on: /c remounted read-write at once, services around it" 'json "\"remounted read-write\" in j[\"msg\"]" && grep -q "^xraid-rw" "$R"/var/run/nas-raid.mode && awk "/S70ksmbd stop/ { t = NR } /umount \/c/ { u = NR } /S70ksmbd start/ { s = NR } END { exit !(t && t < u && u < s) }" "$R"/cmd.log'
+: > "$R"/cmd.log; DIET_REMOUNT=1 $SH "$SRC"/www/cgi-bin/api
+check "after a check, already read-write: DIET_REMOUNT does nothing" '! grep -q "umount /c" "$R"/cmd.log && ! grep -q "S70ksmbd stop" "$R"/cmd.log'
+# writing switched off: clean unmount (superblock clean, mark removed), read-only
+api POST a=xraid_rw 'on=0'; : > "$R"/cmd.log
+DIET_REMOUNT=1 $SH "$SRC"/www/cgi-bin/api
+check "after a check, writing off: DIET_REMOUNT leaves /c read-only" '! grep -q "umount /c" "$R"/cmd.log && grep -q "^xraid-ro" "$R"/var/run/nas-raid.mode'
+echo XRAID_RW=yes > "$R"/etc/nas-raid.conf; : > "$R"/cmd.log
+DIET_REMOUNT=1 $SH "$SRC"/www/cgi-bin/api
+check "after a check, writing on and safeguards lifted: DIET_REMOUNT remounts read-write" 'grep -q "umount /c" "$R"/cmd.log && grep -q "^xraid-rw" "$R"/var/run/nas-raid.mode'
+echo 'xraid-ro unclean_shutdown_linux' > "$R"/var/run/nas-raid.mode; date +%s > "$R"/var/lib/nas-raid/xraid-dirty; : > "$R"/cmd.log
+DIET_REMOUNT=1 $SH "$SRC"/www/cgi-bin/api
+check "after a check, a safeguard still there (dirty mark): nothing remounted" '! grep -q "umount /c" "$R"/cmd.log && ! grep -q "S70ksmbd stop" "$R"/cmd.log'
+rm -f "$R"/var/lib/nas-raid/xraid-dirty "$R"/etc/nas-raid.conf; echo 'xraid-rw' > "$R"/var/run/nas-raid.mode
 api POST a=raid_quick_accept 'confirm=ACCEPT&yes=1'
 check "raid_quick_accept again: refused by nas-raid (409, nothing to accept)" '[ "$ST" = 409 ]'
 api GET a=storage
@@ -766,6 +820,8 @@ check "v1 read-only token: GET log" '[ "$ST" = 200 ]'
 : > "$R"/cmd.log
 v1 POST a=ntp "Bearer $TRO"
 check "v1 read-only token: POST refused (403), nothing done" '[ "$ST" = 403 ] && [ ! -s "$R"/cmd.log ]'
+v1 POST a=smb_sign "Bearer $TRO" 'v=mandatory'
+check "v1 read-only token: smb_sign refused (403), ksmbd.conf unchanged" '[ "$ST" = 403 ] && [ ! -s "$R"/cmd.log ] && ! grep -q "server signing = mandatory" "$R"/etc/ksmbd/ksmbd.conf'
 v1 POST a=ntp "Bearer $TFU" '' ''
 check "v1 full token: POST without X-Diet refused (403)" '[ "$ST" = 403 ]'
 v1 POST a=share_add "Bearer $TFU" 'name=viatoken'
@@ -799,6 +855,52 @@ check "tokens: no token value in the logs" '! grep -rqF "${TRV#*.}" "$R"/var/log
 # ---------- misc ----------
 api POST a=reboot '' ''
 check "POST without X-Diet refused (403)" '[ "$ST" = 403 ]'
+
+# ---------- protections: reboot / poweroff / update_switch refused (409) while something runs ----------
+stub reboot; stub poweroff
+cp "$R"/proc/mdstat "$R"/mdstat.save; echo "$HEALTHY" > "$R"/proc/mdstat
+mkdir -p "$R"/var/run/nas-update "$R"/var/lib/nas-raid; NR=$R/var/lib/nas-raid
+for f in verify quick; do [ -e "$NR/$f.state" ] && mv "$NR/$f.state" "$NR/$f.state.save"; done
+api GET a=status
+check "status: busy empty when nothing runs" "json 'j[\"busy\"]==[]'"
+echo 'busy Installing 2.0' > "$R"/var/run/nas-update/state; echo $$ > "$R"/var/run/nas-update/pid
+for a in reboot poweroff; do
+	api POST a=$a
+	check "$a during an update job: 409, explained" '[ "$ST" = 409 ] && case "$OUT" in *"system update"*force=1*) true;; *) false;; esac'
+done
+api GET a=status
+check "status: busy update" "json 'j[\"busy\"]==[\"update\"]'"
+rm -f "$R"/var/run/nas-update/pid
+api POST a=reboot
+check "reboot: busy state of a dead update job ignored (200)" '[ "$ST" = 200 ]'
+rm -f "$R"/var/run/nas-update/state
+echo "running $(date +%s)" > "$NR/verify.state"
+api POST a=reboot
+check "reboot during a full mirror check: 409" '[ "$ST" = 409 ] && case "$OUT" in *"full mirror check"*) true;; *) false;; esac'
+api POST a=reboot 'force=1'
+check "reboot force=1 without the word FORCE: still 409" '[ "$ST" = 409 ]'
+api POST a=reboot 'force=1&confirm=force'
+check "reboot force=1 with a wrong word: still 409" '[ "$ST" = 409 ]'
+api POST a=poweroff 'force=1&confirm=FORCE'
+check "poweroff force=1&confirm=FORCE: 200, logged" '[ "$ST" = 200 ] && grep -q "poweroff forced while running: verify" "$R"/var/log/diet.log'
+cp "$R"/proc/stat "$R"/stat.save; printf 'cpu  100 0 50 1000 10 0 5 0\nbtime %s\n' "$(( $(date +%s) + 100 ))" > "$R"/proc/stat
+api POST a=reboot
+check "reboot: \"running\" left over from an earlier boot ignored (200)" '[ "$ST" = 200 ]'
+cp "$R"/stat.save "$R"/proc/stat
+rm -f "$NR/verify.state"; echo "running $(date +%s)" > "$NR/quick.state"
+api POST a=reboot
+check "reboot during a quick check: 409" '[ "$ST" = 409 ] && case "$OUT" in *"quick mirror check"*) true;; *) false;; esac'
+api GET a=status
+check "status: busy quick" "json 'j[\"busy\"]==[\"quick\"]'"
+rm -f "$NR/quick.state"; echo "$DEGRADED" > "$R"/proc/mdstat
+api POST a=poweroff
+check "poweroff during a RAID resync/repair: 409" '[ "$ST" = 409 ] && case "$OUT" in *"resync or repair"*) true;; *) false;; esac'
+api POST a=reboot 'force=1&confirm=FORCE'
+check "reboot force=1&confirm=FORCE during a resync: 200" '[ "$ST" = 200 ]'
+cp "$R"/mdstat.save "$R"/proc/mdstat
+for f in verify quick; do [ -e "$NR/$f.state.save" ] && mv "$NR/$f.state.save" "$NR/$f.state"; done
+sleep 3	# the reboot/poweroff stubs run 2 s after the answer
+check "protections: forced actions really ran (stubs called)" 'grep -q "^reboot" "$R"/cmd.log && grep -q "^poweroff" "$R"/cmd.log'
 api GET 'a=md&d=md0'
 check "md: mdadm --detail" 'case "$OUT" in *"State : clean"*) true;; *) false;; esac'
 api GET 'a=md&d=md9'
@@ -900,6 +1002,10 @@ check "update: accounts merged (users and uids of this NAS, root password, new s
 check "update: Avahi announcement of a stopped service stays off" '[ -f "$B/etc/avahi/services/rsync.service.off" ] && [ ! -f "$B/etc/avahi/services/rsync.service" ] && [ -f "$B/etc/avahi/services/ssh.service" ]'
 # relay add-on 1.1: the other version can be tried
 echo 1 > "$K/boot/relay-slots"
+echo "running $(date +%s)" > "$R/var/lib/nas-raid/verify.state.t"; mv "$R/var/lib/nas-raid/verify.state" "$R/var/lib/nas-raid/verify.state.k" 2>/dev/null; mv "$R/var/lib/nas-raid/verify.state.t" "$R/var/lib/nas-raid/verify.state"
+api POST a=update_switch
+check "update: switch refused during a mirror check (409), no trial scheduled" '[ "$ST" = 409 ] && [ ! -e "$K/boot/slot.try" ]'
+rm -f "$R/var/lib/nas-raid/verify.state"; mv "$R/var/lib/nas-raid/verify.state.k" "$R/var/lib/nas-raid/verify.state" 2>/dev/null
 api POST a=update_switch
 check "update: switch schedules a trial of rootfs-b" '[ "$ST" = 200 ] && [ "$(cat "$K/boot/slot.try")" = rootfs-b ]'
 api POST a=update_cancel
@@ -1045,6 +1151,51 @@ else
 	echo "skip lighttpd (host) tests: no lighttpd (LIGHTTPD=...)"
 fi
 
+# index.html: every text of the page has its French and German translation (I18N):
+# the texts of the markup (elements and placeholder/title/data-q/aria-label), every
+# t('…') of the script and the tables passed to t() (reasons, modes, states; city names of the time zones excepted)
+I18NKO=$(python3 -I - "$SRC"/www/index.html <<'PYEOF'
+import re, sys, html.parser
+src = open(sys.argv[1], encoding='utf-8').read()
+keys = {k.replace('\\"', '"') for k in re.findall(r'^  "((?:[^"\\]|\\.)*)": \["[^"]+", "[^"]+"\]', src, re.M)}
+js = src[src.index('<script>'):]
+need = set(m.group(2) for m in re.finditer(r"\bt\((['\"])((?:(?!\1).)*)\1", js))
+for tb in re.finditer(r'const (?:XR|NR|XRM|BUSYT|MST) = \{(.*?)\};', js, re.S):
+    need |= set(re.findall(r":\s*'([^']*)'", tb.group(1)))
+class P(html.parser.HTMLParser):
+    skip = 0
+    def handle_starttag(self, tag, a):
+        if tag in ('script', 'style', 'code', 'pre'): self.skip += 1
+        for k, v in a:
+            if k in ('placeholder', 'title', 'data-q', 'aria-label') and v and re.search('[a-z]{3}', v) and not re.match(r'(https?:|ssh-)', v): need.add(v)
+    def handle_endtag(self, tag):
+        if tag in ('script', 'style', 'code', 'pre'): self.skip -= 1
+    def handle_data(self, d):
+        k = re.sub(r'\s+', ' ', d).strip()
+        if not self.skip and re.search('[a-z]{2}', k) and k not in ('Français', 'Deutsch', 'English'): need.add(k)
+P().feed(src[src.index('<body>'):src.index('<script>')])
+print(' | '.join(sorted(need - keys)))
+PYEOF
+)
+check "index.html: every text of the page translated (fr, de)" '[ -z "$I18NKO" ] || { echo "  untranslated: $I18NKO"; false; }'
+check "index.html: the page asks for the layout of the volume and does not assume 2 bays" 'grep -q "stk.layout" "$SRC"/www/index.html && ! grep -q "bays || 2" "$SRC"/www/index.html && ! grep -q "repeat(2,1fr)" "$SRC"/www/index.html'
+
+# The NAS runs busybox awk, stricter than the PC's (e.g. split(s, a, "},{") fails there):
+# every read again with busybox awk first in PATH, answers must stay valid JSON
+if command -v busybox >/dev/null 2>&1 && busybox awk 'BEGIN{}' 2>/dev/null; then
+	# the API puts $R/bin first in its PATH: the busybox awk goes there for this check
+	[ ! -e "$R/bin/awk" ] || mv "$R/bin/awk" "$R/bin/awk.pc"
+	printf '#!/bin/sh\nexec busybox awk "$@"\n' > "$R/bin/awk"; chmod +x "$R/bin/awk"
+	bbko=
+	# a real X-RAID volume, so that the X-RAID parts (layout...) are computed
+	export NAS_RAID_DISKS="$(ls "$R/img/clean"/*.img | tr '\n' ' ')"; rm -f "$R"/var/run/xraid.json
+	echo 'xraid-rw' > "$R"/var/run/nas-raid.mode
+	for a in status all services shares nfs sys users config storage; do	# storage last: checked below
+		rm -rf "$R"/var/run/diet; api GET "a=$a"; printf '%s' "$OUT" | jsonok || bbko="$bbko $a"
+	done
+	rm -f "$R/bin/awk"; [ ! -e "$R/bin/awk.pc" ] || mv "$R/bin/awk.pc" "$R/bin/awk"
+	check "busybox awk (as on the NAS): every read answer is valid JSON, X-RAID layout computed" '[ -z "$bbko" ] && json "j[\"layout\"][\"level\"]==\"raid1\" and len(j[\"layout\"][\"members\"])==2" || { echo "  invalid with busybox awk:$bbko"; false; }'
+else echo "skip busybox awk check: busybox missing"; fi
 check "all JSON answers of the API are valid ($NJSON)" '[ -z "$JSONKO" ] || { echo "  invalid:$JSONKO"; false; }'
 echo "$((N - FAILS))/$N tests passed (root: $R)"
 [ $FAILS -eq 0 ] && rm -rf "$R"

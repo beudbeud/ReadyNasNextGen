@@ -7,7 +7,7 @@
 #        |svc_set|dlna_set|dlna_scan|rsync_pw|rsync_c
 #        |raid_verify|raid_quick|raid_quick_accept|xraid_rw
 #        |update_upload (body: the package) |update_url|update_switch|update_cancel
-#        |ssh_set|smb_enc|metrics_set|token_add|token_del
+#        |ssh_set|smb_enc|smb_sign|metrics_set|token_add|token_del
 #        (X-Diet: 1 header required)
 #   GET  ?a=tokens (access tokens, interface only)   ?a=metrics (Prometheus, /api/v1 only)
 # /cgi-bin/setup (symbolic link to this script): first setup, without
@@ -268,7 +268,21 @@ status() {
   printf '"mem":{"total":%s,"free":%s,"buf":%s,"cache":%s,"avail":%s,"swap":%s},' "$mt" "$mf" "$mb" "$mc" "$ma" "$((swt - swf))"
   printf '"c":{"size":%s,"used":%s,"free":%s},' "$cs" "$cu" "$cf"
   printf '"nfs_on":%s,' "$nfson"
+  # operations a restart would cut short (codes of busyops; the page disables Restart/Power off)
+  busyops; b=; for x in $BUSY; do b="$b${b:+,}\"$x\""; done; printf '"busy":[%s],' "$b"
   printf '"cnt":{"busy":%s,"tot":%s,"rx":%s,"tx":%s,"rd":%s,"wr":%s},' "$busy" "$tot" "$rx" "$txb" "$rd" "$wr"
+  # rates since the previous status (collector or request): the page shows them at once
+  # instead of waiting for its own second sample (15 s or more)
+  pt=; read -r pt pb po px pk pd pw 2>/dev/null < "$C/cnt.prev"
+  { mkdir -p "$C" && printf '%s %s %s %s %s %s %s\n' "$t" "$busy" "$tot" "$rx" "$txb" "$rd" "$wr" > "$C/.cnt.$$" \
+    && mv -f "$C/.cnt.$$" "$C/cnt.prev"; } 2>/dev/null
+  case "$pt$pb$po$px$pk$pd$pw" in *[!0-9]*) pt=;; esac
+  if [ -n "$pt" ] && [ "$t" -gt "$pt" ] && [ "$tot" -ge "$po" ] && [ "$rx" -ge "$px" ] && [ "$txb" -ge "$pk" ] \
+     && [ "$rd" -ge "$pd" ] && [ "$wr" -ge "$pw" ]; then
+    dt=$((t - pt)); dc=$((tot - po)); pc=0; [ "$dc" -gt 0 ] && pc=$(((busy - pb) * 100 / dc))
+    printf '"rate":{"dt":%s,"cpu":%s,"rx":%s,"tx":%s,"rd":%s,"wr":%s},' "$dt" "$pc" \
+      $(((rx - px) * 100 / dt)) $(((txb - pk) * 100 / dt)) $(((rd - pd) * 51200 / dt)) $(((wr - pw) * 51200 / dt))
+  else printf '"rate":null,'; fi
   printf '"md":[%s]}\n' "$MD"
 }
 
@@ -351,37 +365,57 @@ EOF
 
 ksmbd_reload() { ksmbd.control -r >/dev/null 2>&1; }
 
-# SMB3 encryption: "smb3 encryption" of [global] in ksmbd.conf, disabled (the
-# shipped value: AES by the 280 MHz CPU caps the throughput) or auto (encrypted
-# when the client asks). Missing (older installs) = the ksmbd default, auto.
-# Signing ("server signing = auto", required by Windows 11 24H2) is not touched.
-smbenc_get() {
-  SMBENC=auto; g=
+# [global] settings of ksmbd.conf, read when ksmbd starts.
+# kglobal_get "key" default: KV = the value of key in [global] (default if missing)
+kglobal_get() {
+  KV=$2; g=
   [ -r "$KCONF" ] && while IFS= read -r l; do
     l=${l#"${l%%[![:space:]]*}"}
     case $l in
       "["*) case $l in "[global]"*|"[GLOBAL]"*|"[Global]"*) g=1;; *) g=;; esac ;;
-      "smb3 encryption"*=*) [ -n "$g" ] && { v=${l#*=}; v=${v#"${v%%[![:space:]]*}"}; SMBENC=${v%%[[:space:];]*}; } ;;
+      "$1"*=*) [ -n "$g" ] && { v=${l#*=}; v=${v#"${v%%[![:space:]]*}"}; KV=${v%%[[:space:];]*}; } ;;
     esac
   done < "$KCONF"
 }
-smb_enc() {
-  on=""; for kv in $(echo "$BODY" | tr '&' ' '); do [ "${kv%%=*}" = on ] && on=${kv#*=}; done
-  case "$on" in 0) v=disabled;; 1) v=auto;; *) fail "400 Bad Request" "$(tx "Invalid setting" "Réglage invalide" "Ungültige Einstellung")";; esac
+# kglobal_set "key" value: the key of [global] replaced, or added at the end of
+# [global]; the rest kept as is (temporary file then mv); ksmbd restarted
+kglobal_set() {
   [ -f "$KCONF" ] || printf '[global]\n\tnetbios name = READYNAS\n' > "$KCONF"
   grep -qi '^[[:space:]]*\[global\]' "$KCONF" || { printf '[global]\n' | cat - "$KCONF" > "$KCONF.tmp" && mv "$KCONF.tmp" "$KCONF"; }
-  # the key of [global] replaced, or added at the end of [global]; the rest kept as is
-  awk -v v="$v" '
-    function put() { if (g && !done) { print "\tsmb3 encryption = " v; done = 1 } }
+  awk -v k="$1" -v v="$2" '
+    BEGIN { re = k; gsub(/ /, "[ \t]+", re); re = "^[ \t]*" re "[ \t]*=" }
+    function put() { if (g && !done) { print "\t" k " = " v; done = 1 } }
     /^[ \t]*\[/ { put(); l = tolower($0); gsub(/^[ \t]+|[ \t]+$/, "", l); g = (l == "[global]") }
-    g && tolower($0) ~ /^[ \t]*smb3[ \t]+encryption[ \t]*=/ { put(); next }
+    g && tolower($0) ~ re { put(); next }
     { print }
     END { put() }' "$KCONF" > "$KCONF.tmp" || { rm -f "$KCONF.tmp"; fail "500 Internal Server Error" "$(tx "Cannot write" "Écriture impossible" "Schreiben nicht möglich")"; }
   cp "$KCONF" "$KCONF.bak"; mv "$KCONF.tmp" "$KCONF"
   bg "$INITD/S70ksmbd restart"   # global settings are read when ksmbd starts
-  note "SMB: smb3 encryption = $v"
+  note "SMB: $1 = $2"
+}
+# SMB3 encryption: "smb3 encryption", disabled (the shipped value: AES by the
+# 280 MHz CPU caps the throughput) or auto (encrypted when the client asks).
+# Missing (older installs) = the ksmbd default, auto.
+smb_enc() {
+  on=""; for kv in $(echo "$BODY" | tr '&' ' '); do [ "${kv%%=*}" = on ] && on=${kv#*=}; done
+  case "$on" in 0) v=disabled;; 1) v=auto;; *) fail "400 Bad Request" "$(tx "Invalid setting" "Réglage invalide" "Ungültige Einstellung")";; esac
+  kglobal_set "smb3 encryption" "$v"
   [ "$v" = auto ] && ok "$(tx "SMB3 encryption allowed (when the client asks); SMB restarts" "Chiffrement SMB3 autorisé (si le client le demande) ; SMB redémarre" "SMB3-Verschlüsselung erlaubt (wenn der Client sie verlangt); SMB startet neu")" \
     || ok "$(tx "SMB3 encryption off; SMB restarts" "Chiffrement SMB3 désactivé ; SMB redémarre" "SMB3-Verschlüsselung aus; SMB startet neu")"
+}
+# SMB signing: "server signing", auto or mandatory. ksmbd 6.18 only tells
+# mandatory apart (smb2pdu.c): with any other value (auto, disabled, enabled,
+# missing) it offers signing and signs exactly when the client asks for it
+# (Windows 11 24H2 and macOS do; Linux cifs.ko and libsmbclient by default do
+# not), so "disabled" is not offered: it would change nothing. mandatory makes
+# every client sign (AES-CMAC by the CPU: about 3x slower transfers).
+smbsign_get() { kglobal_get "server signing" auto; [ "$KV" = mandatory ] || KV=auto; SMBSIGN=$KV; }
+smb_sign() {
+  v=""; for kv in $(echo "$BODY" | tr '&' ' '); do [ "${kv%%=*}" = v ] && v=${kv#*=}; done
+  case "$v" in auto|mandatory) ;; *) fail "400 Bad Request" "$(tx "Invalid setting" "Réglage invalide" "Ungültige Einstellung")";; esac
+  kglobal_set "server signing" "$v"
+  [ "$v" = mandatory ] && ok "$(tx "SMB signing required for every client; SMB restarts" "Signature SMB exigée pour tous les clients ; SMB redémarre" "SMB-Signatur für alle Clients verlangt; SMB startet neu")" \
+    || ok "$(tx "SMB signing automatic (when the client asks); SMB restarts" "Signature SMB automatique (si le client la demande) ; SMB redémarre" "SMB-Signatur automatisch (wenn der Client sie verlangt); SMB startet neu")"
 }
 
 shares_change() {
@@ -715,14 +749,15 @@ EOF
   jstr "$TG_CHAT"; TGC=$J
   [ -n "$TG_TOKEN" ] && tg=1 || tg=0
   for v in NET IPADDR NETMASK GATEWAY DNS CIP CMASK CGW CDNS; do eval "jstr \"\$$v\"; $v=\$J"; done
-  smbenc_get; jstr "$SMBENC"; SMBENC=$J
+  kglobal_get "smb3 encryption" auto; jstr "$KV"; SMBENC=$J
+  smbsign_get
   # SSH: root password set (a hash in shadow), number of authorized keys
   RPW=0; [ -r "$ETC/shadow" ] && while IFS=: read -r u h _; do [ "$u" = root ] && { case $h in \$*) RPW=1;; esac; break; }; done < "$ETC/shadow"
   NK=0; [ -r "$SSHDIR/authorized_keys" ] && while read -r l; do case $l in ssh-*|ecdsa-*) NK=$((NK + 1));; esac; done < "$SSHDIR/authorized_keys"
   metrics_mode
-  printf '{"host":"%s","lang":"%s","tz":"%s","net":"%s","ip":"%s","mask":"%s","gw":"%s","dns":"%s","tgset":%d,"tgchat":"%s","rootpw":%d,"keys":%d,"smbenc":"%s","metrics":%d}\n' \
+  printf '{"host":"%s","lang":"%s","tz":"%s","net":"%s","ip":"%s","mask":"%s","gw":"%s","dns":"%s","tgset":%d,"tgchat":"%s","rootpw":%d,"keys":%d,"smbenc":"%s","smbsign":"%s","metrics":%d}\n' \
     "$HN" "$SL" "$TZV" "$NET" "${IPADDR:-$CIP}" "${NETMASK:-$CMASK}" \
-    "${GATEWAY:-$CGW}" "${DNS:-$CDNS}" "$tg" "$TGC" "$RPW" "$NK" "$SMBENC" "$M"
+    "${GATEWAY:-$CGW}" "${DNS:-$CDNS}" "$tg" "$TGC" "$RPW" "$NK" "$SMBENC" "$SMBSIGN" "$M"
 }
 
 host_ok() {
@@ -1096,8 +1131,94 @@ rsync_pw() {
 # --- Storage: X-RAID, through nas-raid (xraid-compat package); md disabled for now ---
 [ -n "$R" ] && export NAS_RAID_ROOT="$R"
 storage_get() {
-  if command -v nas-raid >/dev/null 2>&1; then nas-raid status --json 2>/dev/null || echo '{"mode":"error"}'
-  else echo '{"mode":"absent"}'; fi
+  command -v nas-raid >/dev/null 2>&1 || { echo '{"mode":"absent"}'; return; }
+  J=$(nas-raid status --json 2>/dev/null) || { echo '{"mode":"error"}'; return; }
+  case $J in '{"mode":"md"'*'}') L2=null;; '{'*'}') L2=$(printf '%s\n' "$J" | layout_json);; *) echo '{"mode":"error"}'; return;; esac
+  [ -n "$L2" ] || L2=null	# never an empty value: it would break the whole answer
+  printf '%s,"layout":%s}\n' "${J%\}}" "$L2"
+}
+# layout: the volume as the page draws it, whatever the number of bays
+# (docs/API.md): {"level":"raid1","members":[{"bay":1,"dev":"sda","role":"base",
+# "state":"online"}],"rebuild":null|percent}; null without an X-RAID superblock
+# and for an md volume (its arrays are in status.md).
+# Read from the "xraid" object of nas-raid status (xraid-info, its last key):
+# bay = channel + 1; states online, failed (faulty or unknown), rebuilding
+# (spare, ready), missing (a channel below nr_disks without a disk). rebuild =
+# percentage of an md resync/recovery in /proc/mdstat, otherwise null.
+layout_json() {
+  rb=null
+  [ -r "$R/proc/mdstat" ] && while read -r l; do
+    case $l in *resync*%*|*recovery*%*|*reshape*%*) set -f
+      for w in $l; do case $w in [0-9]*%) rb=${w%%[.%]*}; break;; esac; done; set +f; break;; esac
+  done < "$R/proc/mdstat"
+  case $rb in ''|*[!0-9]*) rb=null;; esac
+  awk -v rb="$rb" '
+    function str(o, k) { return match(o, "\"" k "\":\"[^\"]*\"") ? substr(o, RSTART + length(k) + 4, RLENGTH - length(k) - 5) : "" }
+    function num(o, k) { return match(o, "\"" k "\":-?[0-9]+") ? substr(o, RSTART + length(k) + 3, RLENGTH - length(k) - 3) + 0 : -1 }
+    { s = s $0 }
+    END {
+      i = index(s, "\"xraid\":{"); if (!i) { print "null"; exit }
+      s = substr(s, i + 8); lv = num(s, "raid")
+      if (lv < 0) { print "null"; exit }
+      nr = num(s, "nr_disks"); i = index(s, "\"disks\":[")
+      d = i ? substr(s, i + 9) : ""; d = substr(d, 1, index(d, "]") - 1)
+      n = split(d, a, "[}],[{]"); max = nr - 1	# bracketed: busybox awk reads a bare { as a repeat
+      for (k = 1; k <= n; k++) {
+        st = str(a[k], "state"); ch = num(a[k], "channel")
+        if (st == "" || ch < 0 || (ch in M)) continue	# no X-RAID superblock: not a member
+        p = str(a[k], "path"); sub(/.*\//, "", p)
+        M[ch] = sprintf("{\"bay\":%d,\"dev\":\"%s\",\"role\":\"%s\",\"state\":\"%s\"}", ch + 1, p, str(a[k], "role"),
+          st == "online" ? "online" : (st == "spare" || st == "ready") ? "rebuilding" : "failed")
+        if (ch > max) max = ch
+      }
+      o = ""
+      for (ch = 0; ch <= max; ch++)
+        o = o (o == "" ? "" : ",") ((ch in M) ? M[ch] : sprintf("{\"bay\":%d,\"dev\":\"\",\"role\":\"\",\"state\":\"missing\"}", ch + 1))
+      printf "{\"level\":\"raid%d\",\"members\":[%s],\"rebuild\":%s}\n", lv, o, rb
+    }'
+}
+
+# --- Protections (docs/DIET.md "Protections"): what a restart, a power-off or a
+# switch of system version would cut short. busyops sets BUSY to codes:
+#   update  nas-update job running (state busy and its process alive, as nas-update status)
+#   verify  full mirror check (nas-raid verify), quick  quick check (quick-verify);
+#           a "running" state older than this boot is a leftover, ignored
+#   sync    md resync/recovery/check/repair in /proc/mdstat (nas-raid repair)
+# Shell builtins only: also called by status() for the page.
+busyops() {
+  BUSY=
+  x=; read -r x _ 2>/dev/null < "$RUN/nas-update/state"
+  [ "$x" = busy ] && alive "$RUN/nas-update/pid" && BUSY=update
+  bt=; [ -r "$R/proc/stat" ] && while read -r k v _; do [ "$k" = btime ] && { bt=$v; break; }; done < "$R/proc/stat"
+  for k in verify quick; do
+    x=; d=; read -r x d 2>/dev/null < "$R/var/lib/nas-raid/$k.state"
+    [ "$x" = running ] || continue
+    case "$bt:$d" in *[!0-9:]*|:*|*:) ;; *) [ "$d" -lt "$bt" ] && continue;; esac
+    BUSY="$BUSY${BUSY:+ }$k"
+  done
+  [ -r "$R/proc/mdstat" ] && while read -r l; do
+    case $l in *resync*%*|*recovery*%*|*reshape*%*|*check*%*|*repair*%*) BUSY="$BUSY${BUSY:+ }sync"; break;; esac
+  done < "$R/proc/mdstat"
+  :
+}
+# guard: reboot, poweroff, update_switch refused (409) while busyops finds
+# something, unless force=1&confirm=FORCE (docs/API.md)
+guard() {
+  busyops; [ -z "$BUSY" ] && return 0
+  force=; confirm=
+  for kv in $(echo "$BODY" | tr '&' ' '); do case "${kv%%=*}" in force) force=${kv#*=};; confirm) confirm=$(urldec "${kv#*=}");; esac; done
+  if [ "$force" = 1 ] && [ "$confirm" = FORCE ]; then note "$A forced while running: $BUSY"; return 0; fi
+  W=
+  for b in $BUSY; do
+    case $b in
+      update) w=$(tx "a system update is being installed" "une mise à jour du système s’installe" "ein Systemupdate wird installiert");;
+      verify) w=$(tx "a full mirror check is running" "une vérification complète du miroir est en cours" "eine vollständige Spiegelprüfung läuft");;
+      quick) w=$(tx "a quick mirror check is running" "une vérification rapide du miroir est en cours" "eine Schnellprüfung des Spiegels läuft");;
+      *) w=$(tx "a RAID resync or repair is running" "une resynchronisation ou réparation RAID est en cours" "eine RAID-Synchronisation oder -Reparatur läuft");;
+    esac
+    W="$W${W:+, }$w"
+  done
+  fail "409 Conflict" "$(tx "Refused: $W. Wait until it ends (or force it: force=1&confirm=FORCE)" "Refusé : $W. Attendre la fin (ou forcer : force=1&confirm=FORCE)" "Abgelehnt: $W. Das Ende abwarten (oder erzwingen: force=1&confirm=FORCE)")"
 }
 
 # xraid_rw: "allow writing on the X-RAID" switch. on=1 needs the typed word
@@ -1151,6 +1272,24 @@ xraid_rw() {
   elif [ "$m" = xraid-rw ]; then ok "$(tx "Writing on the X-RAID enabled" "Écriture sur le X-RAID activée" "Schreiben auf das X-RAID eingeschaltet")"
   else ok "$(tx "XRAID_RW=yes saved, but the safeguards keep it read-only" "XRAID_RW=yes enregistré, mais les garde-fous gardent la lecture seule" "XRAID_RW=yes gespeichert, aber die Schutzregeln lassen nur Lesen zu") ($m${r:+ : $r})"
   fi
+}
+
+# auto_rw: after a check or an acceptance lifted the last safeguard, /c is remounted
+# read-write at once (when XRAID_RW=yes) instead of "at the next mount". Only when
+# /c is read-only now and "nas-raid decide" says a mount would give rw; services
+# that use /c stopped around the remount, as for xraid_rw.
+auto_rw() {
+  grep -qx 'XRAID_RW=yes' "$NRCONF" 2>/dev/null || return 1
+  m=; read -r m _ 2>/dev/null < "$RUN/nas-raid.mode"; [ "$m" = xraid-ro ] || return 1
+  case "$(nas-raid decide 2>/dev/null)" in rw|"rw "*) ;; *) return 1;; esac
+  note "Storage: safeguards lifted, remounting /c read-write"
+  for s in $XRSVC; do "$INITD/$s" stop </dev/null >/dev/null 2>&1; done
+  nas-raid remount >/dev/null 2>&1
+  m=; read -r m _ 2>/dev/null < "$RUN/nas-raid.mode"
+  case "$m" in xraid-*|md) ;; *) nas-raid mount >/dev/null 2>&1;; esac	# refused (busy): mounted again
+  for s in S70ksmbd S60nfs S60minidlnad S61rsyncd S51webdav; do "$INITD/$s" start </dev/null >/dev/null 2>&1; done
+  invalidate
+  m=; read -r m _ 2>/dev/null < "$RUN/nas-raid.mode"; [ "$m" = xraid-rw ]
 }
 
 # --- Prometheus metrics (docs/DIET.md "Prometheus") ---------------------------------
@@ -1358,6 +1497,7 @@ assemble() {	# all.json from the cache files (same content as calc all)
     && mv -f "$C/.all.tmp" "$C/all.json" || rm -f "$C/.all.tmp"
 }
 collect() {
+  umask 022	# cache files served as static files by lighttpd, whoever started the collector
   mkdir -p "$C" || exit 1
   if read -r P 2>/dev/null < "$C/pid" && [ "$P" != $$ ] && kill -0 "$P" 2>/dev/null; then exit 0; fi	# already running
   [ -p "$C/wake" ] || { rm -f "$C/wake"; mkfifo -m 600 "$C/wake"; } || exit 1
@@ -1398,13 +1538,14 @@ if [ -n "${DIET_COLLECT:-}" ]; then
   fi
   collect
 fi
-
 # POST: settings changed -> cache emptied, collector woken up (everything recomputed)
 invalidate() {
   [ -d "$C" ] || return 0
   : > "$C/invalid"; rm -f "$C"/*.json
   [ -p "$C/wake" ] && echo all 1<> "$C/wake"
 }
+# DIET_REMOUNT=1: run after a background check (raid_verify, raid_quick)
+if [ -n "${DIET_REMOUNT:-}" ]; then auto_rw; exit 0; fi
 
 # POST body (form, < 4 KB) in $BODY
 read_body() {
@@ -1441,8 +1582,8 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
       "$INITD/S60nfs" restart >/dev/null 2>&1; ok "$(tx "NFS restarted" "NFS redémarré" "NFS neu gestartet")" ;;
     ntp)
       bg "ntpd -q -n -p pool.ntp.org"; ok "$(tx "Time update requested" "Mise à l’heure demandée" "Zeitabgleich angestoßen")" ;;
-    reboot)    ok "$(tx "Restarting" "Redémarrage" "Neustart")"; bg "sleep 2; reboot" ;;
-    poweroff)  ok "$(tx "Powering off" "Extinction" "Ausschalten")"; bg ": > $RUN/poweroff; sleep 2; poweroff" ;;
+    reboot)    guard; ok "$(tx "Restarting" "Redémarrage" "Neustart")"; bg "sleep 2; reboot" ;;
+    poweroff)  guard; ok "$(tx "Powering off" "Extinction" "Ausschalten")"; bg ": > $RUN/poweroff; sleep 2; poweroff" ;;
     config)    config_set ;;
     share_add|share_del|share_set) shares_change "$A" ;;
     user_set|user_del) users_change "$A" ;;
@@ -1451,6 +1592,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
     notify_test) notify_test ;;
     ssh_set) ssh_set ;;
     smb_enc) smb_enc ;;
+    smb_sign) smb_sign ;;
     metrics_set) metrics_set ;;
     token_add) token_add ;;
     token_del) token_del ;;
@@ -1471,11 +1613,11 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
       ok "$(tx "Saved" "Enregistré" "Gespeichert")" ;;
     raid_verify)
       command -v nas-raid >/dev/null 2>&1 || fail "404 Not Found" "nas-raid ?"
-      bg "nas-raid verify"; note "Storage: mirror check started"
+      bg "nas-raid verify; DIET_REMOUNT=1 sh '$0'"; note "Storage: mirror check started"
       ok "$(tx "Check started (several hours, read-only)" "Vérification lancée (plusieurs heures, disques en lecture seule)" "Prüfung gestartet (mehrere Stunden, nur Lesen)")" ;;
     raid_quick)	# quick check (nas-raid quick-verify, docs/XRAID.md "Quick check")
       command -v nas-raid >/dev/null 2>&1 || fail "404 Not Found" "nas-raid ?"
-      bg "nas-raid quick-verify"; note "Storage: quick mirror check started"
+      bg "nas-raid quick-verify; DIET_REMOUNT=1 sh '$0'"; note "Storage: quick mirror check started"
       ok "$(tx "Quick check started (1 to 3 minutes, read-only)" "Vérification rapide lancée (1 à 3 minutes, lecture seule)" "Schnellprüfung gestartet (1 bis 3 Minuten, nur Lesen)")" ;;
     raid_quick_accept)	# unclean superblock, no difference: typed word ACCEPT AND ticked box (yes=1)
       confirm=""; yes=""
@@ -1485,7 +1627,11 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
       command -v nas-raid >/dev/null 2>&1 || fail "404 Not Found" "nas-raid ?"
       if OUTR=$(nas-raid quick-accept --confirm ACCEPT --yes 2>&1); then
         note "Storage: quick check accepted (residual risk)"
-        ok "$(tx "Quick check accepted: writing allowed at the next mount" "Vérification rapide acceptée : écriture permise au prochain montage" "Schnellprüfung akzeptiert: Schreiben beim nächsten Einhängen erlaubt")"
+        if auto_rw; then ok "$(tx "Quick check accepted: /c remounted read-write" "Vérification rapide acceptée : /c remonté en écriture" "Schnellprüfung akzeptiert: /c schreibbar neu eingehängt")"
+        elif grep -qx 'XRAID_RW=yes' "$NRCONF" 2>/dev/null; then
+          m=; r=; read -r m r 2>/dev/null < "$RUN/nas-raid.mode"
+          ok "$(tx "Quick check accepted, but /c stays read-only" "Vérification rapide acceptée, mais /c reste en lecture seule" "Schnellprüfung akzeptiert, aber /c bleibt schreibgeschützt") ($m${r:+ : $r})"
+        else ok "$(tx "Quick check accepted (writing is off: /c stays read-only)" "Vérification rapide acceptée (écriture désactivée : /c reste en lecture seule)" "Schnellprüfung akzeptiert (Schreiben aus: /c bleibt schreibgeschützt)")"; fi
       else
         fail "409 Conflict" "$(tx "Refused" "Refusé" "Abgelehnt") : $(printf '%s' "$OUTR" | grep 'ERROR' | tail -n 1 | cut -c1-200)"
       fi ;;
@@ -1493,6 +1639,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
       fail "409 Conflict" "$(tx "md support is disabled for now: X-RAID only" "md désactivé pour l’instant : X-RAID seulement" "md vorerst deaktiviert: nur X-RAID")" ;;
     xraid_rw) xraid_rw ;;
     update_url|update_switch|update_cancel)	# system update (nas-update, docs/DIET.md)
+      [ "$A" = update_switch ] && guard
       url=""; sha=""
       for kv in $(echo "$BODY" | tr '&' ' '); do case "${kv%%=*}" in url) url=$(urldec "${kv#*=}");; sha) sha=$(urldec "${kv#*=}");; esac; done
       case "$A" in update_url) set -- fetch "$url" "$sha";; update_switch) set -- switch;; *) set -- cancel;; esac

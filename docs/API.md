@@ -26,7 +26,7 @@ self-signed (created at first boot): use `curl --cacert` with a copy of it
 
 ## Access tokens
 
-Created and revoked in **Settings → API access tokens** (interface only: a
+Created and revoked in **Services → API access tokens** (interface only: a
 token can neither list, create nor revoke tokens).
 
 - **Name**: letters, digits, space, `.`, `-`, `_`; 40 characters at most.
@@ -68,7 +68,7 @@ cache (`status`, `all`, `storage`, …) stay cheap otherwise.
 | 401 | missing, wrong or revoked token (`WWW-Authenticate: Bearer realm="DIET"`), or no Basic password on `/cgi-bin/api` |
 | 403 | POST without `X-Diet: 1`; POST with a read-only token; token management through a token; `/metrics` turned off; client outside the private networks |
 | 404 | unknown share, user, token, folder… |
-| 409 | conflict with the current state (share exists, service stopped, X-RAID only, update in progress…) |
+| 409 | conflict with the current state (share exists, service stopped, X-RAID only, update in progress…); `reboot`, `poweroff`, `update_switch` while an update, a mirror check or a RAID repair runs (see below) |
 | 413 | body too large |
 | 500, 502 | the NAS could not apply it (write error, Telegram unreachable…) |
 
@@ -76,9 +76,9 @@ cache (`status`, `all`, `storage`, …) stay cheap otherwise.
 
 | Action | Answer |
 |---|---|
-| `status` | host, version, model, IP, uptime, load, board temperature, fan, services, disks (temperature, SMART summary), memory, `/c` usage, raw counters (CPU, network, disk), md arrays |
+| `status` | host, version, model, IP, uptime, load, board temperature, fan, services, disks (temperature, SMART summary), memory, `/c` usage, raw counters (CPU, network, disk), md arrays, `busy` (operations a restart would cut short) |
 | `all` | `{"status":…, "storage":…, "hist":"…"}` (what the page loads first) |
-| `storage` | X-RAID / md state from `nas-raid status --json`: mode, reasons, verify and quick check, superblock |
+| `storage` | X-RAID / md state from `nas-raid status --json`: mode, reasons, verify and quick check, superblock; plus `layout` (below) |
 | `config` | spin-down and fan curve |
 | `sys` | name, language, time zone, network, Telegram set, SSH, SMB3 encryption, `metrics` (0 off, 1 token, 2 open) |
 | `shares`, `users`, `nfs`, `services` | lists for the Shares page |
@@ -90,6 +90,27 @@ cache (`status`, `all`, `storage`, …) stay cheap otherwise.
 | `metrics` | Prometheus text format (docs/DIET.md "Prometheus"); through a token only when `/metrics` is on |
 | `tokens` | list of tokens (id, name, rights, date); interface only |
 
+`storage.layout` describes the volume the same way whatever the number of
+bays, for the page and for scripts; it is computed from the `xraid` object
+(xraid-info) and `/proc/mdstat`, the other keys are unchanged:
+
+```json
+"layout": {"level": "raid1",
+           "members": [{"bay": 1, "dev": "sda", "role": "mirror", "state": "online"},
+                       {"bay": 2, "dev": "sdb", "role": "base", "state": "online"}],
+           "rebuild": null}
+```
+
+- `level`: `raid` + the level of the X-RAID sections (`raid1` on the Duo).
+- `members`: one per bay of the volume (bay = X-RAID channel + 1), in bay
+  order; `role` is `base`, `mirror` or empty; `state` is `online`, `failed`
+  (faulty or unknown), `rebuilding` (spare, ready) or `missing` (a channel of
+  the superblock without a disk: `dev` and `role` empty).
+- `rebuild`: whole percentage of an md resync/recovery/reshape running in
+  `/proc/mdstat`, otherwise `null`.
+- `layout` is `null` without an X-RAID superblock and for an md volume (its
+  arrays are in `status.md`).
+
 `status`, `all`, `storage`, `services`, `shares`, `nfs`, `sys`, `users` and
 `config` come from the collector cache when it is fresh (docs/DIET.md
 "Speed"); the first read after an action is computed directly.
@@ -98,7 +119,8 @@ cache (`status`, `all`, `storage`, …) stay cheap otherwise.
 
 | Action | Body |
 |---|---|
-| `spindown`, `ksmbd`, `nfsd`, `ntp`, `reboot`, `poweroff`, `notify_test`, `dlna_scan` | none |
+| `spindown`, `ksmbd`, `nfsd`, `ntp`, `notify_test`, `dlna_scan` | none |
+| `reboot`, `poweroff` | none; `force=1&confirm=FORCE` to override a 409 (below) |
 | `config` | any of `SPINDOWN_MIN FAN_PWM_MIN FAN_PWM_MAX TEMP_LOW TEMP_HIGH DISK_HIGH DISK_CRIT PERIOD` |
 | `share_add`, `share_del` | `name` |
 | `share_set` | `name`, `ro=0\|1`, `guest=0\|1` |
@@ -109,6 +131,7 @@ cache (`status`, `all`, `storage`, …) stay cheap otherwise.
 | `sys_set` | `host`, `lang`, `tz`, `net=dhcp\|static`, `ip`, `mask`, `gw`, `dns`, `tgtoken`, `tgchat` (all fields: it rewrites the settings) |
 | `ssh_set` | `rootpw` and/or `key` (one public key) |
 | `smb_enc` | `on=0\|1` |
+| `smb_sign` | `v=auto\|mandatory` (`server signing` of ksmbd.conf, ksmbd restarted; `auto`: signed only for clients that require it, `mandatory`: every client signs; read back as `smbsign` in `sys`) |
 | `metrics_set` | `on=0\|1`, `open=0\|1` (restarts lighttpd) |
 | `svc_set` | `s=minidlna\|avahi\|rsync\|webdav\|nfs`, `on=0\|1` |
 | `dlna_set` | `name`, `dirs` (one folder per line) |
@@ -119,10 +142,20 @@ cache (`status`, `all`, `storage`, …) stay cheap otherwise.
 | `xraid_rw` | `on=0`, or `on=1&confirm=WRITE&yes=1` |
 | `update_upload` | the update package as the raw body |
 | `update_url` | `url`, `sha` (SHA-256 of the package) |
-| `update_switch`, `update_cancel` | none |
+| `update_switch` | none; `force=1&confirm=FORCE` to override a 409 (below) |
+| `update_cancel` | none |
 | `token_add`, `token_del` | `name` and `perm=ro\|full` / `id`; interface only |
 
 Text values are URL-encoded (`curl --data-urlencode`).
+
+**Protections.** `reboot`, `poweroff` and `update_switch` are refused with
+**409** and a message naming the reason while a system update job runs, a
+full or quick mirror check runs, or an md resync/repair is in progress
+(docs/DIET.md "Protections"). The same reasons are listed in the `busy` array
+of `status` (`update`, `verify`, `quick`, `sync`; empty when nothing runs).
+To go ahead anyway, add both `force=1` and `confirm=FORCE` (the word in
+capitals, in English); the forced action is logged. Example:
+`curl -X POST -H 'X-Diet: 1' -H "Authorization: Bearer $T" -d 'force=1&confirm=FORCE' https://nas/api/v1/reboot`
 
 ## Examples
 

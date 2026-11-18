@@ -26,7 +26,8 @@ collector_stop() {
 
 start() {
 	log "$(tx "==== DIET $(cat /etc/diet-version) starting ====" "==== DIET $(cat /etc/diet-version) démarre ====" "==== DIET $(cat /etc/diet-version) startet ====")"
-	# button: padre_hwmon calls /sbin/hotplug (CONFIG_UEVENT_HELPER_PATH)
+	# button: padre_hwmon calls the uevent helper; the kernel boots with none
+	# (empty CONFIG_UEVENT_HELPER_PATH: no shell per boot uevent), set it here
 	echo /sbin/hotplug > /proc/sys/kernel/hotplug 2>/dev/null
 	[ -e /proc/sys/dev/hwmon/POWER_SWITCH ] && echo 1 > /proc/sys/dev/hwmon/POWER_SWITCH
 	if [ "$SPINDOWN_MIN" -gt 0 ]; then

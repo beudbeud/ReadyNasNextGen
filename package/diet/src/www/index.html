@@ -5,21 +5,28 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NAS</title>
 <style>
+/* Colours: text colours reach WCAG AA (4.5:1) on --bg, --panel and --bar in both
+   themes, and --ok/--bad on their own 22 % tint (RAID slots); --on-accent is the
+   text of the main buttons. */
 :root{
-  --bg:#eef0ec; --panel:#ffffff; --ink:#1d2321; --mute:#68716d; --line:#d9ddd8;
+  --bg:#eef0ec; --panel:#ffffff; --ink:#1d2321; --mute:#5d6662; --line:#d9ddd8;
   --chassis:#2b2f2e; --chassis2:#3a3f3d;
-  --ok:#2f9e5b; --warn:#d08a18; --bad:#d23c3c; --accent:#2f6fd0; --bar:#e3e7e2;
+  --ok:#18693a; --warn:#975800; --bad:#a8221b; --accent:#2257b0; --on-accent:#ffffff; --bar:#e3e7e2;
 }
 @media (prefers-color-scheme:dark){:root{
-  --bg:#131615; --panel:#1c201f; --ink:#e4e8e5; --mute:#8e9893; --line:#2c3230;
-  --chassis:#0b0d0c; --chassis2:#1e2221; --bar:#2a302e; --accent:#6aa1ff;
+  --bg:#131615; --panel:#1c201f; --ink:#e4e8e5; --mute:#97a19c; --line:#2c3230;
+  --chassis:#0b0d0c; --chassis2:#1e2221; --bar:#2a302e;
+  --ok:#4cc47a; --warn:#e3a344; --bad:#ff8a82; --accent:#6aa1ff; --on-accent:#0b1a33;
 }}
 *{box-sizing:border-box}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+input,select,textarea{max-width:100%}
+.vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 .wrap{max-width:1080px;margin:0 auto;padding:16px}
 /* Front panel */
 .front{background:linear-gradient(180deg,var(--chassis2),var(--chassis));border-radius:14px;padding:14px;display:grid;grid-template-columns:1fr;gap:14px;align-items:stretch;box-shadow:0 2px 10px #0003}
-.bays{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+.bays{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
 .bay{background:#00000040;border:1px solid #ffffff14;border-radius:8px;padding:8px 10px;color:#cfd6d2;font-size:12.5px;display:flex;flex-direction:column;gap:2px;min-width:0}
 .bay b{color:#fff;font-size:13px}
 .bay .m{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:.75}
@@ -32,10 +39,17 @@ body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-ap
 .top{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:4px 0 12px}
 .top h1{font-size:20px;margin:0;letter-spacing:.3px}
 .top .sub{color:var(--mute);font-size:13px}
-nav{display:flex;gap:4px;margin:14px 0}
-nav button{background:none;border:0;padding:8px 14px;border-radius:8px;color:var(--mute);font:inherit;cursor:pointer}
+nav{display:flex;gap:4px;margin:14px 0;overflow-x:auto;padding:3px}
+a{color:var(--accent)}
+nav button{background:none;border:0;padding:8px 14px;border-radius:8px;color:var(--mute);font:inherit;cursor:pointer;white-space:nowrap;flex-shrink:0}
+.pm{position:relative}
+#pmb{padding:2px 10px;font-size:18px;line-height:1.2}
+.pmp{position:absolute;right:0;top:calc(100% + 6px);z-index:5;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px;width:max-content;max-width:min(300px,calc(100vw - 32px));box-shadow:0 6px 20px #0004;color:var(--ink);font-size:15px}
+.pmp [role=menu]{display:grid;gap:6px}
+.pmp [role=menuitem]{text-align:left}
 nav button.act{background:var(--panel);color:var(--ink);box-shadow:0 1px 3px #0002}
-.alarm{background:var(--bad);color:#fff;border-radius:10px;padding:10px 14px;margin-top:12px;display:none;font-weight:600;align-items:center;justify-content:space-between;gap:12px}
+.alarm{background:#a8221b;color:#fff;border-radius:10px;padding:10px 14px;margin-top:12px;display:none;font-weight:600;align-items:center;justify-content:space-between;gap:12px}
+.alarm a{color:#fff;font-weight:400;white-space:nowrap}
 .alarm button{font:inherit;font-weight:400;background:#0003;color:#fff;border:1px solid #fff6;border-radius:8px;padding:4px 10px;cursor:pointer;white-space:nowrap}
 /* Cards */
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
@@ -61,12 +75,18 @@ nav button.act{background:var(--panel);color:var(--ink);box-shadow:0 1px 3px #00
 button.b{font:inherit;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:9px;padding:8px 13px;cursor:pointer}
 button.b:hover{border-color:var(--accent)}
 button.b.danger{color:var(--bad)} button.b.danger:hover{border-color:var(--bad)}
-button.b.pri{background:var(--accent);border-color:var(--accent);color:#fff}
-button.b:disabled{opacity:.5;cursor:wait}
+button.b.pri{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+button.b:disabled{opacity:.5;cursor:not-allowed}
+button.b[aria-busy=true]{cursor:progress}
+.why{color:var(--warn);margin:8px 0 0}
 /* Form */
 form.cfg{display:grid;grid-template-columns:1fr auto;gap:8px 14px;align-items:center}
 form.cfg label{color:var(--ink)} form.cfg label small{display:block;color:var(--mute)}
-form.cfg.sys input,form.cfg.sys select{width:230px;text-align:left}
+form.cfg.sys input,form.cfg.sys select,form.cfg.sys textarea{width:230px;text-align:left}
+.btns .inp{flex:1 1 170px;min-width:0}
+code{overflow-wrap:anywhere}
+details.zone{margin-top:10px;border:1px solid var(--line);border-radius:9px;padding:6px 10px}
+details.zone summary{cursor:pointer;color:var(--warn);font-weight:600}
 .inp{font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink)}
 form.cfg input{width:96px;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);text-align:right}
 .sec{grid-column:1/-1;font-weight:650;margin-top:6px;padding-top:12px;border-top:1px solid var(--line)}
@@ -75,210 +95,283 @@ pre{background:var(--chassis);color:#d6e2da;border-radius:10px;padding:12px;over
 select{font:inherit;padding:7px 9px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink)}
 .toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:10px;opacity:0;transition:opacity .25s;pointer-events:none;max-width:90vw}
 .toast.show{opacity:1}
+.toast.show.err{pointer-events:auto;cursor:pointer;background:#a8221b;color:#fff}
 .overlay{position:fixed;inset:0;background:#000b;color:#fff;display:none;align-items:center;justify-content:center;text-align:center;font-size:18px;z-index:9}
 .card.wide{grid-column:1/-1}
 .sp{flex:1}
 .page{display:none}.page.act{display:block}
+.stack{display:grid;gap:12px;max-width:760px}
+details.tech{margin-top:10px;border-top:1px solid var(--line);padding-top:6px}
+details.tech summary{cursor:pointer;color:var(--mute);font-weight:600}
+.dk{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}
+.dk>span{min-width:0}
 dialog{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:12px;max-width:min(680px,94vw);padding:16px}
 dialog::backdrop{background:#000a}
 dialog h3{margin:0 0 8px;font-size:16px}
-@media (max-width:520px){.bays{grid-template-columns:1fr}}
+@media (max-width:520px){
+  nav{display:grid;grid-template-columns:repeat(4,1fr);overflow:visible}
+  nav button{padding:8px 4px;font-size:14px;white-space:normal}
+  .row,.alarm{flex-wrap:wrap}
+  .row>:last-child{margin-left:auto;text-align:right}
+  form.cfg.sys{grid-template-columns:1fr;gap:4px 14px}
+  form.cfg.sys input,form.cfg.sys select,form.cfg.sys textarea{width:100%;margin-bottom:6px}
+}
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="top">
     <div><h1 id="title">NAS</h1><div class="sub" id="sub">connecting…</div></div>
-    <div class="sub" style="display:flex;gap:10px;align-items:center"><span id="upd"></span><select id="lang" title="Language" style="padding:3px 6px"><option value="fr">FR</option><option value="de">DE</option><option value="en">EN</option></select></div>
+    <div class="sub" style="display:flex;gap:10px;align-items:center"><span id="upd"></span><select id="lang" title="Language of this interface (this browser only)" aria-label="Language of this interface (this browser only)" style="padding:3px 6px"><option value="fr">FR</option><option value="de">DE</option><option value="en">EN</option></select>
+      <span class="pm"><button class="b" id="pmb" aria-haspopup="menu" aria-expanded="false" aria-controls="pmm" title="Restart and power off" aria-label="Restart and power off">⋮</button>
+        <div class="pmp" id="pmp" hidden>
+          <div role="menu" id="pmm" aria-labelledby="pmb" aria-describedby="busyw" tabindex="-1">
+            <button class="b danger" role="menuitem" tabindex="-1" data-a="reboot" data-q="Restart now?" aria-describedby="busyw">Restart</button>
+            <button class="b danger" role="menuitem" tabindex="-1" data-a="poweroff" data-q="Really power off? It can only be switched on again with the button on the device." aria-describedby="busyw">Power off</button>
+          </div>
+          <p class="small why" id="busyw" hidden></p>
+          <p class="small" style="margin-bottom:0">Power button on the device: hold 3 s = power off.</p>
+        </div></span></div>
   </div>
 
-  <div class="front">
-    <div class="bays" id="bays"></div>
-  </div>
-  <div class="alarm" id="alarm"><span id="alarmt"></span><button id="alarmx" title="Hide this warning until it changes">Hide</button></div>
+  <div class="alarm" id="alarm" role="alert"><span id="alarmt"></span><span class="btns"><a id="alarml" href="#storage">Open Storage</a><button id="alarmx" title="Hide this warning until it changes">Hide</button></span></div>
 
-  <nav>
-    <button data-p="home" class="act">Overview</button>
-    <button data-p="shares">Shares</button>
-    <button data-p="cfg">Settings</button>
-    <button data-p="log">Logs</button>
+  <nav role="tablist" aria-label="Sections">
+    <button role="tab" id="t-dashboard" aria-controls="p-dashboard" data-p="dashboard">Dashboard</button>
+    <button role="tab" id="t-storage" aria-controls="p-storage" data-p="storage">Storage</button>
+    <button role="tab" id="t-shares" aria-controls="p-shares" data-p="shares">Shares</button>
+    <button role="tab" id="t-users" aria-controls="p-users" data-p="users">Users</button>
+    <button role="tab" id="t-services" aria-controls="p-services" data-p="services">Services</button>
+    <button role="tab" id="t-system" aria-controls="p-system" data-p="system">System</button>
+    <button role="tab" id="t-logs" aria-controls="p-logs" data-p="logs">Logs</button>
   </nav>
 
-  <section class="page act" id="p-home">
-    <div class="grid">
+  <!-- Dashboard: reading and safe actions only -->
+  <section class="page" id="p-dashboard" role="tabpanel" aria-labelledby="t-dashboard">
+    <div class="front"><div class="bays" id="bays"></div></div>
+    <div class="grid" style="margin-top:12px">
+      <div class="card"><h2>Storage health</h2>
+        <div class="big" id="hst">…</div><div class="small" id="hsd"></div>
+        <div class="row" style="margin-top:12px"><b id="cfree">…</b><span class="small" id="cfreet">free</span></div>
+        <div class="bar" id="cbarw"><i id="cbar"></i></div>
+        <div class="row small" style="margin-top:8px"><span>Read <b id="rd">…</b></span><span>Write <b id="wr">…</b></span></div>
+        <p class="small" style="margin-bottom:0"><a href="#storage">Details</a></p>
+      </div>
       <div class="card"><h2>System</h2>
-        <div class="row"><div><div class="big" id="cpu">–</div><div class="small">CPU</div></div>
-          <div><div class="big" id="tmp">–</div><div class="small">Temperature</div></div>
-          <div><div class="big" id="fan">–</div><div class="small">Fan</div></div></div>
+        <div class="row"><div><div class="big" id="cpu">…</div><div class="small">CPU</div></div>
+          <div><div class="big" id="tmp">…</div><div class="small">Temperature</div></div>
+          <div><div class="big" id="fan">…</div><div class="small">Fan</div></div></div>
         <div class="row small" style="margin-top:12px"><span>Memory</span><span id="memt" title=""></span></div>
         <div class="bar"><i id="memb"></i></div>
         <dl class="kv small" style="margin-top:10px"><dt>Load</dt><dd id="load"></dd><dt>Uptime</dt><dd id="up"></dd><dt>Swap used</dt><dd id="swap"></dd><dt>Time</dt><dd id="now"></dd></dl>
         <div class="small" id="hist" style="margin-top:10px"></div>
       </div>
-      <div class="card"><h2>Storage /c</h2>
-        <div class="big" id="cfree">–</div><div class="small" id="cfreet">free</div>
-        <div class="bar" id="cbarw"><i id="cbar"></i></div>
+      <div class="card"><h2>Network</h2>
+        <dl class="kv"><dt>Address</dt><dd id="ip"></dd><dt>Received</dt><dd id="rx">…</dd><dt>Sent</dt><dd id="tx">…</dd></dl>
+        <div class="chips" id="svc" style="margin-top:12px"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Storage: volume, checks, sensitive zone, disks -->
+  <section class="page" id="p-storage" role="tabpanel" aria-labelledby="t-storage">
+    <div class="grid">
+      <div class="card"><h2>Volume /c</h2>
+        <div class="row"><span>State</span><b id="vst">…</b></div>
+        <div class="row small"><span id="vdisks"></span><span id="vfree"></span></div>
+        <div class="bar" id="vbarw"><i id="vbar"></i></div>
         <div id="md"></div>
         <div id="xr" class="small" style="margin-top:8px"></div>
         <div class="btns" id="xrb" style="margin-top:8px"></div>
-        <div class="row small" style="margin-top:8px"><span>Read <b id="rd">–</b></span><span>Write <b id="wr">–</b></span></div>
+        <details class="zone small" id="xrz" hidden><summary>Sensitive zone</summary>
+          <p class="why">These settings change how the data volume is written. A mistake or a crash can leave the disks different and lose recent files: only with a backup of /c, after reading docs/XRAID.md.</p>
+          <div id="xrzc"></div></details>
+        <details class="tech small" id="xrt"><summary>Technical details</summary>
+          <div id="xrtc"></div>
+          <div class="btns" style="margin-top:8px;align-items:center"><span id="mdl">RAID:</span><span class="btns" id="mdb"></span></div>
+          <pre id="mdo" hidden></pre></details>
       </div>
-      <div class="card"><h2>Network &amp; services</h2>
-        <dl class="kv"><dt>Address</dt><dd id="ip"></dd><dt>Received</dt><dd id="rx">–</dd><dt>Sent</dt><dd id="tx">–</dd></dl>
-        <div class="chips" id="svc" style="margin-top:12px"></div>
+      <div class="card"><h2>Disks</h2>
+        <div id="dkl"></div>
+        <p class="small">A SMART report wakes the disk.</p>
+        <pre id="smo" hidden></pre>
+        <form class="cfg hw" id="cfgd" style="margin-top:12px">
+          <label>Spin down after (minutes)<small>0 = never</small></label><input name="SPINDOWN_MIN" type="number" min="0" max="330">
+          <div style="grid-column:1/-1;margin-top:8px" class="btns"><button class="b pri" type="submit">Save</button><button class="b" type="button" data-a="spindown">Spin down disks</button></div>
+        </form>
       </div>
-      <div class="card wide"><h2>Actions</h2>
+    </div>
+  </section>
+
+  <!-- Shares: SMB and NFS -->
+  <section class="page" id="p-shares" role="tabpanel" aria-labelledby="t-shares">
+    <div class="stack">
+      <div class="card">
+        <h2>Network shares (SMB)</h2>
+        <div class="row small" style="margin-bottom:6px"><span>SMB service</span><span id="smbst"></span></div>
+        <div id="shl"></div>
+        <form id="shadd" class="btns" style="margin-top:14px;align-items:center">
+          <input class="inp" name="name" placeholder="new share name" aria-label="new share name" maxlength="32" pattern="[A-Za-z0-9_][A-Za-z0-9_-]*" required>
+          <button class="b pri" type="submit">Create</button>
+        </form>
+        <p class="small">A share is the folder /c/name; a new share is writable and needs no password. “Remove” takes the share off the network without deleting the folder or its contents.</p>
+        <label><input type="checkbox" id="smbenc"> SMB3 encryption</label>
+        <p class="small" style="margin-bottom:0">Off by default: this NAS encrypts without hardware help, which slows transfers a lot. Only useful on a network you do not trust; when on, a client that asks for encryption gets it. SMB restarts when this is changed.</p>
+        <label for="smbsign" style="display:block;margin-top:12px">SMB signing</label>
+        <select id="smbsign" style="width:100%"><option value="auto">Automatic (recommended)</option><option value="mandatory">Required (3× slower)</option></select>
+        <p class="small" style="margin-bottom:0">Signing guards against tampering on the network, but this NAS computes it without hardware help: signed transfers are about 3 times slower. The client decides: Windows 11 24H2 and macOS ask for signing and get it, so they keep working; Linux (file manager, mount.cifs) does not by default and stays fast. Signing cannot be refused to a client that asks for it; “Required” makes every client sign. SMB restarts when this is changed.</p>
+      </div>
+      <div class="card">
+        <h2>NFS exports</h2>
+        <div id="nfsvc"></div>
+        <p class="small" id="nfoff" style="color:var(--warn)"></p>
+        <div id="nfl"></div>
+        <form id="nfadd" class="btns" style="margin-top:14px;align-items:center">
+          <input class="inp" name="path" value="/c/" aria-label="Folder to export (/c/…)" maxlength="64" pattern="/c(/[A-Za-z0-9_-]+)*" required>
+          <input class="inp" name="client" placeholder="client: * or a.b.c.d/nn" aria-label="client: * or a.b.c.d/nn" maxlength="18" required>
+          <label class="small"><input type="checkbox" name="ro"> read-only</label>
+          <button class="b pri" type="submit">Export</button>
+        </form>
+        <p class="small" style="margin-bottom:0">The folder must exist (an SMB share creates it). Changes apply at once (exportfs -ra).</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Users: accounts, WebDAV/rsync access -->
+  <section class="page" id="p-users" role="tabpanel" aria-labelledby="t-users">
+    <div class="stack">
+      <div class="card">
+        <h2>Share users</h2>
+        <div id="usl"></div>
+        <form id="usadd" class="btns" style="margin-top:14px;align-items:center">
+          <input class="inp" name="name" placeholder="user name" aria-label="user name" maxlength="31" pattern="[A-Za-z0-9_][A-Za-z0-9_-]*" required autocomplete="off">
+          <input class="inp" name="pw" type="password" placeholder="password (6 characters min.)" aria-label="password (6 characters min.)" minlength="6" required autocomplete="new-password">
+          <button class="b pri" type="submit">Create or change password</button>
+        </form>
+        <p class="small" style="margin-bottom:0">These accounts open the shares that are not “no password”. Entering an existing name changes its password. Deleting an account leaves its files untouched.</p>
+        <p class="small" style="margin-bottom:0">The same password opens WebDAV and rsync (personal folder /c/home/name and shares). An account created earlier must set its password again.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Services: MiniDLNA, Avahi, rsync, WebDAV, Prometheus, API tokens -->
+  <section class="page" id="p-services" role="tabpanel" aria-labelledby="t-services">
+    <div class="stack">
+      <div class="card">
+        <h2>Services</h2>
+        <div id="svl"></div>
+        <p class="small" style="margin-bottom:0">A service stopped here stays stopped after the NAS restarts.</p>
+      </div>
+      <div class="card">
+        <h2>Prometheus metrics</h2>
+        <label><input type="checkbox" id="metr"> Serve the metrics on /metrics</label><br>
+        <label><input type="checkbox" id="metro"> Without authentication (any device of the local network)</label>
+        <p class="small" style="margin-bottom:0">Off by default. Recommended: keep the authentication and give Prometheus a read-only token (authorization: credentials: &lt;token&gt;). Values are refreshed every 15 s while this interface is open, otherwise every 60 s. Changing this setting restarts the web server.</p>
+      </div>
+      <div class="card">
+        <h2>API access tokens</h2>
+        <div id="tokl"></div>
+        <form id="tokadd" class="btns" style="margin-top:12px;align-items:center">
+          <input class="inp" name="name" placeholder="token name" aria-label="token name" maxlength="40" pattern="[A-Za-z0-9 ._\-]+" required autocomplete="off">
+          <select name="perm" aria-label="Rights of the token"><option value="ro">Read-only token</option><option value="full">Full-access token</option></select>
+          <button class="b pri" type="submit">Create</button>
+        </form>
+        <div id="toknew" class="small" style="display:none;margin-top:10px"></div>
+        <p class="small" style="margin-bottom:0">For scripts and Prometheus: the header “Authorization: Bearer &lt;token&gt;” on https://&lt;NAS&gt;/api/v1/&lt;action&gt; (docs/API.md). A token is shown only once: only a salted hash of it is kept. A read-only token cannot change anything; actions also need the header “X-Diet: 1”.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- System: general, notifications, hardware, SSH, update, maintenance -->
+  <section class="page" id="p-system" role="tabpanel" aria-labelledby="t-system">
+    <div class="stack">
+      <div class="card">
+        <h2>General</h2>
+        <form class="cfg sys" id="sys">
+          <label>NAS name<small>lowercase letters, digits and dashes, 15 max.</small></label><input name="host" maxlength="15" pattern="[a-z0-9][a-z0-9-]*" required>
+          <label>Time zone</label><select name="tz"></select>
+          <label>System language<small>logs, Telegram notifications and commands</small></label><select name="lang"><option value="fr">Français</option><option value="de">Deutsch</option><option value="en">English</option></select>
+          <label for="lang2">Interface language<small>The menu at the top of the page only sets the language of this interface, in this browser.</small></label><select id="lang2"><option value="fr">Français</option><option value="de">Deutsch</option><option value="en">English</option></select>
+          <div class="sec">Network <small style="font-weight:400;color:var(--mute)">(applied at the next reboot)</small></div>
+          <label>Mode</label><select name="net"><option value="dhcp">Automatic (DHCP)</option><option value="static">Static address</option></select>
+          <label class="st">IP address</label><input class="st" name="ip" inputmode="decimal">
+          <label class="st">Netmask</label><input class="st" name="mask" inputmode="decimal">
+          <label class="st">Gateway</label><input class="st" name="gw" inputmode="decimal">
+          <label class="st">DNS servers<small>separated by spaces</small></label><input class="st" name="dns">
+          <div style="grid-column:1/-1;margin-top:8px"><button class="b pri" type="submit">Save</button></div>
+        </form>
+      </div>
+      <div class="card">
+        <h2>Telegram notifications</h2>
+        <form class="cfg sys" id="tg">
+          <label>Bot token<small id="tgs">from @BotFather</small></label><input name="tgtoken" type="password" autocomplete="off" placeholder="unchanged">
+          <label>Chat ID<small>empty = notifications off</small></label><input name="tgchat" inputmode="numeric">
+          <div style="grid-column:1/-1;margin-top:8px" class="btns"><button class="b pri" type="submit">Save</button>
+            <button class="b" type="button" id="tgtest">Send a test notification</button></div>
+        </form>
+        <p class="small" style="margin-bottom:0">An alert is sent when the RAID degrades, a disk leaves the RAID or reports bad sectors, on overheating or a stopped fan, and again on recovery.</p>
+      </div>
+      <div class="card">
+        <h2>Hardware settings</h2>
+        <form class="cfg hw" id="cfg">
+          <div class="sec">Fan (0–255) <small style="font-weight:400;color:var(--mute)">(padre-fan control)</small></div>
+          <label>Minimum level<small>up to the idle temperature</small></label><input name="FAN_PWM_MIN" type="number" min="20" max="255">
+          <label>Maximum level</label><input name="FAN_PWM_MAX" type="number" min="20" max="255">
+          <label>Measuring period (seconds)</label><input name="PERIOD" type="number" min="10" max="240">
+          <div class="sec">Temperature of the warmest disk (°C)</div>
+          <label>Minimum level up to</label><input name="TEMP_LOW" type="number" min="20" max="70">
+          <label>Full speed from</label><input name="TEMP_HIGH" type="number" min="20" max="70">
+          <div class="sec">Disk protection (°C)</div>
+          <label>Full speed once a disk reaches</label><input name="DISK_HIGH" type="number" min="30" max="70">
+          <label>Emergency shutdown from<small>two readings in a row</small></label><input name="DISK_CRIT" type="number" min="30" max="70">
+          <div style="grid-column:1/-1;margin-top:8px"><button class="b pri" type="submit">Save</button></div>
+        </form>
+        <p class="small" style="margin-bottom:0">The spin-down of the disks is set in Storage → Disks.</p>
+      </div>
+      <div class="card">
+        <h2>SSH access</h2>
+        <div id="sshi" class="small"></div>
+        <form class="cfg sys" id="ssh">
+          <label>Root password<small>empty = unchanged</small></label><input name="rootpw" type="password" minlength="6" maxlength="128" autocomplete="new-password">
+          <label>Again</label><input name="rootpw2" type="password" autocomplete="new-password">
+          <label>Add an SSH public key<small>for example ~/.ssh/id_ed25519.pub</small></label><textarea class="inp" name="key" rows="3" spellcheck="false" placeholder="ssh-ed25519 AAAA… user@pc" style="font:12px ui-monospace,monospace"></textarea>
+          <div style="grid-column:1/-1;margin-top:8px"><button class="b pri" type="submit">Save</button></div>
+        </form>
+        <p class="small" style="margin-bottom:0">User root. SSH refuses an empty password: set a password or add a key. Keys are added to /root/.ssh/authorized_keys; to remove one, edit that file over SSH.</p>
+      </div>
+      <div class="card">
+        <h2>System update</h2>
+        <div id="updi" class="small"></div>
+        <div class="btns" id="updb" style="margin-top:8px"></div>
+        <p class="small why" id="busyu" hidden></p>
+        <form id="updf" class="btns" style="margin-top:14px;align-items:center">
+          <input type="file" id="updfile" accept=".tar" required class="small" aria-label="Update package (.tar)">
+          <button class="b pri" type="submit">Upload and install</button>
+        </form>
+        <form id="updu" class="btns" style="margin-top:8px;align-items:center">
+          <input class="inp" name="url" placeholder="https://github.com/…/releases/download/…/readynasng-update-….tar" aria-label="Address of the update package" required>
+          <input class="inp" name="sha" placeholder="SHA-256 of the package" aria-label="SHA-256 of the package" required pattern="[0-9a-fA-F]{64}">
+          <button class="b" type="submit">Download and install</button>
+        </form>
+        <p class="small" style="margin-bottom:0">The new version is installed next to the current one on the USB stick, with the settings of this NAS, and tried at the next restart. If it does not start completely (cut the power if it hangs), the following power-on goes back to the current version by itself. The previous version stays available.</p>
+      </div>
+      <div class="card">
+        <h2>Maintenance</h2>
         <div class="btns">
-          <button class="b" data-a="spindown">Spin down disks</button>
           <button class="b" data-a="ksmbd">Restart SMB</button>
           <button class="b" data-a="nfsd">Restart NFS</button>
           <button class="b" data-a="ntp">Update the time</button>
-          <span class="sp"></span>
-          <button class="b danger" data-a="reboot" data-q="Restart now?">Restart</button>
-          <button class="b danger" data-a="poweroff" data-q="Really power off? It can only be switched on again with the button on the device.">Power off</button>
         </div>
-        <p class="small" style="margin-bottom:0">Power button on the device: hold 3 s = power off.</p>
       </div>
     </div>
   </section>
 
-  <section class="page" id="p-shares">
-    <div class="card" style="max-width:760px">
-      <h2>Network shares (SMB)</h2>
-      <div id="shl"></div>
-      <form id="shadd" class="btns" style="margin-top:14px;align-items:center">
-        <input name="name" placeholder="new share name" maxlength="32" pattern="[A-Za-z0-9_][A-Za-z0-9_-]*" required
-          style="font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);min-width:230px">
-        <button class="b pri" type="submit">Create</button>
-      </form>
-      <p class="small" style="margin-bottom:0">A share is the folder /c/name; a new share is writable and needs no password. “Remove” takes the share off the network without deleting the folder or its contents.</p>
-    </div>
-    <div class="card" style="max-width:760px;margin-top:12px">
-      <h2>Share users</h2>
-      <div id="usl"></div>
-      <form id="usadd" class="btns" style="margin-top:14px;align-items:center">
-        <input name="name" placeholder="user name" maxlength="31" pattern="[A-Za-z0-9_][A-Za-z0-9_-]*" required autocomplete="off"
-          style="font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);min-width:170px">
-        <input name="pw" type="password" placeholder="password (6 characters min.)" minlength="6" required autocomplete="new-password"
-          style="font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);min-width:230px">
-        <button class="b pri" type="submit">Create or change password</button>
-      </form>
-      <p class="small" style="margin-bottom:0">These accounts open the shares that are not “no password”. Entering an existing name changes its password. Deleting an account leaves its files untouched.</p>
-      <p class="small" style="margin-bottom:0">The same password opens WebDAV and rsync (personal folder /c/home/name and shares). An account created earlier must set its password again.</p>
-    </div>
-    <div class="card" style="max-width:760px;margin-top:12px">
-      <h2>NFS exports</h2>
-      <p class="small" id="nfoff" style="color:var(--warn);margin-top:0"></p>
-      <div id="nfl"></div>
-      <form id="nfadd" class="btns" style="margin-top:14px;align-items:center">
-        <input class="inp" name="path" value="/c/" maxlength="64" pattern="/c(/[A-Za-z0-9_-]+)*" required style="min-width:170px">
-        <input class="inp" name="client" placeholder="client: * or a.b.c.d/nn" maxlength="18" required style="min-width:200px">
-        <label class="small"><input type="checkbox" name="ro"> read-only</label>
-        <button class="b pri" type="submit">Export</button>
-      </form>
-      <p class="small" style="margin-bottom:0">The folder must exist (an SMB share creates it). Changes apply at once (exportfs -ra).</p>
-    </div>
-    <div class="card" style="max-width:760px;margin-top:12px">
-      <h2>Services</h2>
-      <div id="svl"></div>
-      <p class="small" style="margin-bottom:0">A service stopped here stays stopped after the NAS restarts.</p>
-    </div>
-  </section>
-
-  <section class="page" id="p-cfg">
-    <div class="card" style="max-width:620px">
-      <h2>Hardware settings</h2>
-      <form class="cfg" id="cfg">
-        <div class="sec">Disks</div>
-        <label>Spin down after (minutes)<small>0 = never</small></label><input name="SPINDOWN_MIN" type="number" min="0" max="330">
-        <div class="sec">Fan (0–255) <small style="font-weight:400;color:var(--mute)">(padre-fan control)</small></div>
-        <label>Minimum level<small>up to the idle temperature</small></label><input name="FAN_PWM_MIN" type="number" min="20" max="255">
-        <label>Maximum level</label><input name="FAN_PWM_MAX" type="number" min="20" max="255">
-        <label>Measuring period (seconds)</label><input name="PERIOD" type="number" min="10" max="240">
-        <div class="sec">Temperature of the warmest disk (°C)</div>
-        <label>Minimum level up to</label><input name="TEMP_LOW" type="number" min="20" max="70">
-        <label>Full speed from</label><input name="TEMP_HIGH" type="number" min="20" max="70">
-        <div class="sec">Disk protection (°C)</div>
-        <label>Full speed once a disk reaches</label><input name="DISK_HIGH" type="number" min="30" max="70">
-        <label>Emergency shutdown from<small>two readings in a row</small></label><input name="DISK_CRIT" type="number" min="30" max="70">
-        <div style="grid-column:1/-1;margin-top:8px"><button class="b pri" type="submit">Save</button></div>
-      </form>
-    </div>
-    <div class="card" style="max-width:620px;margin-top:12px">
-      <h2>System settings</h2>
-      <form class="cfg sys" id="sys">
-        <div class="sec">General</div>
-        <label>NAS name<small>lowercase letters, digits and dashes, 15 max.</small></label><input name="host" maxlength="15" pattern="[a-z0-9][a-z0-9-]*" required>
-        <label>Time zone</label><select name="tz"></select>
-        <label>System language<small>logs, Telegram notifications and commands</small></label><select name="lang"><option value="fr">Français</option><option value="de">Deutsch</option><option value="en">English</option></select>
-        <div class="sec">Network <small style="font-weight:400;color:var(--mute)">(applied at the next reboot)</small></div>
-        <label>Mode</label><select name="net"><option value="dhcp">Automatic (DHCP)</option><option value="static">Static address</option></select>
-        <label class="st">IP address</label><input class="st" name="ip" inputmode="decimal">
-        <label class="st">Netmask</label><input class="st" name="mask" inputmode="decimal">
-        <label class="st">Gateway</label><input class="st" name="gw" inputmode="decimal">
-        <label class="st">DNS servers<small>separated by spaces</small></label><input class="st" name="dns">
-        <div class="sec">Telegram notifications</div>
-        <label>Bot token<small id="tgs">from @BotFather</small></label><input name="tgtoken" type="password" autocomplete="off" placeholder="unchanged">
-        <label>Chat ID<small>empty = notifications off</small></label><input name="tgchat" inputmode="numeric">
-        <div style="grid-column:1/-1;margin-top:8px" class="btns"><button class="b pri" type="submit">Save</button>
-          <button class="b" type="button" id="tgtest">Send a test notification</button></div>
-      </form>
-      <p class="small" style="margin-bottom:0">An alert is sent when the RAID degrades, a disk leaves the RAID or reports bad sectors, on overheating or a stopped fan, and again on recovery.</p>
-    </div>
-    <div class="card" style="max-width:620px;margin-top:12px">
-      <h2>SMB file sharing</h2>
-      <label><input type="checkbox" id="smbenc"> SMB3 encryption</label>
-      <p class="small" style="margin-bottom:0">Off by default: this NAS encrypts without hardware help, which slows transfers a lot. Only useful on a network you do not trust; when on, a client that asks for encryption gets it. Signing stays automatic (Windows 11 24H2 requires it). SMB restarts when this is changed.</p>
-    </div>
-    <div class="card" style="max-width:620px;margin-top:12px">
-      <h2>SSH access</h2>
-      <div id="sshi" class="small"></div>
-      <form class="cfg sys" id="ssh">
-        <label>Root password<small>empty = unchanged</small></label><input name="rootpw" type="password" minlength="6" maxlength="128" autocomplete="new-password">
-        <label>Again</label><input name="rootpw2" type="password" autocomplete="new-password">
-        <label>Add an SSH public key<small>for example ~/.ssh/id_ed25519.pub</small></label><textarea class="inp" name="key" rows="3" spellcheck="false" placeholder="ssh-ed25519 AAAA… user@pc" style="width:230px;font:12px ui-monospace,monospace"></textarea>
-        <div style="grid-column:1/-1;margin-top:8px"><button class="b pri" type="submit">Save</button></div>
-      </form>
-      <p class="small" style="margin-bottom:0">User root. SSH refuses an empty password: set a password or add a key. Keys are added to /root/.ssh/authorized_keys; to remove one, edit that file over SSH.</p>
-    </div>
-    <div class="card" style="max-width:620px;margin-top:12px">
-      <h2>API access tokens</h2>
-      <div id="tokl"></div>
-      <form id="tokadd" class="btns" style="margin-top:12px;align-items:center">
-        <input class="inp" name="name" placeholder="token name" maxlength="40" pattern="[A-Za-z0-9 ._\-]+" required autocomplete="off" style="min-width:170px">
-        <select name="perm"><option value="ro">Read-only token</option><option value="full">Full-access token</option></select>
-        <button class="b pri" type="submit">Create</button>
-      </form>
-      <div id="toknew" class="small" style="display:none;margin-top:10px"></div>
-      <p class="small" style="margin-bottom:0">For scripts and Prometheus: the header “Authorization: Bearer &lt;token&gt;” on https://&lt;NAS&gt;/api/v1/&lt;action&gt; (docs/API.md). A token is shown only once: only a salted hash of it is kept. A read-only token cannot change anything; actions also need the header “X-Diet: 1”.</p>
-    </div>
-    <div class="card" style="max-width:620px;margin-top:12px">
-      <h2>Prometheus metrics</h2>
-      <label><input type="checkbox" id="metr"> Serve the metrics on /metrics</label><br>
-      <label><input type="checkbox" id="metro"> Without authentication (any device of the local network)</label>
-      <p class="small" style="margin-bottom:0">Off by default. Recommended: keep the authentication and give Prometheus a read-only token (authorization: credentials: &lt;token&gt;). Values are refreshed every 15 s while this interface is open, otherwise every 60 s. Changing this setting restarts the web server.</p>
-    </div>
-    <div class="card" style="max-width:620px;margin-top:12px">
-      <h2>System update</h2>
-      <div id="updi" class="small"></div>
-      <div class="btns" id="updb" style="margin-top:8px"></div>
-      <form id="updf" class="btns" style="margin-top:14px;align-items:center">
-        <input type="file" id="updfile" accept=".tar" required class="small">
-        <button class="b pri" type="submit">Upload and install</button>
-      </form>
-      <form id="updu" class="btns" style="margin-top:8px;align-items:center">
-        <input class="inp" name="url" placeholder="https://github.com/…/releases/download/…/readynasng-update-….tar" required style="flex:1;min-width:240px">
-        <input class="inp" name="sha" placeholder="SHA-256 of the package" required pattern="[0-9a-fA-F]{64}" style="flex:1;min-width:240px">
-        <button class="b" type="submit">Download and install</button>
-      </form>
-      <p class="small" style="margin-bottom:0">The new version is installed next to the current one on the USB stick, with the settings of this NAS, and tried at the next restart. If it does not start completely (cut the power if it hangs), the following power-on goes back to the current version by itself. The previous version stays available.</p>
-    </div>
-  </section>
-
-  <section class="page" id="p-log">
-    <div class="card">
+  <!-- Logs: one log at a time -->
+  <section class="page" id="p-logs" role="tabpanel" aria-labelledby="t-logs">
+    <div class="card" id="logs">
+      <h2>Logs</h2>
       <div class="btns" style="align-items:center">
-        <select id="logf">
+        <select id="logf" aria-label="Log">
           <option value="diet">DIET log</option>
           <option value="messages">System log</option>
           <option value="dmesg">Kernel (dmesg)</option>
@@ -286,28 +379,24 @@ dialog h3{margin:0 0 8px;font-size:16px}
           <option value="update">Update log</option>
         </select>
         <button class="b" id="logr">Reload</button>
-        <span class="small" style="margin-left:auto">SMART report (wakes the disk):</span>
-        <span class="btns" id="smartb"></span>
-        <span class="small">RAID:</span>
-        <span class="btns" id="mdb"></span>
       </div>
       <pre id="logo">…</pre>
     </div>
   </section>
 </div>
-<div class="toast" id="toast"></div>
+<div class="toast" id="toast" role="status" aria-live="polite" title="Click to close"></div>
 <dialog id="xrwd"><form method="dialog">
 <h3>Allow writing on the X-RAID</h3>
 <p class="small" style="color:var(--bad)">Writing goes through the kernel ext4 driver on the ext3 file system with 16 KB blocks created by RAIDiator, every write going to both disks. This path has not been tested for long yet: a backup of /c is strongly recommended. The volume is unmounted and mounted again; SMB, NFS, DLNA, rsync and WebDAV are stopped meanwhile. The safeguards of nas-raid may keep it read-only.</p>
 <p><label><input type="checkbox" id="xrwc"> I have a backup of /c or I accept the risk.</label></p>
-<p class="small"><span id="xrwl"></span><br><input class="inp" id="xrwi" autocomplete="off" spellcheck="false" style="width:100%"></p>
+<p class="small"><span id="xrwl"></span><br><input class="inp" id="xrwi" aria-labelledby="xrwl" autocomplete="off" spellcheck="false" style="width:100%"></p>
 <div class="btns"><span class="sp"></span><button class="b" value="cancel">Cancel</button><button class="b danger" type="button" id="xrwgo" disabled>Enable</button></div>
 </form></dialog>
 <dialog id="xqad"><form method="dialog">
 <h3>Accept the quick check</h3>
-<p class="small" style="color:var(--bad)">The quick check found no difference, but the superblock records an unclean shutdown (crash or power cut). Only the journals, the file system and LVM metadata and random samples were compared: file data written at the time of the crash may still differ between the disks, and would then read differently depending on the disk. Accepting does what a successful full check does: the superblock is put back clean and writing is allowed at the next mount. A full check (several hours) or a repair remain the safe options.</p>
+<p class="small" style="color:var(--bad)">The quick check found no difference, but the superblock records an unclean shutdown (crash or power cut). Only the journals, the file system and LVM metadata and random samples were compared: file data written at the time of the crash may still differ between the disks, and would then read differently depending on the disk. Accepting does what a successful full check does: the superblock is put back clean and, if writing is on, /c is remounted read-write at once. A full check (several hours) or a repair remain the safe options.</p>
 <p><label><input type="checkbox" id="xqac"> I accept this residual risk.</label></p>
-<p class="small"><span id="xqal"></span><br><input class="inp" id="xqai" autocomplete="off" spellcheck="false" style="width:100%"></p>
+<p class="small"><span id="xqal"></span><br><input class="inp" id="xqai" aria-labelledby="xqal" autocomplete="off" spellcheck="false" style="width:100%"></p>
 <div class="btns"><span class="sp"></span><button class="b" value="cancel">Cancel</button><button class="b danger" type="button" id="xqago" disabled>Accept</button></div>
 </form></dialog>
 <div class="overlay" id="ov"><div id="ovt"></div></div>
@@ -325,12 +414,48 @@ let LANG = (()=>{
   return 'en';
 })();
 const I18N = {
+  "Sections": ["Rubriques", "Bereiche"],
+  "Dashboard": ["Tableau de bord", "Übersicht"],
+  "Storage": ["Stockage", "Speicher"],
+  "Users": ["Utilisateurs", "Benutzer"],
+  "Storage health": ["Santé du stockage", "Zustand des Speichers"],
+  "Details": ["Détails", "Details"],
+  "Open Storage": ["Ouvrir Stockage", "Speicher öffnen"],
+  "Open System": ["Ouvrir Système", "System öffnen"],
+  "State": ["État", "Zustand"],
+  "OK": ["OK", "OK"],
+  "Degraded": ["Dégradé", "Beeinträchtigt"],
+  "Read-only": ["Lecture seule", "Nur lesen"],
+  "Rebuilding": ["Reconstruction", "Wiederaufbau"],
+  "Rebuilding {0} %": ["Reconstruction {0} %", "Wiederaufbau {0} %"],
+  "{0} disks in service / {1} failed": ["{0} disques en service / {1} en panne", "{0} Platten in Betrieb / {1} ausgefallen"],
+  "Volume /c": ["Volume /c", "Volume /c"],
+  "Level": ["Niveau", "Level"],
+  "member disk": ["disque membre", "Mitgliedsplatte"],
+  "missing": ["absent", "fehlt"],
+  "rebuilding": ["en reconstruction", "im Wiederaufbau"],
+  "Full consistency check": ["Vérification complète de cohérence", "Vollständige Konsistenzprüfung"],
+  "Check the volume consistency": ["Vérifier la cohérence du volume", "Konsistenz des Volumes prüfen"],
+  "Read the member disks entirely and compare them (read-only, several hours)?": ["Lire entièrement les disques membres et les comparer (lecture seule, plusieurs heures) ?", "Die Mitgliedsplatten vollständig lesen und vergleichen (nur lesend, mehrere Stunden)?"],
+  "a full consistency check is running": ["une vérification complète de cohérence est en cours", "eine vollständige Konsistenzprüfung läuft"],
+  "a quick consistency check is running": ["une vérification rapide de cohérence est en cours", "eine Schnellprüfung der Konsistenz läuft"],
+  "The disks differ: see the sensitive zone below.": ["Les disques diffèrent : voir la zone sensible ci-dessous.", "Die Platten unterscheiden sich: siehe den sensiblen Bereich unten."],
+  "These settings change how the data volume is written. A mistake or a crash can leave the disks different and lose recent files: only with a backup of /c, after reading docs/XRAID.md.": ["Ces réglages changent la façon dont le volume de données est écrit. Une erreur ou un plantage peut laisser les disques différents et perdre des fichiers récents : seulement avec une sauvegarde de /c, après avoir lu docs/XRAID.md.", "Diese Einstellungen ändern, wie das Datenvolume geschrieben wird. Ein Fehler oder Absturz kann die Platten unterschiedlich hinterlassen und neue Dateien verlieren: nur mit einer Sicherung von /c, nach dem Lesen von docs/XRAID.md."],
+  "Technical details": ["Détails techniques", "Technische Details"],
+  "SMART report": ["Rapport SMART", "SMART-Bericht"],
+  "A SMART report wakes the disk.": ["Un rapport SMART réveille le disque.", "Ein SMART-Bericht weckt die Platte."],
+  "SMB service": ["Service SMB", "SMB-Dienst"],
+  "NFS service": ["Service NFS", "NFS-Dienst"],
+  "NFS service stopped: the exports are kept and applied when it is started again.": ["Service NFS arrêté : les exports sont gardés et appliqués à son redémarrage.", "NFS-Dienst gestoppt: die Exporte bleiben erhalten und gelten beim nächsten Start."],
+  "Kernel NFS server (v3 and v4); the exports below can be edited also while the service is stopped.": ["Serveur NFS du noyau (v3 et v4) ; les exports ci-dessous restent modifiables quand le service est arrêté.", "NFS-Server des Kernels (v3 und v4); die Exporte unten bleiben auch bei gestopptem Dienst änderbar."],
+  "Interface language": ["Langue de l’interface", "Sprache der Oberfläche"],
+  "The spin-down of the disks is set in Storage → Disks.": ["La mise en veille des disques se règle dans Stockage → Disques.", "Der Standby der Platten wird unter Speicher → Platten eingestellt."],
+  "Maintenance": ["Maintenance", "Wartung"],
+  "Restart and power off": ["Redémarrer et éteindre", "Neustart und Ausschalten"],
   "connecting…": ["connexion…", "Verbinde …"],
   "Hide this warning until it changes": ["Masquer cet avertissement jusqu’à ce qu’il change", "Diese Warnung ausblenden, bis sie sich ändert"],
   "Hide": ["Masquer", "Ausblenden"],
-  "Overview": ["Vue d’ensemble", "Übersicht"],
   "Shares": ["Partages", "Freigaben"],
-  "Settings": ["Réglages", "Einstellungen"],
   "Logs": ["Journaux", "Protokolle"],
   "System": ["Système", "System"],
   "Temperature": ["Température", "Temperatur"],
@@ -343,11 +468,9 @@ const I18N = {
   "free": ["libre", "frei"],
   "Read": ["Lecture", "Lesen"],
   "Write": ["Écriture", "Schreiben"],
-  "Network & services": ["Réseau et services", "Netzwerk & Dienste"],
   "Address": ["Adresse", "Adresse"],
   "Received": ["Reçu", "Empfangen"],
   "Sent": ["Envoyé", "Gesendet"],
-  "Actions": ["Actions", "Aktionen"],
   "Spin down disks": ["Mettre les disques en veille", "Platten schlafen legen"],
   "Restart now?": ["Redémarrer maintenant ?", "Jetzt neu starten?"],
   "Restart": ["Redémarrer", "Neustart"],
@@ -402,7 +525,26 @@ const I18N = {
   "An alert is sent when the RAID degrades, a disk leaves the RAID or reports bad sectors, on overheating or a stopped fan, and again on recovery.": ["Une alerte est envoyée quand le RAID se dégrade, qu’un disque sort du RAID ou présente des secteurs défectueux, en cas de surchauffe ou de ventilateur arrêté, puis au retour à la normale.", "Eine Meldung wird gesendet, wenn das RAID beeinträchtigt ist, eine Platte das RAID verlässt oder defekte Sektoren meldet, bei Überhitzung oder stehendem Lüfter und wieder, wenn alles normal ist."],
   "Kernel (dmesg)": ["Noyau (dmesg)", "Kernel (dmesg)"],
   "Reload": ["Recharger", "Neu laden"],
-  "SMART report (wakes the disk):": ["Rapport SMART (réveille le disque) :", "SMART-Bericht (weckt die Platte):"],
+  "Language of this interface (this browser only)": ["Langue de cette interface (ce navigateur seulement)", "Sprache dieser Oberfläche (nur dieser Browser)"],
+  "The menu at the top of the page only sets the language of this interface, in this browser.": ["Le menu en haut de la page ne règle que la langue de cette interface, dans ce navigateur.", "Das Menü oben auf der Seite stellt nur die Sprache dieser Oberfläche ein, in diesem Browser."],
+  "Sensitive zone": ["Zone sensible", "Sensibler Bereich"],
+  "Click to close": ["Cliquer pour fermer", "Zum Schließen klicken"],
+  "WebDAV/rsync:": ["WebDAV/rsync :", "WebDAV/rsync:"],
+  "disabled": ["désactivé", "deaktiviert"],
+  "Folder to export (/c/…)": ["Dossier à exporter (/c/…)", "Zu exportierender Ordner (/c/…)"],
+  "Rights of the token": ["Droits du jeton", "Rechte des Tokens"],
+  "Update package (.tar)": ["Paquet de mise à jour (.tar)", "Update-Paket (.tar)"],
+  "Address of the update package": ["Adresse du paquet de mise à jour", "Adresse des Update-Pakets"],
+  "Log": ["Journal", "Protokoll"],
+  "MiniDLNA folders": ["Dossiers MiniDLNA", "MiniDLNA-Ordner"],
+  "Password of the “sauvegarde” account": ["Mot de passe du compte « sauvegarde »", "Passwort des Kontos „sauvegarde“"],
+  "To repair (copies the base disk onto the mirror where they differ), over SSH:": ["Pour réparer (copie le disque base sur le miroir là où ils diffèrent), en SSH :", "Zum Reparieren (kopiert die Basisplatte auf den Spiegel, wo sie abweichen), per SSH:"],
+  "then a full check (nas-raid verify) and a restart. Details: docs/XRAID.md §5.": ["puis une vérification complète (nas-raid verify) et un redémarrage. Détails : docs/XRAID.md §5.", "danach eine vollständige Prüfung (nas-raid verify) und ein Neustart. Details: docs/XRAID.md §5."],
+  "a system update is being installed": ["une mise à jour du système s’installe", "ein Systemupdate wird installiert"],
+  "a RAID resync or repair is running": ["une resynchronisation ou réparation RAID est en cours", "eine RAID-Synchronisation oder -Reparatur läuft"],
+  "Restart, power off and switching version are blocked: {0}. Wait until it ends; in an emergency, the power button of the device (hold 3 s) or the API with force=1 (docs/API.md).": ["Redémarrage, extinction et changement de version bloqués : {0}. Attendre la fin ; en cas d’urgence, le bouton d’alimentation de l’appareil (maintenu 3 s) ou l’API avec force=1 (docs/API.md).", "Neustart, Ausschalten und Versionswechsel gesperrt: {0}. Das Ende abwarten; im Notfall der Power-Knopf am Gerät (3 s halten) oder die API mit force=1 (docs/API.md)."],
+  "Apply now? {0} is restarted (or stopped): its open connections are cut.": ["Appliquer maintenant ? {0} redémarre (ou s’arrête) : ses connexions ouvertes sont coupées.", "Jetzt anwenden? {0} wird neu gestartet (oder gestoppt): offene Verbindungen werden getrennt."],
+  "the web server (this page reloads its data)": ["le serveur web (cette page recharge ses données)", "der Webserver (diese Seite lädt ihre Daten neu)"],
   "Language": ["Langue", "Sprache"],
   "System language": ["Langue du système", "Systemsprache"],
   "logs, Telegram notifications and commands": ["journaux, notifications Telegram et commandes", "Protokolle, Telegram-Meldungen und Befehle"],
@@ -473,8 +615,6 @@ const I18N = {
   "Network shares (SMB)": ["Partages réseau (SMB)", "Netzwerkfreigaben (SMB)"],
   "no SMB password": ["pas de mot de passe SMB", "kein SMB-Passwort"],
   "NFS exports": ["Exports NFS", "NFS-Freigaben"],
-  "NFS service stopped: the exports are kept and applied when it is started again (Services card).": ["Service NFS arrêté : les exports sont conservés et appliqués à son redémarrage (carte Services).", "NFS-Dienst gestoppt: die Freigaben bleiben erhalten und gelten wieder, sobald er gestartet wird (Karte Dienste)."],
-  "Kernel NFS server (v3 and v4); the exports are edited in the “NFS exports” card, also while the service is stopped.": ["Serveur NFS du noyau (v3 et v4) ; les exports se modifient dans la carte « Exports NFS », même service arrêté.", "NFS-Server des Kernels (v3 und v4); die Freigaben werden in der Karte „NFS-Freigaben“ bearbeitet, auch bei gestopptem Dienst."],
   "client: * or a.b.c.d/nn": ["client : * ou a.b.c.d/nn", "Client: * oder a.b.c.d/nn"],
   "Export": ["Exporter", "Freigeben"],
   "The folder must exist (an SMB share creates it). Changes apply at once (exportfs -ra).": ["Le dossier doit exister (un partage SMB le crée). Les modifications sont appliquées tout de suite (exportfs -ra).", "Der Ordner muss existieren (eine SMB-Freigabe legt ihn an). Änderungen gelten sofort (exportfs -ra)."],
@@ -500,7 +640,6 @@ const I18N = {
   "Section {0}": ["Section {0}", "Bereich {0}"],
   "in sync": ["synchronisée", "synchron"],
   "sync unfinished": ["synchronisation inachevée", "Synchronisation unvollständig"],
-  "Mirror check": ["Vérification du miroir", "Spiegelprüfung"],
   "Superblock": ["Superbloc", "Superblock"],
   "clean": ["propre", "sauber"],
   "in use or unclean shutdown": ["en cours d’utilisation ou arrêt brutal", "in Benutzung oder harter Stopp"],
@@ -508,9 +647,8 @@ const I18N = {
   "mirror": ["miroir", "Spiegel"],
   "online": ["en ligne", "online"],
   "faulty": ["en panne", "defekt"],
-  "ready": ["en reconstruction", "im Wiederaufbau"],
+  "ready": ["prêt", "bereit"],
   "spare": ["de réserve", "Reserve"],
-  "Disks": ["Disques", "Platten"],
   "{0} working, {1} failed": ["{0} en service, {1} en panne", "{0} in Betrieb, {1} ausgefallen"],
   "superblock writer (xraid-sb) missing: read-only only": ["outil d’écriture du superbloc (xraid-sb) absent : lecture seule uniquement", "Superblock-Schreiber (xraid-sb) fehlt: nur Lesen"],
   "a superblock and its copy differ (interrupted update)": ["un superbloc et sa copie diffèrent (mise à jour interrompue)", "ein Superblock und seine Kopie unterscheiden sich (unterbrochene Aktualisierung)"],
@@ -523,7 +661,6 @@ const I18N = {
   "identical on {0}": ["identique le {0}", "identisch am {0}"],
   "{0} zones differ": ["{0} zones différentes", "{0} Bereiche verschieden"],
   "read errors": ["erreurs de lecture", "Lesefehler"],
-  "Check the mirror": ["Vérifier le miroir", "Spiegel prüfen"],
   "Quick check": ["Vérification rapide", "Schnellprüfung"],
   "Accept the quick check…": ["Accepter la vérification rapide…", "Schnellprüfung akzeptieren …"],
   "Accept the quick check": ["Accepter la vérification rapide", "Schnellprüfung akzeptieren"],
@@ -535,7 +672,7 @@ const I18N = {
   "accepted on {0}": ["acceptée le {0}", "akzeptiert am {0}"],
   "{0} compared": ["{0} comparés", "{0} verglichen"],
   "Quick check (1 to 3 minutes, read-only): compares the two disks where a power cut during a write most likely leaves them different (ext3 journals, file system and LVM metadata, partition table), plus random samples elsewhere. It does not prove the disks identical: file data written at the time of the cut may still differ outside these areas (only the full check reads everything). Start?": ["Vérification rapide (1 à 3 minutes, lecture seule) : compare les deux disques là où une coupure en pleine écriture les laisse le plus probablement différents (journaux ext3, métadonnées du système de fichiers et de LVM, table des partitions), plus des échantillons aléatoires ailleurs. Elle ne prouve pas que les disques sont identiques : des données de fichiers écrites au moment de la coupure peuvent encore différer hors de ces zones (seule la vérification complète lit tout). Lancer ?", "Schnellprüfung (1 bis 3 Minuten, nur Lesen): vergleicht die beiden Platten dort, wo ein Stromausfall während eines Schreibvorgangs sie am ehesten unterschiedlich lässt (ext3-Journale, Metadaten von Dateisystem und LVM, Partitionstabelle), dazu Zufallsstichproben im Rest. Sie beweist nicht, dass die Platten gleich sind: Dateidaten, die beim Ausfall geschrieben wurden, können außerhalb dieser Bereiche noch abweichen (nur die vollständige Prüfung liest alles). Starten?"],
-  "The quick check found no difference, but the superblock records an unclean shutdown (crash or power cut). Only the journals, the file system and LVM metadata and random samples were compared: file data written at the time of the crash may still differ between the disks, and would then read differently depending on the disk. Accepting does what a successful full check does: the superblock is put back clean and writing is allowed at the next mount. A full check (several hours) or a repair remain the safe options.": ["La vérification rapide n’a trouvé aucune différence, mais le superbloc enregistre un arrêt brutal (plantage ou coupure de courant). Seuls les journaux, les métadonnées du système de fichiers et de LVM et des échantillons aléatoires ont été comparés : des données de fichiers écrites au moment du plantage peuvent encore différer entre les disques, et se liraient alors différemment selon le disque. Accepter fait ce que fait une vérification complète réussie : le superbloc redevient propre et l’écriture est permise au prochain montage. Une vérification complète (plusieurs heures) ou une réparation restent les choix sûrs.", "Die Schnellprüfung fand keinen Unterschied, aber der Superblock verzeichnet einen harten Stopp (Absturz oder Stromausfall). Verglichen wurden nur die Journale, die Metadaten von Dateisystem und LVM und Zufallsstichproben: Dateidaten, die beim Absturz geschrieben wurden, können zwischen den Platten noch abweichen und je nach Platte anders gelesen werden. Akzeptieren bewirkt dasselbe wie eine erfolgreiche vollständige Prüfung: der Superblock wird wieder sauber und Schreiben ist beim nächsten Einhängen erlaubt. Eine vollständige Prüfung (mehrere Stunden) oder eine Reparatur bleiben die sicheren Wege."],
+  "The quick check found no difference, but the superblock records an unclean shutdown (crash or power cut). Only the journals, the file system and LVM metadata and random samples were compared: file data written at the time of the crash may still differ between the disks, and would then read differently depending on the disk. Accepting does what a successful full check does: the superblock is put back clean and, if writing is on, /c is remounted read-write at once. A full check (several hours) or a repair remain the safe options.": ["La vérification rapide n’a trouvé aucune différence, mais le superbloc enregistre un arrêt brutal (plantage ou coupure de courant). Seuls les journaux, les métadonnées du système de fichiers et de LVM et des échantillons aléatoires ont été comparés : des données de fichiers écrites au moment du plantage peuvent encore différer entre les disques, et se liraient alors différemment selon le disque. Accepter fait ce que fait une vérification complète réussie : le superbloc redevient propre et, si l’écriture est activée, /c est aussitôt remonté en écriture. Une vérification complète (plusieurs heures) ou une réparation restent les choix sûrs.", "Die Schnellprüfung fand keinen Unterschied, aber der Superblock verzeichnet einen harten Stopp (Absturz oder Stromausfall). Verglichen wurden nur die Journale, die Metadaten von Dateisystem und LVM und Zufallsstichproben: Dateidaten, die beim Absturz geschrieben wurden, können zwischen den Platten noch abweichen und je nach Platte anders gelesen werden. Akzeptieren bewirkt dasselbe wie eine erfolgreiche vollständige Prüfung: der Superblock wird wieder sauber und, wenn Schreiben eingeschaltet ist, wird /c sofort schreibbar neu eingehängt. Eine vollständige Prüfung (mehrere Stunden) oder eine Reparatur bleiben die sicheren Wege."],
   "Storage log": ["Journal du stockage", "Speicherprotokoll"],
   "Update log": ["Journal des mises à jour", "Update-Protokoll"],
   "System update": ["Mise à jour du système", "Systemaktualisierung"],
@@ -559,8 +696,7 @@ const I18N = {
   "Try the other version ({0}) at the next restart? The settings of this NAS are copied into it.": ["Essayer l’autre version ({0}) au prochain redémarrage ? Les réglages de ce NAS y sont recopiés.", "Die andere Version ({0}) beim nächsten Neustart testen? Die Einstellungen dieses NAS werden übernommen."],
   "Install {0}? The current version stays on the USB stick.": ["Installer {0} ? La version actuelle reste sur la clé USB.", "{0} installieren? Die aktuelle Version bleibt auf dem USB-Stick."],
   "Uploading… {0} %": ["Envoi… {0} %", "Hochladen … {0} %"],
-  "Type “{0}” to confirm:": ["Tapez « {0} » pour confirmer :", "„{0}“ eintippen zum Bestätigen:"],
-  "Read both disks entirely and compare them (read-only, several hours)?": ["Lire tout le contenu des deux disques et les comparer (lecture seule, plusieurs heures) ?", "Beide Platten vollständig lesen und vergleichen (nur Lesen, mehrere Stunden)?"],
+  "Type “{0}” to confirm (this word stays in English, in capitals):": ["Tapez « {0} » pour confirmer (ce mot reste en anglais, en majuscules) :", "„{0}“ eintippen zum Bestätigen (das Wort bleibt englisch, in Großbuchstaben):"],
   "Services": ["Services", "Dienste"],
   "A service stopped here stays stopped after the NAS restarts.": ["Un service arrêté ici reste arrêté après un redémarrage du NAS.", "Ein hier gestoppter Dienst bleibt auch nach einem Neustart des NAS gestoppt."],
   "running": ["en marche", "läuft"],
@@ -576,12 +712,12 @@ const I18N = {
   "Account “sauvegarde”: password set.": ["Compte « sauvegarde » : mot de passe défini.", "Konto „sauvegarde“: Passwort gesetzt."],
   "Account “sauvegarde”: no password, access denied.": ["Compte « sauvegarde » : aucun mot de passe, accès refusé.", "Konto „sauvegarde“: kein Passwort, Zugriff verweigert."],
   "Set the password": ["Définir le mot de passe", "Passwort setzen"],
-  "folder": ["dossier", "ordner"],
+  "folder": ["dossier", "Ordner"],
   "Copy": ["Copier", "Kopieren"],
   "Copied": ["Copié", "Kopiert"],
   "Addresses:": ["Adresses :", "Adressen:"],
-  "user": ["utilisateur", "benutzer"],
-  "share": ["partage", "freigabe"],
+  "user": ["utilisateur", "Benutzer"],
+  "share": ["partage", "Freigabe"],
   "(personal folder)": ["(dossier personnel)", "(persönlicher Ordner)"],
   "User accounts (not the one of this interface); files are created under the “nas” account.": ["Comptes des utilisateurs (pas celui de cette interface) ; fichiers créés sous le compte « nas ».", "Konten der Benutzer (nicht das dieser Oberfläche); Dateien werden unter dem Konto „nas“ angelegt."],
   "One module per user (their personal folder, under their account) and one per writable share; addresses in the user list.": ["Un module par utilisateur (son dossier personnel, sous son compte) et un par partage en écriture ; adresses dans la liste des utilisateurs.", "Ein Modul pro Benutzer (sein persönlicher Ordner, unter seinem Konto) und eines pro beschreibbarer Freigabe; Adressen in der Benutzerliste."],
@@ -625,7 +761,11 @@ const I18N = {
   "unclean RAIDiator shutdown, mirror checked since": ["arrêt brutal de RAIDiator, miroir vérifié depuis", "harter Abbruch unter RAIDiator, Spiegel seither geprüft"],
   "SMB file sharing": ["Partage de fichiers SMB", "SMB-Dateifreigabe"],
   "SMB3 encryption": ["Chiffrement SMB3", "SMB3-Verschlüsselung"],
-  "Off by default: this NAS encrypts without hardware help, which slows transfers a lot. Only useful on a network you do not trust; when on, a client that asks for encryption gets it. Signing stays automatic (Windows 11 24H2 requires it). SMB restarts when this is changed.": ["Désactivé par défaut : ce NAS chiffre sans aide matérielle, ce qui ralentit beaucoup les transferts. Utile seulement sur un réseau non fiable ; activé, un client qui demande le chiffrement l’obtient. La signature reste automatique (Windows 11 24H2 l’exige). SMB redémarre à chaque changement.", "Standardmäßig aus: dieses NAS verschlüsselt ohne Hardwarehilfe, was Übertragungen stark bremst. Nur in einem nicht vertrauenswürdigen Netz sinnvoll; eingeschaltet bekommt ein Client, der Verschlüsselung verlangt, sie auch. Die Signierung bleibt automatisch (Windows 11 24H2 verlangt sie). SMB startet bei jeder Änderung neu."],
+  "Off by default: this NAS encrypts without hardware help, which slows transfers a lot. Only useful on a network you do not trust; when on, a client that asks for encryption gets it. SMB restarts when this is changed.": ["Désactivé par défaut : ce NAS chiffre sans aide matérielle, ce qui ralentit beaucoup les transferts. Utile seulement sur un réseau non fiable ; activé, un client qui demande le chiffrement l’obtient. SMB redémarre à chaque changement.", "Standardmäßig aus: dieses NAS verschlüsselt ohne Hardwarehilfe, was Übertragungen stark bremst. Nur in einem nicht vertrauenswürdigen Netz sinnvoll; eingeschaltet bekommt ein Client, der Verschlüsselung verlangt, sie auch. SMB startet bei jeder Änderung neu."],
+  "SMB signing": ["Signature SMB", "SMB-Signierung"],
+  "Automatic (recommended)": ["Automatique (recommandé)", "Automatisch (empfohlen)"],
+  "Required (3× slower)": ["Exigée (3× plus lent)", "Verlangt (3× langsamer)"],
+  "Signing guards against tampering on the network, but this NAS computes it without hardware help: signed transfers are about 3 times slower. The client decides: Windows 11 24H2 and macOS ask for signing and get it, so they keep working; Linux (file manager, mount.cifs) does not by default and stays fast. Signing cannot be refused to a client that asks for it; “Required” makes every client sign. SMB restarts when this is changed.": ["La signature protège contre la falsification sur le réseau, mais ce NAS la calcule sans aide matérielle : un transfert signé est environ 3 fois plus lent. C’est le client qui décide : Windows 11 24H2 et macOS la demandent et l’obtiennent, ils continuent donc de fonctionner ; Linux (gestionnaire de fichiers, mount.cifs) ne la demande pas par défaut et reste rapide. La signature ne peut pas être refusée à un client qui la demande ; « Exigée » fait signer tous les clients. SMB redémarre à chaque changement.", "Die Signierung schützt vor Manipulation im Netz, aber dieses NAS berechnet sie ohne Hardwarehilfe: signierte Übertragungen sind etwa 3-mal langsamer. Der Client entscheidet: Windows 11 24H2 und macOS verlangen sie und bekommen sie, funktionieren also weiter; Linux (Dateimanager, mount.cifs) verlangt sie standardmäßig nicht und bleibt schnell. Einem Client, der die Signierung verlangt, kann sie nicht verweigert werden; „Verlangt“ lässt alle Clients signieren. SMB startet bei jeder Änderung neu."],
   "SSH access": ["Accès SSH", "SSH-Zugang"],
   "Root password": ["Mot de passe root", "Root-Passwort"],
   "empty = unchanged": ["vide = inchangé", "leer = unverändert"],
@@ -665,11 +805,11 @@ function translatePage(){
     const m = n.nodeValue.match(/^(\s*)([\s\S]*?)(\s*)$/), k = m[2].replace(/\s+/g, ' ');
     if(I18N[k]) n.nodeValue = m[1] + t(k) + m[3];
   }
-  document.querySelectorAll('[placeholder],[title],[data-q]').forEach(e=>{
-    for(const a of ['placeholder', 'title', 'data-q']){ const v = e.getAttribute(a); if(v && I18N[v]) e.setAttribute(a, t(v)); }
+  document.querySelectorAll('[placeholder],[title],[data-q],[aria-label]').forEach(e=>{
+    for(const a of ['placeholder', 'title', 'data-q', 'aria-label']){ const v = e.getAttribute(a); if(v && I18N[v]) e.setAttribute(a, t(v)); }
   });
 }
-let prev = null, last = null, timer = null, polls = 0, critText = '', warnText = '';
+let prev = null, last = null, timer = null, polls = 0, critText = '', warnText = '', alarmGo = 'storage';
 // Banner: serious alerts (RAID, failed disk) always stay visible; the SMART warning can be hidden
 // in this browser, and comes back as soon as its text changes (for example if the sector count grows).
 function banner(){
@@ -679,9 +819,21 @@ function banner(){
   $('#alarm').style.display = parts.length ? 'flex' : 'none';
   $('#alarmt').textContent = parts.join(' — ');
   $('#alarmx').style.display = showWarn ? '' : 'none';
+  $('#alarml').href = '#'+alarmGo; $('#alarml').textContent = t(alarmGo==='system' ? 'Open System' : 'Open Storage');
 }
 
-function toast(t){ const e=$('#toast'); e.textContent=t; e.classList.add('show'); clearTimeout(e._t); e._t=setTimeout(()=>e.classList.remove('show'),3200); }
+// Toast: role status (read politely); an error is an alert, stays 8 s or until clicked
+function toast(m, err){ const e=$('#toast'); e.setAttribute('role', err ? 'alert' : 'status'); e.textContent=m; e.classList.toggle('err', !!err); e.classList.add('show'); clearTimeout(e._t); e._t=setTimeout(()=>e.classList.remove('show'), err ? 8000 : 3200); }
+function toastErr(m){ toast(m, true); }
+$('#toast').onclick = ()=>$('#toast').classList.remove('show');
+// busyDo(button, fn): the button stays disabled while fn runs (no double send)
+async function busyDo(btn, fn){
+  if(btn.disabled) return; btn.disabled = true; btn.setAttribute('aria-busy', 'true');
+  try{ return await fn(); } finally{ btn.disabled = false; btn.removeAttribute('aria-busy'); }
+}
+// One rule for switches that restart or stop a service: they apply at once, after a
+// short confirmation naming that service (docs/DIET.md "Protections").
+function confirmRestart(svc){ return confirm(t('Apply now? {0} is restarted (or stopped): its open connections are cut.', svc)); }
 // numbers with the decimal comma or point of the language
 function num(x, d){ return (+x).toLocaleString(LANG, {minimumFractionDigits:d, maximumFractionDigits:d}); }
 function kb(k){ k=+k; if(k>=1073741824) return num(k/1073741824,2)+' '+t('TB'); if(k>=1048576) return num(k/1048576,1)+' '+t('GB'); if(k>=1024) return num(k/1024,0)+' '+t('MB'); return k+' '+t('kB'); }
@@ -730,20 +882,32 @@ function render(s){
   $('#sub').textContent = 'DIET ' + s.ver + ' · ' + (s.model || 'ReadyNAS');
 
 
-  const smartAl = [];
-  const bays = Array.from({length: s.bays || 2}, (_, i)=>{
-    const d = s.disks.find(x=>x.bay===i+1);
-    if(!d) return `<div class="bay"><span><span class="led"></span><b>${t('Bay {0}', i+1)}</b></span><span class="m">${t('empty')}</span></div>`;
-    const led = d.faulty ? 'bad' : 'on';
-    const sp = smartProblems(d.smart); if(sp.length) smartAl.push(t('bay {0}', i+1)+' ('+sp.join(', ')+')');
-    const sm = !d.smart ? '' : sp.length ? `<span style="color:#ff8a8a">${esc(sp.join(', '))}</span>` : `<span>SMART OK · ${esc(age(d.smart.hours))}</span>`;
-    return `<div class="bay"><span><span class="led ${led}"></span><b>${t('Bay {0}', i+1)}</b> · ${esc(d.dev)}</span><span class="m" title="${esc(d.model)}">${esc(d.model)}</span><span>${d.gb} ${t('GB')} · ${d.temp!=null ? d.temp+' °C' : '–'}${d.faulty ? ' · '+t('failed') : ''}</span>${sm}</div>`;
-  }).join('');
-  $('#bays').innerHTML = bays;
+  // bays: as many as the API gives (2 on the Duo, 4 on the NV+), else the highest bay seen
+  const smartAl = [], nb = s.bays || Math.max(0, ...s.disks.map(d=>d.bay)), front = [], rows = [];
+  for(let i = 1; i <= nb; i++){
+    const d = s.disks.find(x=>x.bay===i);
+    if(!d){
+      front.push(`<div class="bay"><span><span class="led" aria-hidden="true"></span><b>${t('Bay {0}', i)}</b></span><span class="m">${t('empty')}</span></div>`);
+      rows.push(`<div class="dk"><span><b>${t('Bay {0}', i)}</b> · <span class="small">${t('empty')}</span></span></div>`);
+      continue;
+    }
+    const led = d.faulty ? 'bad' : 'on';   // the state is also written: "failed", SMART text
+    const sp = smartProblems(d.smart); if(sp.length) smartAl.push(t('bay {0}', i)+' ('+sp.join(', ')+')');
+    const smt = !d.smart ? '' : sp.length ? sp.join(', ') : 'SMART OK · '+age(d.smart.hours);
+    const sm = !d.smart ? '' : sp.length ? `<span style="color:#ff8a8a">${esc(smt)}</span>` : `<span>${esc(smt)}</span>`;
+    const info = `${d.gb} ${t('GB')} · ${d.temp!=null ? d.temp+' °C' : '–'}${d.faulty ? ' · '+t('failed') : ''}`;
+    front.push(`<div class="bay"><span><span class="led ${led}" aria-hidden="true"></span><b>${t('Bay {0}', i)}</b> · ${esc(d.dev)}</span><span class="m" title="${esc(d.model)}">${esc(d.model)}</span><span>${info}</span>${sm}</div>`);
+    rows.push(`<div class="dk"><span><b>${t('Bay {0}', i)}</b> · ${esc(d.dev)} · ${esc(d.model)}<br><span class="small">${info}${smt ? ' · <span style="color:var(--'+(sp.length?'bad':'ok')+')">'+esc(smt)+'</span>' : ''}</span></span>
+      <button class="b" data-smart="${esc(d.dev)}" data-bay="${i}">${t('SMART report')}</button></div>`);
+  }
+  setHtml($('#bays'), front.join(''));
+  setHtml($('#dkl'), rows.join(''));
   const degraded = s.md.filter(m=>!mdOk(m)).map(m=>mdLabel(m)+(m.state?' ('+m.state+')':''));
   const fanStop = s.fan!=null && s.pwm>0 && s.fan<300;
   critText = [degraded.length ? t('RAID degraded: {0}', degraded.join(', ')) : '', fanStop ? t('Fan stopped? {0} rpm', s.fan) : ''].filter(Boolean).join(' — ');
   warnText = smartAl.length ? t('Disk to watch: {0}', smartAl.join(', ')) : '';
+  // the useful place: the storage page for the RAID and the disks, the fan settings otherwise
+  alarmGo = fanStop && !degraded.length && !smartAl.length ? 'system' : 'storage';
   banner();
 
   // Rates: NAS counters timestamped by its uptime (s.t, hundredths); the status comes
@@ -757,12 +921,17 @@ function render(s){
       $('#cpu').textContent = Math.round(cpu)+' %';
       $('#rx').textContent = rate((c.rx-p.rx)/dt); $('#tx').textContent = rate((c.tx-p.tx)/dt);
       $('#rd').textContent = rate((c.rd-p.rd)*512/dt); $('#wr').textContent = rate((c.wr-p.wr)*512/dt);
+    } else if(s.rate){   // first answer: rates the NAS computed since its previous sample
+      const r = s.rate;
+      $('#cpu').textContent = r.cpu+' %';
+      $('#rx').textContent = rate(r.rx); $('#tx').textContent = rate(r.tx);
+      $('#rd').textContent = rate(r.rd); $('#wr').textContent = rate(r.wr);
     }
     prev = {t: now, cnt: s.cnt};
   }
 
-  $('#tmp').textContent = (s.temp??'–')+' °C';
-  $('#fan').textContent = s.fan!=null ? s.fan : '–';
+  $('#tmp').textContent = s.temp!=null ? s.temp+' °C' : '…';
+  $('#fan').textContent = s.fan!=null ? s.fan+' '+t('rpm') : '…';
   $('#fan').title = t('rpm, level {0}/255', s.pwm);
   // This NAS kernel reports free + cache > total: simply count total - free (cache included), never negative.
   const used = Math.max(0, s.mem.total - (s.mem.avail || s.mem.free));
@@ -774,12 +943,14 @@ function render(s){
   $('#now').textContent = new Date(s.now*1000).toLocaleString(LANG);
 
   if(s.c.size){
-    const pct = 100*s.c.used/s.c.size;
+    const pct = 100*s.c.used/s.c.size, cls = 'bar'+(pct>95?' b':pct>85?' w':'');
     $('#cfree').textContent = kb(s.c.free);
     $('#cfreet').textContent = t('free of {0} · {1} % used', kb(s.c.size), pct.toFixed(0));
-    $('#cbar').style.width = pct.toFixed(1)+'%';
-    $('#cbarw').className = 'bar'+(pct>95?' b':pct>85?' w':'');
-  } else { $('#cfree').textContent = t('not mounted'); $('#cfreet').textContent=''; }
+    $('#vfree').textContent = kb(s.c.free)+' '+t('free of {0} · {1} % used', kb(s.c.size), pct.toFixed(0));
+    $('#cbar').style.width = $('#vbar').style.width = pct.toFixed(1)+'%';
+    $('#cbarw').className = $('#vbarw').className = cls;
+  } else { $('#cfree').textContent = $('#vfree').textContent = t('not mounted'); $('#cfreet').textContent=''; }
+  health();
 
   $('#md').innerHTML = s.md.map(m=>{
     const slots = [...(m.map||'')].map((c,i)=>`<span class="${c==='U'?'u':'f'}">${i+1}</span>`).join('');
@@ -790,13 +961,16 @@ function render(s){
 
   $('#ip').textContent = s.ip || '–';
   const names = {nfs:'NFS',ksmbd:'SMB',web:'Web',ssh:'SSH',ntpd:t('Time'),fan:t('Fan'),hwmon:t('Monitoring')};
-  $('#svc').innerHTML = Object.entries(s.svc).filter(([k,v])=>v||k!=='ntpd')
-    .map(([k,v])=>`<span class="chip"><span class="led ${v?'on':'dn'}"></span>${names[k]||k}</span>`).join('');
+  // green: running; red: stopped although it should run; grey: switched off on purpose (SVC_NFS=0)
+  $('#svc').innerHTML = Object.entries(s.svc).filter(([k,v])=>v||k!=='ntpd').map(([k,v])=>{
+    const off = !v && k==='nfs' && s.nfs_on===0, st = v ? '' : off ? t('disabled') : t('stopped');
+    return `<span class="chip"><span class="led ${v?'on':off?'':'dn'}" aria-hidden="true"></span>${names[k]||k}${st ? ' · '+st : ''}</span>`; }).join('');
+  $('#smbst').innerHTML = `<span class="chip"><span class="led ${s.svc.ksmbd?'on':'dn'}" aria-hidden="true"></span>${s.svc.ksmbd?t('running'):t('stopped')}</span>`;
   $('#upd').textContent = t('Updated {0}', new Date().toLocaleTimeString(LANG));
   nfsState(s.nfs_on);
+  busyUi(s.busy || []);
 
-  if(!$('#smartb').children.length)
-    $('#smartb').innerHTML = s.disks.map(d=>`<button class="b" data-smart="${esc(d.dev)}">${esc(d.dev)}</button>`).join('');
+  $('#mdl').hidden = !s.md.length;
   if(!$('#mdb').children.length)
     $('#mdb').innerHTML = s.md.map(m=>`<button class="b" data-md="${esc(m.name)}">${esc(m.name)}</button>`).join('');
 }
@@ -824,10 +998,35 @@ const NR = {rw_disabled:'writing disabled (switch “Allow writing on the X-RAID
   unclean_shutdown_verified:'unclean RAIDiator shutdown, mirror checked since', migration_in_progress:'migration to md in progress',
   no_sb_writer:'superblock writer (xraid-sb) missing: read-only only', sb_write_failed:'the superblock could not be marked “in use”'};
 const XRM = {'xraid-rw':'X-RAID, read and write', 'xraid-ro':'X-RAID, read-only', 'md':'md RAID', 'none':'no volume'};
+// Storage health, on the dashboard and the storage page: degraded (a member failed
+// or missing, an md array not complete) > rebuilding (N %) > read-only > OK.
+// Member counts from storage.layout (X-RAID), otherwise from the disks of the status.
+const MST = {online:'online', failed:'failed', missing:'missing', rebuilding:'rebuilding'};
+function health(){
+  if(!last) return;
+  const lay = stk && stk.layout, mem = lay ? lay.members : last.disks.map(d=>({state: d.faulty ? 'failed' : 'online'}));
+  const bad = mem.filter(m=>m.state==='failed' || m.state==='missing').length, inUse = mem.filter(m=>m.state==='online').length;
+  const mdBad = last.md.some(m=>!mdOk(m)), syncs = last.md.map(m=>m.sync).filter(Boolean);
+  const pct = lay && lay.rebuild!=null ? lay.rebuild : syncs.length ? parseInt((syncs[0].match(/([0-9]+)(\.[0-9]+)?%/)||[])[1]) : null;
+  const rebuilding = mem.some(m=>m.state==='rebuilding') || (lay && lay.rebuild!=null) || syncs.length;
+  let st, c;
+  if(!last.c.size){ st = t('not mounted'); c = 'bad'; }
+  else if(bad || mdBad){ st = t('Degraded'); c = 'bad'; }
+  else if(rebuilding){ st = pct!=null && !isNaN(pct) ? t('Rebuilding {0} %', pct) : t('Rebuilding'); c = 'warn'; }
+  else if(stk && stk.mode==='xraid-ro'){ st = t('Read-only'); c = 'warn'; }
+  else { st = t('OK'); c = 'ok'; }
+  const dsk = t('{0} disks in service / {1} failed', inUse, bad);
+  for(const e of [$('#hst'), $('#vst')]){ e.textContent = st; e.style.color = 'var(--'+c+')'; }
+  $('#hsd').textContent = $('#vdisks').textContent = dsk;
+}
+// innerHTML only when it changed: a refresh does not take the focus off a button
+function setHtml(e, h){ if(e._h !== h){ e._h = h; e.innerHTML = h; } }
+function progress(p){ return `<div class="bar"><i style="width:${Math.max(0, Math.min(100, +p||0))}%"></i></div>`; }
 async function loadStk(d){
   try{ stk = d !== undefined ? d : await get('storage'); }catch(e){ return; }
-  if(!stk || stk.mode==='absent'){ $('#xr').innerHTML=''; $('#xrb').innerHTML=''; return; }
-  const x = stk.xraid || {}, v = stk.verify || {};
+  health();
+  if(!stk || stk.mode==='absent'){ $('#xr').innerHTML=''; $('#xrb').innerHTML=''; $('#xrz').hidden = true; $('#xrtc').innerHTML=''; return; }
+  const x = stk.xraid || {}, v = stk.verify || {}, lay = stk.layout;
   const ok = stk.mode==='md' || stk.mode==='xraid-rw';
   let h = `<div class="row"><span>${t('Mode')}</span><b style="color:var(--${ok?'ok':'warn'})">${esc(t(XRM[stk.mode]||stk.mode))}</b></div>`;
   // reasons: xraid-info codes (English text, shown here in the page language), then the ones added by nas-raid
@@ -836,17 +1035,18 @@ async function loadStk(d){
   // disk comparison, mirror_differs, only runs at a rw mount)
   if(stk.mode!=='md'){ const shown = (x.reasons||[]).map(r=>r.code);
     (stk.reasons||'').split(' ').filter(r=>NR[r] || (XR[r] && !shown.includes(r))).forEach(r=>{ h += `<div>· ${esc(t(NR[r] || XR[r]))}</div>`; }); }
-  // superblock as RAIDiator sees it: clean-stop bit, disks, counters
-  if(stk.mode!=='md' && x.version){
-    h += `<div class="row"><span>${t('Superblock')}</span><span style="color:var(--${x.clean?'ok':'warn'})">${esc(t(x.clean ? 'clean' : 'in use or unclean shutdown'))}</span></div>`;
-    (x.disks||[]).forEach(d=>{ h += `<div class="row"><span>${esc(t('Bay {0}', d.channel+1))} · ${esc(d.path)} · ${esc(t(d.role||'?'))}</span><span style="color:var(--${d.state==='online'?'ok':'bad'})">${esc(t(d.state||'?'))}</span></div>`; });
-    h += `<div class="row"><span>${t('Disks')}</span><span>${esc(t('{0} working, {1} failed', x.working_disks, x.failed_disks))}</span></div>`;
+  if(stk.xraid_rw==='yes' && stk.mode==='xraid-ro') h += `<div style="color:var(--warn)">${t('writing requested, refused by the safeguards above')}</div>`;
+  // layout (API): level, then one line per bay with its generic role and its state
+  if(lay){
+    h += `<div class="row" style="margin-top:6px"><span>${t('Level')}</span><span>RAID ${esc(lay.level.replace(/^raid/, ''))}</span></div>`;
+    lay.members.forEach(m=>{ h += `<div class="row"><span>${esc(t('Bay {0}', m.bay))}${m.dev ? ' · '+esc(m.dev) : ''} · ${t('member disk')}</span><span style="color:var(--${m.state==='online'?'ok':m.state==='rebuilding'?'warn':'bad'})">${esc(t(MST[m.state]||m.state))}</span></div>`; });
+    if(lay.rebuild!=null) h += progress(lay.rebuild);
   }
-  if(stk.mode!=='md') (x.sections||[]).forEach((s,i)=>{ h += `<div class="row"><span>${t('Section {0}', i)}</span><span>${kb(s.sectors/2)} · ${s.init===0 ? t('sync unfinished') : t('in sync')}</span></div>`; });
   if(x.mirror || v.state!=='never'){
     const d = v.date ? new Date(v.date*1000).toLocaleDateString(LANG) : '';
     const vs = v.state==='running' ? t('running {0} %', v.progress ?? 0) : v.state==='ok' ? t('identical on {0}', d) : v.state==='differences' ? t('{0} zones differ', v.zones) : v.state==='errors' ? t('read errors') : t('never done');
-    h += `<div class="row"><span>${t('Mirror check')}</span><span style="color:var(--${v.state==='ok'?'ok':v.state==='never'||v.state==='running'?'mute':'bad'})">${esc(vs)}</span></div>`;
+    h += `<div class="row" style="margin-top:6px"><span>${t('Full consistency check')}</span><span style="color:var(--${v.state==='ok'?'ok':v.state==='never'||v.state==='running'?'mute':'bad'})">${esc(vs)}</span></div>`;
+    if(v.state==='running') h += progress(v.progress);
   }
   // quick check (nas-raid quick-verify): journals, metadata, samples
   const q = stk.quick || {}, qr = q.result || {};
@@ -858,37 +1058,57 @@ async function loadStk(d){
       : q.state==='differences' ? t('{0} differences ({1}): repair needed', qr.differences ?? '?', cats) : q.state==='incomplete' ? t('incomplete: file system not located') : t('read errors');
     const qc = q.state==='ok' ? 'ok' : q.state==='running' ? 'mute' : 'warn';
     h += `<div class="row"><span>${t('Quick check')}</span><span style="color:var(--${q.state==='differences'||q.state==='errors'?'bad':qc})">${esc(qs)}</span></div>`;
+    if(q.state==='running') h += progress(q.progress);
     if(qr.bytes && q.state!=='running') h += `<div class="small" style="text-align:right">${esc(t('{0} compared', kb(qr.bytes/1024)))}</div>`;
-    if(q.state==='running'){ clearTimeout(loadStk.tq); loadStk.tq = setTimeout(loadStk, 5000); }
+    if(q.state==='running' && document.visibilityState==='visible'){ clearTimeout(loadStk.tq); loadStk.tq = setTimeout(loadStk, 5000); }
   }
-  // writing switch (XRAID_RW in /etc/nas-raid.conf): X-RAID only; nas-raid has the last word
+  // Sensitive zone (folded, static <details> so that it stays open across refreshes):
+  // writing switch (XRAID_RW in /etc/nas-raid.conf, X-RAID only; nas-raid has the
+  // last word), "Accept the quick check…" (both keep their dialog: box + word) and
+  // what to do when the disks differ (nas-raid repair, docs/XRAID.md §5)
+  let z = '';
+  const busy = v.state==='running' || q.state==='running';
   if(stk.mode==='xraid-rw' || stk.mode==='xraid-ro'){
     const nosb = stk.sb_writer!=='yes';	// no superblock writer: rw cannot be granted
-    h += `<div class="row" style="margin-top:6px"><label><input type="checkbox" id="xrw" ${stk.xraid_rw==='yes'?'checked':''}${nosb?' disabled':''}> ${t('Allow writing on the X-RAID')}</label></div>`;
-    if(nosb) h += `<div style="color:var(--warn)">${t('superblock writer (xraid-sb) missing: read-only only')}</div>`;
-    if(stk.xraid_rw==='yes' && stk.mode==='xraid-ro') h += `<div style="color:var(--warn)">${t('writing requested, refused by the safeguards above')}</div>`;
+    z += `<div class="row"><label><input type="checkbox" id="xrw" ${stk.xraid_rw==='yes'?'checked':''}${nosb?' disabled':''}> ${t('Allow writing on the X-RAID')}</label></div>`;
+    if(nosb) z += `<div style="color:var(--warn)">${t('superblock writer (xraid-sb) missing: read-only only')}</div>`;
+  }
+  if(q.accept===1 && !busy) z += `<div class="btns" style="margin-top:8px"><button class="b danger" data-x="qaccept">${t('Accept the quick check…')}</button></div>`;
+  if(v.state==='differences' || q.state==='differences'){
+    h += `<div style="color:var(--bad);margin-top:6px">${t('The disks differ: see the sensitive zone below.')}</div>`;
+    z += `<div style="margin-top:6px">${t('To repair (copies the base disk onto the mirror where they differ), over SSH:')} <code>nas-raid repair --confirm REPAIR --yes</code>, ${t('then a full check (nas-raid verify) and a restart. Details: docs/XRAID.md §5.')}</div>`;
   }
   $('#xr').innerHTML = h;
+  $('#xrzc').innerHTML = z; $('#xrz').hidden = !z;
+  // technical details: superblock as RAIDiator sees it (clean-stop bit, counters,
+  // base and mirror roles of a RAID 1), sections
+  let tc = '';
+  if(stk.mode!=='md' && x.version){
+    tc += `<div class="row"><span>${t('Superblock')}</span><span style="color:var(--${x.clean?'ok':'warn'})">${esc(t(x.clean ? 'clean' : 'in use or unclean shutdown'))}</span></div>`;
+    const r1 = !lay || lay.level==='raid1';
+    (x.disks||[]).forEach(d=>{ tc += `<div class="row"><span>${esc(t('Bay {0}', d.channel+1))} · ${esc(d.path)}${r1 && d.role ? ' · '+esc(t(d.role)) : ''}</span><span style="color:var(--${d.state==='online'?'ok':'bad'})">${esc(t(d.state||'?'))}</span></div>`; });
+    tc += `<div class="row"><span>${t('Disks')}</span><span>${esc(t('{0} working, {1} failed', x.working_disks, x.failed_disks))}</span></div>`;
+  }
+  if(stk.mode!=='md') (x.sections||[]).forEach((s,i)=>{ tc += `<div class="row"><span>${t('Section {0}', i)}</span><span>${kb(s.sectors/2)} · ${s.init===0 ? t('sync unfinished') : t('in sync')}</span></div>`; });
+  $('#xrtc').innerHTML = tc;
   const b = [];
-  const busy = v.state==='running' || (stk.quick||{}).state==='running';
-  if(x.base && x.mirror && !busy) b.push(`<button class="b" data-x="verify">${t('Check the mirror')}</button>`, `<button class="b" data-x="quick">${t('Quick check')}</button>`);
-  if((stk.quick||{}).accept===1 && !busy) b.push(`<button class="b danger" data-x="qaccept">${t('Accept the quick check…')}</button>`);
+  if(x.base && x.mirror && !busy) b.push(`<button class="b" data-x="verify">${t('Check the volume consistency')}</button>`, `<button class="b" data-x="quick">${t('Quick check')}</button>`);
   b.push(`<button class="b" data-x="log">${t('Storage log')}</button>`);
-  $('#xrb').innerHTML = b.join('');
+  setHtml($('#xrb'), b.join(''));
 }
 // X-RAID writing switch: enabling = warning, tick box AND typed word; disabling = simple confirm
 const XRW_WORD = 'WRITE';
 async function xrwPost(body){
   toast(t('Remounting the /c volume…'));
-  try{ toast((await post('xraid_rw', body)).msg); }catch(e){ toast(t('Error: {0}', e.message)); }
+  try{ toast((await post('xraid_rw', body)).msg); }catch(e){ toastErr(t('Error: {0}', e.message)); }
   loadStk();
 }
 function xrwCheck(){ $('#xrwgo').disabled = !($('#xrwc').checked && $('#xrwi').value.trim() === XRW_WORD); }
-$('#xr').onchange = ev=>{
+$('#xrzc').onchange = ev=>{
   if(ev.target.id !== 'xrw') return;
   if(ev.target.checked){
     ev.target.checked = false;   // checked again by loadStk once nas-raid has answered
-    $('#xrwc').checked = false; $('#xrwi').value = ''; $('#xrwl').textContent = t('Type “{0}” to confirm:', XRW_WORD);
+    $('#xrwc').checked = false; $('#xrwi').value = ''; $('#xrwl').textContent = t('Type “{0}” to confirm (this word stays in English, in capitals):', XRW_WORD);
     xrwCheck(); $('#xrwd').showModal();
   } else {
     if(!confirm(t('Put the X-RAID back to read-only? The volume is unmounted and mounted again (SMB, NFS, DLNA, rsync and WebDAV stopped meanwhile).'))){ ev.target.checked = true; return; }
@@ -903,15 +1123,15 @@ const XQA_WORD = 'ACCEPT';
 function xqaCheck(){ $('#xqago').disabled = !($('#xqac').checked && $('#xqai').value.trim() === XQA_WORD); }
 $('#xqac').onchange = xqaCheck; $('#xqai').oninput = xqaCheck;
 $('#xqago').onclick = async ()=>{ $('#xqad').close();
-  try{ toast((await post('raid_quick_accept', 'confirm='+XQA_WORD+'&yes=1')).msg); }catch(e){ toast(t('Error: {0}', e.message)); } loadStk(); };
-$('#xrb').onclick = async ev=>{
+  try{ toast((await post('raid_quick_accept', 'confirm='+XQA_WORD+'&yes=1')).msg); }catch(e){ toastErr(t('Error: {0}', e.message)); } loadStk(); };
+$('#xrb').onclick = $('#xrzc').onclick = async ev=>{
   const a = ev.target.dataset.x; if(!a) return;
-  if(a==='verify'){ if(!confirm(t('Read both disks entirely and compare them (read-only, several hours)?'))) return;
-    try{ toast((await post('raid_verify')).msg); }catch(e){ toast(t('Error: {0}', e.message)); } setTimeout(loadStk, 2000); }
+  if(a==='verify'){ if(!confirm(t('Read the member disks entirely and compare them (read-only, several hours)?'))) return;
+    try{ toast((await post('raid_verify')).msg); }catch(e){ toastErr(t('Error: {0}', e.message)); } setTimeout(loadStk, 2000); }
   else if(a==='quick'){ if(!confirm(t('Quick check (1 to 3 minutes, read-only): compares the two disks where a power cut during a write most likely leaves them different (ext3 journals, file system and LVM metadata, partition table), plus random samples elsewhere. It does not prove the disks identical: file data written at the time of the cut may still differ outside these areas (only the full check reads everything). Start?'))) return;
-    try{ toast((await post('raid_quick')).msg); }catch(e){ toast(t('Error: {0}', e.message)); } setTimeout(loadStk, 2000); }
-  else if(a==='qaccept'){ $('#xqac').checked = false; $('#xqai').value = ''; $('#xqal').textContent = t('Type “{0}” to confirm:', XQA_WORD); xqaCheck(); $('#xqad').showModal(); }
-  else if(a==='log'){ $('#logf').value = 'storage'; document.querySelector('nav button[data-p=log]').click(); }
+    try{ toast((await post('raid_quick')).msg); }catch(e){ toastErr(t('Error: {0}', e.message)); } setTimeout(loadStk, 2000); }
+  else if(a==='qaccept'){ $('#xqac').checked = false; $('#xqai').value = ''; $('#xqal').textContent = t('Type “{0}” to confirm (this word stays in English, in capitals):', XQA_WORD); xqaCheck(); $('#xqad').showModal(); }
+  else if(a==='log'){ $('#logf').value = 'storage'; location.hash = 'logs'; }
 };
 
 // Answers prepared by the collector, read as static files (/cache/<key>.json, no
@@ -949,14 +1169,33 @@ document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState=
 
 $('#alarmx').onclick = ()=>{ try{ localStorage.setItem('dietWarnHidden', warnText); }catch(e){} banner(); };
 
-// Page switching
-document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
-  document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('act',x===b));
-  document.querySelectorAll('.page').forEach(p=>p.classList.toggle('act',p.id==='p-'+b.dataset.p));
-  if(b.dataset.p==='cfg'){ loadCfg(); loadSys(); loadUpd(); loadTok(); }
-  if(b.dataset.p==='shares'){ loadShares(); loadUsers(); loadNfs(); loadSvc(); }
-  if(b.dataset.p==='log') loadLog();
-});
+// Page switching: ARIA tabs (selected tab focusable, the others reached with the arrows,
+// Home, End); one address per page (#dashboard … #logs: deep links, Back button);
+// the last page is remembered in this browser; a page loads its data when it opens.
+const TABS = [...document.querySelectorAll('nav [role=tab]')], PAGES = TABS.map(b=>b.dataset.p);
+const LOAD = {
+  storage(){ loadStk(); loadCfg(); },
+  shares(){ loadShares(); loadNfs(); loadSvc(); loadSys(); },
+  users(){ loadUsers(); },
+  services(){ loadSvc(); loadSys(); loadTok(); },
+  system(){ loadCfg(); loadSys(); loadUpd(); },
+  logs(){ loadLog(); }
+};
+function tabState(b){ TABS.forEach(x=>{ const on = x===b; x.classList.toggle('act', on); x.setAttribute('aria-selected', on); x.tabIndex = on ? 0 : -1; }); }
+function show(p){
+  if(!PAGES.includes(p)) p = 'dashboard';
+  tabState(TABS[PAGES.indexOf(p)]);
+  document.querySelectorAll('.page').forEach(x=>x.classList.toggle('act', x.id==='p-'+p));
+  try{ localStorage.setItem('dietTab', p); }catch(e){}
+  if(LOAD[p]) LOAD[p]();
+}
+$('nav').onkeydown = ev=>{
+  const i = TABS.indexOf(document.activeElement); if(i<0) return;
+  const j = {ArrowRight:i+1, ArrowLeft:i-1, Home:0, End:TABS.length-1}[ev.key]; if(j==null) return;
+  ev.preventDefault(); const n = TABS[(j+TABS.length)%TABS.length]; n.focus(); n.click();
+};
+TABS.forEach(b=>b.onclick=()=>{ if(location.hash==='#'+b.dataset.p) show(b.dataset.p); else location.hash = b.dataset.p; });
+addEventListener('hashchange', ()=>show(location.hash.slice(1)));
 
 // Actions
 async function waitBack(text, expectOff){
@@ -969,7 +1208,24 @@ async function waitBack(text, expectOff){
   }
   $('#ovt').innerHTML = t('The NAS does not answer.<br><small>Check over SSH or reload the page later.</small>');
 }
+// Power menu (header, menu button): opening focuses the first usable item (the menu itself
+// when Restart and Power off are blocked, the reason is then shown and read); arrows, Home,
+// End move; Escape closes it back to the button; Tab or a click outside closes it.
+const PMB = $('#pmb'), PMP = $('#pmp'), PMI = [...PMP.querySelectorAll('[role=menuitem]')];
+function pmOpen(){ PMP.hidden = false; PMB.setAttribute('aria-expanded', 'true'); (PMI.find(x=>!x.disabled) || $('#pmm')).focus(); }
+function pmClose(back){ if(PMP.hidden) return; PMP.hidden = true; PMB.setAttribute('aria-expanded', 'false'); if(back) PMB.focus(); }
+PMB.onclick = ()=>PMP.hidden ? pmOpen() : pmClose(true);
+$('.pm').onkeydown = ev=>{
+  if(ev.key==='Escape'){ if(!PMP.hidden){ ev.preventDefault(); pmClose(true); } return; }
+  if(ev.key==='Tab'){ pmClose(); return; }
+  if(ev.target===PMB){ if(ev.key==='ArrowDown'){ ev.preventDefault(); pmOpen(); } return; }
+  const on = PMI.filter(x=>!x.disabled), i = on.indexOf(document.activeElement);
+  const j = {ArrowDown:i+1, ArrowUp:i-1, Home:0, End:on.length-1}[ev.key]; if(j==null || !on.length) return;
+  ev.preventDefault(); on[(j+on.length)%on.length].focus();
+};
+document.addEventListener('click', ev=>{ if(!ev.target.closest('.pm')) pmClose(); });
 document.querySelectorAll('[data-a]').forEach(b=>b.onclick=async()=>{
+  pmClose(true);
   if(b.dataset.q && !confirm(b.dataset.q)) return;
   b.disabled = true;
   try{
@@ -978,20 +1234,20 @@ document.querySelectorAll('[data-a]').forEach(b=>b.onclick=async()=>{
     if(b.dataset.a==='reboot') waitBack(t('Restarting…<br><small>The page will reload by itself.</small>'));
     else if(b.dataset.a==='poweroff') waitBack(t('Powering off.<br><small>Switch on again with the button on the device.</small>'), true);
     else poll();
-  }catch(e){ toast(t('Error: {0}', e.message)); }
-  b.disabled = false;
+  }catch(e){ toastErr(t('Error: {0}', e.message)); poll(); }
+  b.disabled = false; busyUi(busyNow);
 });
 
 // Settings
 async function loadCfg(){
-  try{ const c = await get('config'); for(const [k,v] of Object.entries(c)){ const i=$(`#cfg [name=${k}]`); if(i) i.value=v; } }
-  catch(e){ toast(t('Error: {0}', e.message)); }
+  try{ const c = await get('config'); for(const [k,v] of Object.entries(c)){ const i=$(`form.hw [name=${k}]`); if(i) i.value=v; } }
+  catch(e){ toastErr(t('Error: {0}', e.message)); }
 }
-$('#cfg').onsubmit = async ev=>{
+$('#cfg').onsubmit = $('#cfgd').onsubmit = async ev=>{
   ev.preventDefault();
-  const btn = ev.target.querySelector('button'); btn.disabled = true;
+  const btn = ev.target.querySelector('button[type=submit]'); btn.disabled = true;
   try{ const r = await post('config', new URLSearchParams(new FormData(ev.target)).toString()); toast(r.msg); }
-  catch(e){ toast(t('Not saved: {0}', e.message)); }
+  catch(e){ toastErr(t('Not saved: {0}', e.message)); }
   btn.disabled = false;
 };
 
@@ -1000,7 +1256,7 @@ const TZS = [['Paris, Brussels, Berlin, Madrid','CET-1CEST,M3.5.0,M10.5.0/3'],['
   ['Helsinki, Athens, Kyiv','EET-2EEST,M3.5.0/3,M10.5.0/4'],['UTC','UTC0'],['Montreal, New York','EST5EDT,M3.2.0,M11.1.0'],
   ['Chicago','CST6CDT,M3.2.0,M11.1.0'],['Denver','MST7MDT,M3.2.0,M11.1.0'],['Los Angeles, Vancouver','PST8PDT,M3.2.0,M11.1.0'],
   ['Tokyo','JST-9'],['Sydney','AEST-10AEDT,M10.1.0,M4.1.0/3']];
-function sysField(n){ return $('#sys [name='+n+']'); }
+function sysField(n){ return $(`#sys [name=${n}],#tg [name=${n}]`); }
 function sysMode(){ const st = sysField('net').value==='static'; document.querySelectorAll('#sys .st').forEach(e=>e.style.display = st ? '' : 'none'); }
 async function loadSys(){
   try{
@@ -1011,23 +1267,32 @@ async function loadSys(){
     sysField('tgtoken').value = '';
     sshInfo(c);
     $('#smbenc').checked = c.smbenc !== 'disabled';
+    $('#smbsign').value = c.smbsign === 'mandatory' ? 'mandatory' : 'auto';
     metrUi(c.metrics || 0);
     $('#tgs').textContent = c.tgset ? t('a token is saved; leave empty to keep it') : t('from @BotFather');
     sysMode();
-  }catch(e){ toast(t('Error: {0}', e.message)); }
+  }catch(e){ toastErr(t('Error: {0}', e.message)); }
 }
 $('#sys').onchange = ev=>{ if(ev.target.name==='net') sysMode(); };
-$('#sys').onsubmit = async ev=>{
+$('#sys').onsubmit = $('#tg').onsubmit = async ev=>{
   ev.preventDefault();
   if(sysField('net').value==='static' && !confirm(t('Switch to a static address? A wrong address would make the NAS unreachable after the reboot.'))) return;
   const body = ['host','lang','tz','net','ip','mask','gw','dns','tgtoken','tgchat'].map(k=>k+'='+encodeURIComponent(sysField(k).value.trim())).join('&');
-  try{ const r = await post('sys_set', body); toast(r.msg); loadSys(); }catch(e){ toast(t('Not saved: {0}', e.message)); }
+  busyDo(ev.target.querySelector('button[type=submit]'), async()=>{ try{ const r = await post('sys_set', body); toast(r.msg); loadSys(); }catch(e){ toastErr(t('Not saved: {0}', e.message)); } });
+};
+// SMB signing (server signing of [global] in ksmbd.conf: auto / mandatory)
+$('#smbsign').onchange = async ev=>{
+  const v = ev.target.value, old = v === 'auto' ? 'mandatory' : 'auto';
+  if(!confirmRestart('SMB')){ ev.target.value = old; return; }
+  try{ const r = await post('smb_sign', 'v='+v); toast(r.msg); }
+  catch(e){ ev.target.value = old; toastErr(t('Not saved: {0}', e.message)); }
 };
 // SMB3 encryption (smb3 encryption of [global] in ksmbd.conf: disabled / auto)
 $('#smbenc').onchange = async ev=>{
   const on = ev.target.checked;
+  if(!confirmRestart('SMB')){ ev.target.checked = !on; return; }
   try{ const r = await post('smb_enc', 'on='+(on ? 1 : 0)); toast(r.msg); }
-  catch(e){ ev.target.checked = !on; toast(t('Not saved: {0}', e.message)); }
+  catch(e){ ev.target.checked = !on; toastErr(t('Not saved: {0}', e.message)); }
 };
 // SSH access (root password, authorized keys)
 function sshInfo(c){
@@ -1036,11 +1301,11 @@ function sshInfo(c){
 $('#ssh').onsubmit = async ev=>{
   ev.preventDefault();
   const f = ev.target;
-  if(f.rootpw.value !== f.rootpw2.value){ toast(t('The two entries differ')); return; }
-  try{
+  if(f.rootpw.value !== f.rootpw2.value){ toastErr(t('The two entries differ')); return; }
+  busyDo(f.querySelector('button'), async()=>{ try{
     const r = await post('ssh_set', 'rootpw='+encodeURIComponent(f.rootpw.value)+'&key='+encodeURIComponent(f.key.value.trim()));
     toast(r.msg); f.reset(); loadSys();
-  }catch(e){ toast(t('Not saved: {0}', e.message)); }
+  }catch(e){ toastErr(t('Not saved: {0}', e.message)); } });
 };
 // API access tokens (docs/API.md): the value is shown once, after its creation
 async function loadTok(){
@@ -1049,23 +1314,23 @@ async function loadTok(){
     $('#tokl').innerHTML = l.length ? l.map(k=>`<div class="row tkrow" data-id="${esc(k.id)}" style="align-items:center;padding:6px 0;border-bottom:1px solid var(--line)">
       <span><b>${esc(k.name)}</b><br><span class="small">${k.perm==='full' ? t('full access') : t('read-only')} · ${t('created {0}', new Date(k.created*1000).toLocaleDateString(LANG))} · ${esc(k.id)}…</span></span>
       <button class="b danger" data-del="1">${t('Revoke')}</button></div>`).join('') : '<p class="small">'+t('No tokens.')+'</p>';
-  }catch(e){ toast(t('Error: {0}', e.message)); }
+  }catch(e){ toastErr(t('Error: {0}', e.message)); }
 }
 $('#tokl').onclick = async ev=>{
   if(!ev.target.dataset.del) return;
   const r = ev.target.closest('.tkrow');
   if(!confirm(t('Revoke the token “{0}”? Programs using it lose access at once.', r.querySelector('b').textContent))) return;
-  try{ const x = await post('token_del', 'id='+encodeURIComponent(r.dataset.id)); toast(x.msg); }catch(e){ toast(t('Error: {0}', e.message)); }
+  try{ const x = await post('token_del', 'id='+encodeURIComponent(r.dataset.id)); toast(x.msg); }catch(e){ toastErr(t('Error: {0}', e.message)); }
   loadTok();
 };
 $('#tokadd').onsubmit = async ev=>{
   ev.preventDefault();
   const f = ev.target, n = f.elements.namedItem('name'), p = f.elements.namedItem('perm');
-  try{
+  await busyDo(f.querySelector('button'), async()=>{ try{
     const x = await post('token_add', 'name='+encodeURIComponent(n.value.trim())+'&perm='+p.value);
     $('#toknew').innerHTML = esc(x.msg)+'<br><code style="user-select:all;word-break:break-all">'+esc(x.token)+'</code> <button class="b" type="button" style="padding:2px 8px" data-copy="'+esc(x.token)+'">'+t('Copy')+'</button>';
     $('#toknew').style.display = ''; f.reset();
-  }catch(e){ toast(t('Not saved: {0}', e.message)); }
+  }catch(e){ toastErr(t('Not saved: {0}', e.message)); } });
   loadTok();
 };
 // Prometheus metrics (METRICS of diet.conf: 0 off, 1 token, 2 without authentication)
@@ -1073,13 +1338,14 @@ function metrUi(m){ $('#metr').checked = m > 0; $('#metro').checked = m === 2; $
 async function metrSet(){
   const on = $('#metr').checked, open = on && $('#metro').checked;
   if(open && !confirm(t('Serve the metrics without authentication? Any device of the local network can then read them.'))){ $('#metro').checked = false; return; }
-  try{ const r = await post('metrics_set', 'on='+(on ? 1 : 0)+'&open='+(open ? 1 : 0)); toast(r.msg); }catch(e){ toast(t('Not saved: {0}', e.message)); }
+  if(!confirmRestart(t('the web server (this page reloads its data)'))){ loadSys(); return; }
+  try{ const r = await post('metrics_set', 'on='+(on ? 1 : 0)+'&open='+(open ? 1 : 0)); toast(r.msg); }catch(e){ toastErr(t('Not saved: {0}', e.message)); }
   loadSys();
 }
 $('#metr').onchange = metrSet; $('#metro').onchange = metrSet;
 $('#tgtest').onclick = async ev=>{
   ev.target.disabled = true;
-  try{ const r = await post('notify_test'); toast(r.msg); }catch(e){ toast(e.message); }
+  try{ const r = await post('notify_test'); toast(r.msg); }catch(e){ toastErr(e.message); }
   ev.target.disabled = false;
 };
 
@@ -1110,6 +1376,7 @@ async function loadUpd(){
   if(u.try) b.push(`<button class="b pri" data-u="reboot">${t('Restart to try it')}</button>`, `<button class="b" data-u="update_cancel">${t('Cancel the trial')}</button>`);
   else if(updOther && u.relay && u.running===u.active && !busy) b.push(`<button class="b" data-u="update_switch">${t('Switch to the other version')}</button>`);
   $('#updb').innerHTML = b.join('');
+  busyUi(busyNow);
   document.querySelectorAll('#updf button, #updu button').forEach(x=>{ x.disabled = busy || !u.stick; });
   if(busy) updT = setTimeout(loadUpd, 3000);
 }
@@ -1117,11 +1384,11 @@ $('#updb').onclick = async ev=>{
   const a = ev.target.dataset.u; if(!a) return;
   if(a==='reboot'){
     if(!confirm(t('Restart now?'))) return;
-    try{ await post('reboot'); waitBack(t('Restarting…<br><small>The page will reload by itself.</small>')); }catch(e){ toast(t('Error: {0}', e.message)); }
+    try{ await post('reboot'); waitBack(t('Restarting…<br><small>The page will reload by itself.</small>')); }catch(e){ toastErr(t('Error: {0}', e.message)); }
     return;
   }
   if(a==='update_switch' && !confirm(t('Try the other version ({0}) at the next restart? The settings of this NAS are copied into it.', updOther))) return;
-  try{ toast((await post(a)).msg); }catch(e){ toast(t('Error: {0}', e.message)); }
+  try{ toast((await post(a)).msg); }catch(e){ toastErr(t('Error: {0}', e.message)); }
   loadUpd();
 };
 // upload: XMLHttpRequest for the progress; the body is the package itself
@@ -1132,15 +1399,15 @@ $('#updf').onsubmit = ev=>{
   x.open('POST', API+'?a=update_upload&l='+LANG);
   x.setRequestHeader('X-Diet', '1'); x.setRequestHeader('Content-Type', 'application/octet-stream');
   x.upload.onprogress = e=>{ if(e.lengthComputable) $('#updi').textContent = t('Uploading… {0} %', Math.round(100*e.loaded/e.total)); };
-  x.onload = ()=>{ let m = x.responseText.trim(); try{ m = JSON.parse(m).msg; }catch(e){} toast(x.status===200 ? m : t('Error: {0}', m)); loadUpd(); };
-  x.onerror = ()=>{ toast(t('Error: {0}', t('no connection'))); loadUpd(); };
+  x.onload = ()=>{ let m = x.responseText.trim(); try{ m = JSON.parse(m).msg; }catch(e){} toast(x.status===200 ? m : t('Error: {0}', m), x.status!==200); loadUpd(); };
+  x.onerror = ()=>{ toastErr(t('Error: {0}', t('no connection'))); loadUpd(); };
   document.querySelectorAll('#updf button, #updu button').forEach(b=>{ b.disabled = true; });
   x.send(f);
 };
 $('#updu').onsubmit = async ev=>{
   ev.preventDefault(); const f = ev.target;
-  try{ toast((await post('update_url', 'url='+encodeURIComponent(f.url.value.trim())+'&sha='+encodeURIComponent(f.sha.value.trim().toLowerCase()))).msg); }
-  catch(e){ toast(t('Error: {0}', e.message)); }
+  await busyDo(f.querySelector('button'), async()=>{ try{ toast((await post('update_url', 'url='+encodeURIComponent(f.url.value.trim())+'&sha='+encodeURIComponent(f.sha.value.trim().toLowerCase()))).msg); }
+  catch(e){ toastErr(t('Error: {0}', e.message)); } });
   loadUpd();
 };
 
@@ -1154,14 +1421,16 @@ async function loadShares(){
         <label class="small"><input type="checkbox" data-k="ro" ${s.ro?'checked':''}> ${t('read-only')}</label>
         <label class="small"><input type="checkbox" data-k="guest" ${s.guest?'checked':''}> ${t('no password')}</label>
         <button class="b danger" data-del="1">${t('Remove')}</button></span></div>`).join('') : '<p class="small">'+t('No shares.')+'</p>';
-  }catch(e){ toast(t('Error: {0}', e.message)); }
+  }catch(e){ toastErr(t('Error: {0}', e.message)); }
 }
 async function shareDo(a, body){
-  try{ const r = await post(a, body); toast(r.msg || t('done')); }catch(e){ toast(t('Error: {0}', e.message)); }
-  loadShares();
+  let ok = false;
+  try{ const r = await post(a, body); toast(r.msg || t('done')); ok = true; }catch(e){ toastErr(t('Error: {0}', e.message)); }
+  loadShares(); return ok;
 }
 $('#shl').onchange = ev=>{
   const r = ev.target.closest('.shrow'); if(!r) return;
+  if(!confirmRestart('SMB')){ ev.target.checked = !ev.target.checked; return; }
   shareDo('share_set', 'name='+encodeURIComponent(r.dataset.name)+'&ro='+(r.querySelector('[data-k=ro]').checked?1:0)+'&guest='+(r.querySelector('[data-k=guest]').checked?1:0));
 };
 $('#shl').onclick = ev=>{
@@ -1169,7 +1438,9 @@ $('#shl').onclick = ev=>{
   const n = ev.target.closest('.shrow').dataset.name;
   if(confirm(t('Remove the share “{0}” from the network? The folder and its contents are kept.', n))) shareDo('share_del', 'name='+encodeURIComponent(n));
 };
-$('#shadd').onsubmit = ev=>{ ev.preventDefault(); const i = ev.target.querySelector('input'); shareDo('share_add', 'name='+encodeURIComponent(i.value.trim())); i.value=''; };
+// add forms: emptied only when the NAS accepted, button disabled while sending
+$('#shadd').onsubmit = ev=>{ ev.preventDefault(); const i = ev.target.querySelector('input');
+  busyDo(ev.target.querySelector('button'), async()=>{ if(await shareDo('share_add', 'name='+encodeURIComponent(i.value.trim()))) i.value=''; }); };
 
 // Users
 // WebDAV and rsync: same accounts; an account created earlier has no entry yet
@@ -1177,7 +1448,7 @@ function davInfo(u){
   if(!u.dav) return `<span class="small" style="color:var(--warn)">${t('set the password again to enable WebDAV/rsync')}</span>`;
   const h = esc(((last && last.host) || 'nas').toLowerCase())+'.local', n = esc(u.name);
   const cp = v => `<code class="small">${v}</code> <button class="b" style="padding:2px 8px" data-copy="${v}">${t('Copy')}</button>`;
-  return `<span class="small">WebDAV/rsync : ${t('active')}</span><div class="btns small" style="margin-top:4px;align-items:center">${cp(`https://${h}/webdav/${n}/`)} ${cp(`rsync -av ${esc(t('folder'))}/ ${n}@${h}::${n}/`)}</div>`;
+  return `<span class="small">${t('WebDAV/rsync:')} ${t('active')}</span><div class="btns small" style="margin-top:4px;align-items:center">${cp(`https://${h}/webdav/${n}/`)} ${cp(`rsync -av ${esc(t('folder'))}/ ${n}@${h}::${n}/`)}</div>`;
 }
 document.addEventListener('click', ev=>{
   const v = ev.target.dataset && ev.target.dataset.copy; if(v==null) return;
@@ -1189,11 +1460,12 @@ async function loadUsers(){
     $('#usl').innerHTML = l.length ? l.map(u=>`<div class="row usrow" data-name="${esc(u.name)}" style="align-items:center;padding:6px 0;border-bottom:1px solid var(--line)">
       <span><b>${esc(u.name)}</b>${u.smb ? '' : ' <span class="small">· '+t('no SMB password')+'</span>'}<br>${davInfo(u)}</span>
       <span class="btns">${u.uid >= 1000 ? '<button class="b danger" data-del="1">'+t('Delete')+'</button>' : '<span class="small">'+t('system account')+'</span>'}</span></div>`).join('') : '<p class="small">'+t('No users.')+'</p>';
-  }catch(e){ toast(t('Error: {0}', e.message)); }
+  }catch(e){ toastErr(t('Error: {0}', e.message)); }
 }
 async function userDo(a, body){
-  try{ const r = await post(a, body); toast(r.msg || t('done')); }catch(e){ toast(t('Error: {0}', e.message)); }
-  loadUsers();
+  let ok = false;
+  try{ const r = await post(a, body); toast(r.msg || t('done')); ok = true; }catch(e){ toastErr(t('Error: {0}', e.message)); }
+  loadUsers(); return ok;
 }
 $('#usl').onclick = ev=>{
   if(!ev.target.dataset.del) return;
@@ -1202,13 +1474,27 @@ $('#usl').onclick = ev=>{
 };
 $('#usadd').onsubmit = ev=>{
   ev.preventDefault(); const f = ev.target;
-  userDo('user_set', 'name='+encodeURIComponent(f.querySelector('[name=name]').value.trim())+'&pw='+encodeURIComponent(f.querySelector('[name=pw]').value)); f.reset();
+  busyDo(f.querySelector('button'), async()=>{
+    if(await userDo('user_set', 'name='+encodeURIComponent(f.querySelector('[name=name]').value.trim())+'&pw='+encodeURIComponent(f.querySelector('[name=pw]').value))) f.reset(); });
 };
 
 // NFS exports; NFS switched off in the Services card: notice, "Restart NFS" disabled
 function nfsState(on){
-  $('#nfoff').textContent = on===0 ? t('NFS service stopped: the exports are kept and applied when it is started again (Services card).') : '';
+  $('#nfoff').textContent = on===0 ? t('NFS service stopped: the exports are kept and applied when it is started again.') : '';
   $('[data-a=nfsd]').disabled = on===0;
+}
+// Protections: while an update, a mirror check or a RAID repair runs (status.busy,
+// same test as the API), Restart, Power off, "Restart to try it" and "Switch to the
+// other version" are disabled with the reason; the API refuses them anyway (409).
+const BUSYT = {update:'a system update is being installed', verify:'a full consistency check is running',
+  quick:'a quick consistency check is running', sync:'a RAID resync or repair is running'};
+let busyNow = [];
+function busyUi(b){
+  busyNow = b;
+  const w = b.map(c=>t(BUSYT[c] || c)).join(', ');
+  const msg = b.length ? t('Restart, power off and switching version are blocked: {0}. Wait until it ends; in an emergency, the power button of the device (hold 3 s) or the API with force=1 (docs/API.md).', w) : '';
+  for(const e of [$('#busyw'), $('#busyu')]){ e.hidden = !b.length; e.textContent = msg; }
+  document.querySelectorAll('[data-a=reboot],[data-a=poweroff],[data-u=reboot],[data-u=update_switch]').forEach(x=>{ x.disabled = !!b.length; x.title = w; });
 }
 async function loadNfs(){
   try{
@@ -1216,11 +1502,12 @@ async function loadNfs(){
     $('#nfl').innerHTML = l.length ? l.map(x=>`<div class="row nfrow" data-path="${esc(x.path)}" data-client="${esc(x.client)}" style="align-items:center;padding:8px 0;border-bottom:1px solid var(--line)">
       <span><b>${esc(x.path)}</b> → ${esc(x.client)}<br><span class="small">${esc(x.opts)}${x.exists ? '' : ' · '+t('folder missing')}</span></span>
       <span class="btns"><button class="b danger" data-del="1">${t('Remove')}</button></span></div>`).join('') : '<p class="small">'+t('No exports.')+'</p>';
-  }catch(e){ toast(t('Error: {0}', e.message)); }
+  }catch(e){ toastErr(t('Error: {0}', e.message)); }
 }
 async function nfsDo(a, body){
-  try{ const r = await post(a, body); toast(r.msg || t('done')); }catch(e){ toast(t('Error: {0}', e.message)); }
-  loadNfs();
+  let ok = false;
+  try{ const r = await post(a, body); toast(r.msg || t('done')); ok = true; }catch(e){ toastErr(t('Error: {0}', e.message)); }
+  loadNfs(); return ok;
 }
 $('#nfl').onclick = ev=>{
   if(!ev.target.dataset.del) return;
@@ -1229,17 +1516,18 @@ $('#nfl').onclick = ev=>{
 };
 $('#nfadd').onsubmit = ev=>{
   ev.preventDefault(); const f = ev.target;
-  nfsDo('nfs_add', 'path='+encodeURIComponent(f.path.value.trim())+'&client='+encodeURIComponent(f.client.value.trim())+'&ro='+(f.ro.checked?1:0));
+  busyDo(f.querySelector('button'), async()=>{
+    if(await nfsDo('nfs_add', 'path='+encodeURIComponent(f.path.value.trim())+'&client='+encodeURIComponent(f.client.value.trim())+'&ro='+(f.ro.checked?1:0))){ f.client.value = ''; f.ro.checked = false; } });
 };
 
 // Services: MiniDLNA, Avahi, rsync, WebDAV, NFS (on/off kept across reboots)
 async function loadSvc(){
-  let s; try{ s = await get('services'); }catch(e){ toast(t('Error: {0}', e.message)); return; }
+  let s; try{ s = await get('services'); }catch(e){ toastErr(t('Error: {0}', e.message)); return; }
   const h = esc(s.host)+'.local', d = s.minidlna, r = s.rsync;
   if(s.nfs) nfsState(s.nfs.on);
   const row = (k, title, on, run, body) => `<div data-s="${k}" style="padding:10px 0;border-bottom:1px solid var(--line)">
     <div class="row" style="align-items:center"><b>${title}</b><span class="btns" style="align-items:center">
-      <span class="chip"><span class="led ${run?'on':on?'dn':''}"></span>${run?t('running'):t('stopped')}</span>
+      <span class="chip"><span class="led ${run?'on':on?'dn':''}" aria-hidden="true"></span>${run?t('running'):on?t('stopped'):t('disabled')}</span>
       <label class="small"><input type="checkbox" data-on ${on?'checked':''}> ${t('enabled')}</label></span></div>
     <div class="small" style="margin-top:6px">${body}</div></div>`;
   const inp = 'class="inp" style="flex:1;min-width:200px"';
@@ -1247,36 +1535,38 @@ async function loadSvc(){
   if(d.db!=null) info += (info?' · ':'')+t('database {0}', kb(d.db/1024));
   $('#svl').innerHTML =
     row('minidlna', 'MiniDLNA (DLNA/UPnP)', d.on, d.run, `${esc(info)}
-      <div class="btns" style="margin-top:6px"><input ${inp} id="dlname" maxlength="40" value="${esc(d.name)}" title="${t('Name shown on players')}"></div>
-      <textarea class="inp" id="dldirs" rows="3" spellcheck="false" style="width:100%;margin-top:6px;font:12.5px ui-monospace,monospace">${esc(d.dirs.join('\n'))}</textarea>
+      <div class="btns" style="margin-top:6px"><input ${inp} id="dlname" maxlength="40" value="${esc(d.name)}" title="${t('Name shown on players')}" aria-label="${t('Name shown on players')}"></div>
+      <textarea class="inp" id="dldirs" aria-label="${t('MiniDLNA folders')}" rows="3" spellcheck="false" style="width:100%;margin-top:6px;font:12.5px ui-monospace,monospace">${esc(d.dirs.join('\n'))}</textarea>
       ${t('One folder per line, under /c; optional prefix A, (audio) V, (video) or P, (images), for example V,/c/movies.')}
       <div class="btns" style="margin-top:6px"><button class="b pri" data-b="dlna_set">${t('Save')}</button><button class="b" data-b="dlna_scan" ${d.on?'':'disabled'}>${t('Rescan')}</button></div>`) +
     row('avahi', 'Avahi (Bonjour)', s.avahi.on, s.avahi.run, t('Announces {0} on the local network (SMB, web interface, WebDAV, SSH, rsync); the name follows the NAS name.', h)) +
     row('rsync', 'rsync', r.on, r.run, `${t('One module per user (their personal folder, under their account) and one per writable share; addresses in the user list.')}
       <div style="margin-top:6px"><label><input type="checkbox" data-rc ${r.c?'checked':''}> ${t('Module “c”: all of /c for the administrator’s “sauvegarde” account (as root)')}</label></div>
       ${r.c ? `<div>${r.pw ? t('Account “sauvegarde”: password set.') : t('Account “sauvegarde”: no password, access denied.')}</div>
-      <div class="btns" style="margin-top:6px"><input ${inp} type="password" id="rspw" minlength="6" autocomplete="new-password" placeholder="${t('password (6 characters min.)')}">
+      <div class="btns" style="margin-top:6px"><input ${inp} type="password" id="rspw" aria-label="${t('Password of the “sauvegarde” account')}" minlength="6" autocomplete="new-password" placeholder="${t('password (6 characters min.)')}">
         <button class="b" data-b="rsync_pw">${t('Set the password')}</button></div>
       <div class="btns" style="margin-top:6px;align-items:center"><code>rsync -av ${esc(t('folder'))}/ sauvegarde@${h}::c/sauvegardes/</code>
         <button class="b" data-copy="rsync -av ${esc(t('folder'))}/ sauvegarde@${h}::c/sauvegardes/">${t('Copy')}</button></div>` : ''}`) +
-    row('webdav', 'WebDAV', s.webdav.on, s.webdav.run, `${t('Addresses:')} <b>https://${h}/webdav/&lt;${t('user')}&gt;/</b> ${t('(personal folder)')} · <b>https://${h}/webdav/&lt;${t('share')}&gt;/</b><br>${t('User accounts (not the one of this interface); files are created under the “nas” account.')}`) +
-    (s.nfs ? row('nfs', 'NFS', s.nfs.on, s.nfs.run, t('Kernel NFS server (v3 and v4); the exports are edited in the “NFS exports” card, also while the service is stopped.')) : '');
+    row('webdav', 'WebDAV', s.webdav.on, s.webdav.run, `${t('Addresses:')} <b>https://${h}/webdav/&lt;${t('user')}&gt;/</b> ${t('(personal folder)')} · <b>https://${h}/webdav/&lt;${t('share')}&gt;/</b><br>${t('User accounts (not the one of this interface); files are created under the “nas” account.')}`);
+  $('#nfsvc').innerHTML = s.nfs ? row('nfs', t('NFS service'), s.nfs.on, s.nfs.run, t('Kernel NFS server (v3 and v4); the exports below can be edited also while the service is stopped.')) : '';
 }
 async function svcDo(a, body){
-  try{ const r = await post(a, body); toast(r.msg || t('done')); }catch(e){ toast(t('Error: {0}', e.message)); }
-  setTimeout(loadSvc, a==='svc_set' ? 2500 : 300);
+  let ok = false;
+  try{ const r = await post(a, body); toast(r.msg || t('done')); ok = true; }catch(e){ toastErr(t('Error: {0}', e.message)); }
+  setTimeout(loadSvc, a==='svc_set' ? 2500 : 300); return ok;
 }
-$('#svl').onchange = ev=>{
+$('#svl').onchange = $('#nfsvc').onchange = ev=>{
   if('rc' in ev.target.dataset){ svcDo('rsync_c', 'on='+(ev.target.checked?1:0)); return; }
   if(!('on' in ev.target.dataset)) return;
   const k = ev.target.closest('[data-s]').dataset.s;
+  if(!confirmRestart(ev.target.closest('[data-s]').querySelector('b').textContent)){ ev.target.checked = !ev.target.checked; return; }
   svcDo('svc_set', 's='+k+'&on='+(ev.target.checked?1:0));
 };
 $('#svl').onclick = ev=>{
   const a = ev.target.dataset.b; if(!a) return;
-  if(a==='dlna_set') svcDo(a, 'name='+encodeURIComponent($('#dlname').value.trim())+'&dirs='+encodeURIComponent($('#dldirs').value));
-  else if(a==='dlna_scan'){ if(confirm(t('Erase the database and rescan everything? This can take a long time.'))) svcDo(a); }
-  else if(a==='rsync_pw'){ const p = $('#rspw'); svcDo(a, 'pw='+encodeURIComponent(p.value)); p.value=''; }
+  if(a==='dlna_set') busyDo(ev.target, ()=>svcDo(a, 'name='+encodeURIComponent($('#dlname').value.trim())+'&dirs='+encodeURIComponent($('#dldirs').value)));
+  else if(a==='dlna_scan'){ if(confirm(t('Erase the database and rescan everything? This can take a long time.'))) busyDo(ev.target, ()=>svcDo(a)); }
+  else if(a==='rsync_pw'){ const p = $('#rspw'); busyDo(ev.target, async()=>{ if(await svcDo(a, 'pw='+encodeURIComponent(p.value))) p.value=''; }); }
 };
 
 // Logs
@@ -1286,20 +1576,23 @@ async function loadLog(){
   catch(e){ $('#logo').textContent = t('Error: {0}', e.message); }
 }
 $('#logf').onchange = loadLog; $('#logr').onclick = loadLog;
-$('#smartb').onclick = async ev=>{
+$('#dkl').onclick = async ev=>{
   const d = ev.target.dataset.smart; if(!d) return;
-  $('#logo').textContent = t('reading SMART of bay {0}…', ev.target.textContent);
-  try{ $('#logo').textContent = await get('smart&d='+d, true); }catch(e){ $('#logo').textContent=t('Error: {0}', e.message); }
+  const o = $('#smo'); o.hidden = false;
+  o.textContent = t('reading SMART of bay {0}…', ev.target.dataset.bay);
+  try{ o.textContent = await get('smart&d='+d, true); }catch(e){ o.textContent=t('Error: {0}', e.message); }
 };
 $('#mdb').onclick = async ev=>{
   const d = ev.target.dataset.md; if(!d) return;
-  $('#logo').textContent = t('reading the state of {0}…', d);
-  try{ $('#logo').textContent = await get('md&d='+d, true); }catch(e){ $('#logo').textContent=t('Error: {0}', e.message); }
+  const o = $('#mdo'); o.hidden = false;
+  o.textContent = t('reading the state of {0}…', d);
+  try{ o.textContent = await get('md&d='+d, true); }catch(e){ o.textContent=t('Error: {0}', e.message); }
 };
 
 if(LANG !== 'en') translatePage();
-$('#lang').value = LANG;
-$('#lang').onchange = ev=>{ try{ localStorage.setItem('dietLang', ev.target.value); }catch(e){} location.reload(); };
+$('#lang').value = $('#lang2').value = LANG;
+$('#lang').onchange = $('#lang2').onchange = ev=>{ try{ localStorage.setItem('dietLang', ev.target.value); }catch(e){} location.reload(); };
+{ let p = location.hash.slice(1); if(!PAGES.includes(p)){ try{ p = localStorage.getItem('dietTab'); }catch(e){} } show(p); }
 poll();
 </script>
 </body>

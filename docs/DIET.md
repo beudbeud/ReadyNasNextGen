@@ -30,7 +30,7 @@ in `package/diet/src/`, laid out as on the target system.
    user `admin`) does not exist, `/` redirects to `/cgi-bin/setup`, a page served
    without authentication that asks for the administrator password, the NAS name
    and, optionally, a root password and an SSH public key (see below). Later:
-   **Settings → SSH access**, or `diet-webpass` over SSH for the web password.
+   **System → SSH access**, or `diet-webpass` over SSH for the web password.
 
 ### First setup: how it is protected
 
@@ -59,7 +59,7 @@ in `package/diet/src/`, laid out as on the target system.
   [comment]` (no options such as `command=`), appended once to
   `/root/.ssh/authorized_keys` (directory 700, file 600). dropbear keeps refusing
   empty passwords (no `-B`).
-- `POST ?a=ssh_set` (`rootpw`, `key`) does the same from **Settings → SSH
+- `POST ?a=ssh_set` (`rootpw`, `key`) does the same from **System → SSH
   access**, authenticated; `GET ?a=sys` gives `rootpw` (0/1) and `keys` (count).
 
 ## What changes compared with the old DIET
@@ -78,7 +78,7 @@ in `package/diet/src/`, laid out as on the target system.
 | Time | `ntpd -q` at boot | `ntpd` in the background + "Update the time" button |
 | Log | `/var/log/boot.log` | `/var/log/diet.log`, `/var/log/messages` (syslog), `dmesg` |
 
-What is kept: the same tabs, the fr/de/en languages (page and
+What is kept: the fr/de/en languages (page and
 messages, `/etc/diet-lang`), Telegram notifications (token and
 ID entered in the interface, stored in `/etc/diet-notify.conf`
 on the NAS, never in the image), disk standby, LEDs
@@ -89,9 +89,44 @@ Removed: everything specific to X-RAID, Samba 3.6, RAIDiator
 (`zu-raidiator`, `init-weiche`, `install-weiche`), the flash, the LCD screen
 (not on the Duo), `rsyncd`, LVM and `diet-import`.
 
-## SMB3 encryption (Settings page)
+## Organisation of the page
 
-"SMB file sharing" card: the **SMB3 encryption** switch writes `smb3 encryption` in
+One page, seven sections, each with its own address (`#dashboard`, `#storage`,
+`#shares`, `#users`, `#services`, `#system`, `#logs`): links can point at a section,
+the Back button of the browser goes to the previous one, the last section
+opened is remembered in this browser (`localStorage`, `dietTab`). The tab bar
+is an ARIA tablist (arrows, Home, End); below 520 px it becomes a grid of
+4 + 3 tabs. The header holds, right of the interface language menu, the
+**power menu** (⋮ button, `aria-haspopup="menu"`/`aria-expanded`): Restart and
+Power off with their confirmations and [protections](#protections) (disabled
+with the reason while `busy` is not empty), and the reminder about the power
+button. Opening it focuses the first usable item (arrows, Home, End move);
+Escape closes it back to the button, Tab or a click outside closes it. There
+is no log-out entry: the browser keeps the web login (HTTP authentication). A section loads its data when it is opened; the refresh policy is
+unchanged (see [Speed](#speed-collector-and-cache): status every 15 s from `/cache/`, nothing
+while the browser tab is hidden).
+
+| Section | Content |
+|---|---|
+| Dashboard | reading and harmless actions only: front of the NAS (one slot per bay given by the API: 2 on the Duo, 4 on the NV+), **Storage health** (OK / read-only / degraded / rebuilding N %, disks in service and failed, free space, read/write rates, link to Storage), **System** (CPU, temperature, fan in rpm, memory, history), **Network** (rates, service chips). The alarm banner (above the tabs, on every section) links to the section where something can be done (Storage, or System for the fan). |
+| Storage | **Volume /c**: state, mode and its reasons, level and member disks (from `storage.layout`, see docs/API.md), full and quick consistency checks with their progress, "Storage log" (opens Logs on that log); folded **Sensitive zone** (X-RAID writing switch, accepting a quick check, repair instructions); folded **Technical details** (superblock, base/mirror roles of a RAID 1, counters, sections, `mdadm --detail`). **Disks**: one line per bay with its SMART report, spin-down delay, "Spin down disks". |
+| Shares | **Network shares (SMB)**: SMB service state, shares, SMB3 encryption. **NFS exports**: NFS on/off, exports. |
+| Users | accounts (SMB, WebDAV and rsync password, WebDAV/rsync addresses). |
+| Services | MiniDLNA, Avahi, rsync, WebDAV; Prometheus metrics; API access tokens. |
+| System | General (name, time zone, system language and interface language, network), Telegram notifications, hardware (fan, temperature thresholds), SSH access, system update and versions, maintenance (restart SMB/NFS, update the time). Restart / Power off are in the power menu of the header. |
+| Logs | one log at a time: DIET, system (`messages`), kernel (`dmesg`), storage, update; "Reload". Loaded when the section opens. |
+
+Labels are generic, whatever the number of disks ("member disk", "check the
+volume consistency", "N disks in service / M failed"); "base" and "mirror"
+only appear in the technical details of a RAID 1. Every text of the page has
+its French and German translation in `I18N`: `test-api.sh` checks the texts
+of the markup, every `t('…')` of the script and the tables passed to `t()`.
+Screenshots (1280 and 390 px, light and dark) are made with headless Chrome
+on a fake API and are not kept in the repository.
+
+## SMB3 encryption (Shares page)
+
+"Network shares (SMB)" card: the **SMB3 encryption** switch writes `smb3 encryption` in
 the `[global]` section of `/etc/ksmbd/ksmbd.conf` (`POST ?a=smb_enc`, `on=0|1`,
 `X-Diet` header): `disabled` (shipped: the 280 MHz CPU encrypts without
 hardware help, which caps transfers far below the disks) or `auto` (a client
@@ -99,12 +134,41 @@ that asks for encryption gets it). Only that line changes (temporary file then
 `mv`, `.bak` copy; comments and share sections kept); a ksmbd.conf without the
 key (older installs: ksmbd default `auto`, shown as on) gets it at the end of
 `[global]`. ksmbd is then restarted (global settings are read at start).
-`server signing = auto` is not touched: Windows 11 24H2 requires signing.
 `GET ?a=sys` gives the value (`smbenc`).
+
+## SMB signing (Shares page)
+
+Same card, **SMB signing** selector: `server signing` in `[global]`
+(`POST ?a=smb_sign`, `v=auto|mandatory`, `X-Diet` header; written and ksmbd
+restarted as for the encryption, journal line `SMB: server signing = …`).
+`GET ?a=sys` gives `smbsign` (`auto` or `mandatory`).
+
+What ksmbd 6.18 + ksmbd-tools 3.5.2 really do (`fs/smb/server/smb2pdu.c`,
+`ksmbd.conf(5)`): the negotiate answer always offers signing
+(`SIGNING_ENABLED`); only `mandatory` adds `SIGNING_REQUIRED`. Every other
+value (`auto`, `disabled`, `enabled`, key missing) behaves the same: a session
+is signed exactly when the client requires it, and a signed request always
+gets a signed answer. So the client decides, and **signing cannot be turned off
+on the server**; `disabled` is not offered (it would change nothing, and a
+`disabled` already in the file is shown as `auto`).
+
+| Client (default settings) | `auto` (shipped) | `mandatory` |
+|---|---|---|
+| Windows 11 24H2 (requires signing) | connects, signed | connects, signed |
+| macOS (requires signing) | connects, signed | connects, signed |
+| Linux libsmbclient / GNOME Files, `smbclient` (`client signing = default` = if required) | connects, **unsigned** | connects, signed |
+| Linux `mount.cifs` (no `sign` option) | connects, **unsigned** | connects, signed |
+
+Signing is AES-CMAC computed by the CPU: about 2.2 MiB/s signed against
+7–9 MiB/s unsigned (docs/DEVELOPMENT.md). A Linux PC that still gets signed
+transfers with `auto` asks for them itself: `client signing` /
+`client protection` / `client min protocol` in `/etc/samba/smb.conf` or
+`~/.smb/smb.conf` (`desired`, `required`, `sign`), the `sign` option of
+`mount.cifs`, or `/proc/fs/cifs/SecurityFlags`.
 
 ## Services
 
-"Services" card of the Shares tab (API: `GET ?a=services`,
+Services page; the NFS on/off is in the "NFS exports" card of the Shares page (API: `GET ?a=services`,
 `POST ?a=svc_set|dlna_set|dlna_scan|rsync_pw|rsync_c`, `X-Diet` header required).
 
 | Service | What the interface sets | Files |
@@ -113,7 +177,7 @@ key (older installs: ksmbd default `auto`, shown as on) gets it at the end of
 | Avahi | on/off; the announced name (`<name>.local`) follows the NAS name (avahi is restarted when it changes) | `/etc/avahi/services/*.service` |
 | rsync | on/off; user accounts (see below); administrator module `[c]` (all of `/c`, as root, account `sauvegarde`) **only if checked** (`RSYNC_C=1`), with its password and the command `rsync -av folder/ sauvegarde@<name>.local::c/backups/` | `/etc/rsyncd.conf` (generated), `/etc/rsyncd.secrets` (600) |
 | WebDAV | on/off of the `S51webdav` instance; addresses `https://<name>.local/webdav/<user>/` and `/webdav/<share>/` | `/etc/lighttpd/webdav.conf` (generated), `/etc/lighttpd/htpasswd-users` |
-| NFS | on/off of the kernel NFS server (`S60nfs`: statd, nfsd, mountd; running = nfsd threads in `/proc/fs/nfsd/threads`). Stopped: the "NFS exports" card says so and stays editable (`/etc/exports` written, `exportfs` not run: read again at start); "Restart NFS" of the Overview is disabled (`nfs_on` in `?a=status`, refused with 409) | `/etc/exports` |
+| NFS | on/off of the kernel NFS server (`S60nfs`: statd, nfsd, mountd; running = nfsd threads in `/proc/fs/nfsd/threads`). Stopped: the "NFS exports" card says so and stays editable (`/etc/exports` written, `exportfs` not run: read again at start); "Restart NFS" (System → Maintenance) is disabled (`nfs_on` in `?a=status`, refused with 409) | `/etc/exports` |
 
 State: running or stopped; for MiniDLNA, the number of indexed files
 (audio, video, images) read from its status page `http://127.0.0.1:8200/status` (no
@@ -133,7 +197,7 @@ then `avahi-daemon -r`).
 
 ### WebDAV and rsync: local accounts
 
-The users of the Shares tab have a single password for SMB,
+The users of the Users page have a single password for SMB,
 WebDAV and rsync. When the API creates an account or changes its password
 (`user_set`, password in the POST body), it writes it in one go:
 ksmbd (`ksmbd.adduser`, standard input), `/etc/lighttpd/htpasswd-users`
@@ -186,7 +250,7 @@ as its uid if free); an account created earlier switches to it when its password
 is set again. Refused names: those of a system group (`audio`, `video`,
 `users`…), `sauvegarde`, `nas`, `c`, `home`, `webdav`, `root`.
 
-## System update (Settings page)
+## System update (System page)
 
 The USB stick holds two **system slots**: `rootfs-6.18` (the first install) and
 `rootfs-b`. One is active; the other holds the previous (or the next) version.
@@ -242,7 +306,7 @@ add-on 1.0 afterwards would no longer boot 6.18 (RAIDiator starts).
 
 Written: only the stick that holds `/` (checked: ext2/3/4 on a USB disk, mounted a second
 time in `/var/run/nas-update/`), never the data disks nor the flash. Log:
-`/var/lib/nas-update/log` (Logs page, “Update log”).
+`/var/lib/nas-update/log` (Logs, “Update log”).
 
 ## Storage: writing to the X-RAID
 
@@ -275,7 +339,7 @@ disabled for now: `POST ?a=raid_plan|raid_run` answer 409
 
 ### Checking the mirror after a crash
 
-- **Check the mirror** (`POST ?a=raid_verify`): full comparison, 10–12 h.
+- **Check the volume consistency** (`POST ?a=raid_verify`): full comparison, 10–12 h.
 - **Quick check** (`POST ?a=raid_quick`, background `nas-raid quick-verify`,
   1 to 3 minutes, docs/XRAID.md §5.1): compares the ext3 journals, the file
   system and LVM metadata, the partition table and random samples. The
@@ -293,6 +357,33 @@ disabled for now: `POST ?a=raid_plan|raid_run` answer 409
   quick-accept --confirm ACCEPT --yes` (what a successful full check does:
   marker removed, superblock clean). Refused (400) without the word or the
   box, 409 if nas-raid refuses.
+
+## Protections
+
+- **Restart, power off, trying another version.** `POST ?a=reboot`,
+  `?a=poweroff` and `?a=update_switch` answer **409** with the reason while:
+  a system update job runs (nas-update state `busy` with its process alive),
+  a full or quick mirror check runs (`/var/lib/nas-raid/verify.state` or
+  `quick.state` = `running`, started during this boot), or an md
+  resync/recovery/check/repair shows in `/proc/mdstat` (`nas-raid repair`).
+  `force=1&confirm=FORCE` overrides it (logged in the DIET log; docs/API.md).
+  The same test fills `busy` in `GET ?a=status` (`update`, `verify`, `quick`,
+  `sync`): the page then disables Restart, Power off, "Restart to try it" and
+  "Switch to the other version" and says why; the power button of the device
+  (hold 3 s) still works.
+- **Sensitive zone.** "Allow writing on the X-RAID" and "Accept the quick
+  check…" are in a folded "Sensitive zone" of the Storage card, under a
+  warning; their dialogs (box and typed word, which stays in English) are
+  unchanged. When a check finds differences, the card gives the repair
+  command (`nas-raid repair --confirm REPAIR --yes`, docs/XRAID.md §5).
+- **One saving rule.** A form (shares, users, NFS, tokens, settings) is saved
+  with its button; the button is disabled while the request runs and the
+  fields are emptied only when the NAS accepted. A switch that restarts or
+  stops a service (SMB3 encryption, share options, Prometheus, the Services
+  switches) applies at once after a short confirmation naming that service;
+  cancelling puts the switch back.
+- Errors stay on screen 8 s (or until clicked) and are announced to screen
+  readers (`role=alert`); other messages are polite (`role=status`).
 
 ## Speed: collector and cache
 
@@ -370,12 +461,12 @@ the kernel. So:
 lighttpd serves it as `https://<nas>/metrics`. No Grafana or exporter on the
 NAS: Prometheus (and Grafana) run elsewhere and scrape it.
 
-**Setting** (Settings → Prometheus metrics, `METRICS` in `/etc/diet.conf`):
+**Setting** (Services → Prometheus metrics, `METRICS` in `/etc/diet.conf`):
 
 | | `/metrics` |
 |---|---|
 | off (default, `METRICS=0`) | 403; the collector writes nothing |
-| with authentication (`1`, recommended) | `Authorization: Bearer <token>`: a read-only token from Settings → API access tokens (docs/API.md). lighttpd rewrites `/metrics` to the API (`/cgi-bin/v1?a=metrics`), which checks the token and sends the file with `exec cat` (one CGI start and one `sha256sum` per scrape) |
+| with authentication (`1`, recommended) | `Authorization: Bearer <token>`: a read-only token from Services → API access tokens (docs/API.md). lighttpd rewrites `/metrics` to the API (`/cgi-bin/v1?a=metrics`), which checks the token and sends the file with `exec cat` (one CGI start and one `sha256sum` per scrape) |
 | without authentication (`2`, explicit box) | the file served as a **static file** by lighttpd, no CGI; any device of the local network can read it (the private networks rule still applies) |
 
 The rule is written by `S50lighttpd metricsconf` (`include_shell` in
