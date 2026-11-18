@@ -229,6 +229,12 @@ api GET a=status
 check "status: valid JSON" "json 'True'"
 check "status: healthy RAID1 UU" "json 'j[\"md\"][0][\"map\"]==\"UU\" and j[\"md\"][0][\"level\"]==\"raid1\"'"
 check "status: 2 disks, drivetemp, bays" "json '[d[\"temp\"] for d in j[\"disks\"]]==[38,41] and [d[\"bay\"] for d in j[\"disks\"]]==[1,2]'"
+# the system USB stick, named before the SATA disks (seen on the NAS: sda): never a bay
+USBD="$R/sys/devices/pci0000:00/0000:00:17.2/usb1/1-3/1-3:1.0/host0/target0:0:0/0:0:0:0"
+mkdir -p "$USBD" "$R/sys/block/sd0"; echo "USB Flash Drive" > "$USBD/model"; ln -s "$USBD" "$R/sys/block/sd0/device"
+api GET a=status
+check "status: the USB stick is not listed as a disk (no bay)" "json '[d[\"dev\"] for d in j[\"disks\"]]==[\"sda\",\"sdb\"] and [d[\"bay\"] for d in j[\"disks\"]]==[1,2]'"
+rm -rf "$R/sys/block/sd0"; api GET a=status
 check "status: fan (padre-fan)" "json 'j[\"temp\"]==45 and j[\"fan\"]==1800 and j[\"pwm\"]==120 and j[\"svc\"][\"fan\"]==1'"
 check "status: services" "json 'j[\"svc\"][\"ksmbd\"]==1 and j[\"svc\"][\"nfs\"]==1 and j[\"svc\"][\"ntpd\"]==0 and j[\"svc\"][\"hwmon\"]==0'"
 check "status: /c and memory" "json 'j[\"c\"][\"size\"]==1922000000 and j[\"mem\"][\"avail\"]==180000 and j[\"ip\"]==\"10.0.0.2\"'"
@@ -535,6 +541,21 @@ check "svc_set nfs 1: S60nfs start, nfs on and running" 'grep -q "S60nfs start" 
 check "services: nfs on and running" "json 'j[\"nfs\"]=={\"on\":1,\"run\":1}'"
 api POST a=nfsd ''
 check "Restart NFS allowed again" '[ "$ST" = 200 ] && grep -q "S60nfs restart" "$R"/cmd.log'
+
+# SMB on/off (Services card): SVC_SMB in diet.conf, honoured by S70ksmbd at start
+: > "$R"/cmd.log
+api POST a=svc_set 's=smb&on=0'
+check "svc_set smb 0: SVC_SMB=0 in diet.conf, S70ksmbd stop" '[ "$ST" = 200 ] && grep -q "^SVC_SMB=0" "$R"/etc/diet.conf && grep -q "S70ksmbd stop" "$R"/cmd.log'
+api GET a=services
+check "services: smb off" "json 'j[\"smb\"][\"on\"]==0'"
+api GET a=status
+check "status: smb_on 0 (the page shows SMB as disabled, not failed)" "json 'j[\"smb_on\"]==0'"
+o=$(sed "s#/etc/#$R/etc/#g; s#/var/#$R/var/#g" "$BOARD/etc/init.d/S70ksmbd" | PATH="$R/bin:$PATH" sh -s start)
+check "S70ksmbd start with SVC_SMB=0: does not start ksmbd" 'case "$o" in *disabled*) true;; *) false;; esac'
+api POST a=svc_set 's=smb&on=1'
+check "svc_set smb 1: SVC_SMB=1, S70ksmbd start" '[ "$ST" = 200 ] && grep -q "^SVC_SMB=1" "$R"/etc/diet.conf && grep -q "S70ksmbd start" "$R"/cmd.log'
+api GET a=services
+check "services: smb on and running" "json 'j[\"smb\"]=={\"on\":1,\"run\":1}'"
 
 # ---------- storage: X-RAID (compatibility) and md, through nas-raid ----------
 # real nas-raid and xraid-info built for the host, on fake X-RAID images

@@ -22,6 +22,7 @@ while true; do
 	if [ $((N % 5)) -eq 0 ]; then
 		for b in $R/sys/block/sd*; do
 			d=${b##*/}; [ -d "$b" ] || continue
+			case "$(readlink -f "$b/device")" in */usb[0-9]*) continue;; esac	# the system stick
 			if [ -x $R/usr/sbin/smartctl ]; then
 				out=$($R/usr/sbin/smartctl -n standby -H -A /dev/$d 2>/dev/null)
 				echo "$out" | grep -q STANDBY && continue

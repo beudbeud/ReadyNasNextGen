@@ -1,7 +1,9 @@
 #!/bin/sh
-# Starts ksmbd (in-kernel SMB server) with ksmbd-tools.
+# Starts ksmbd (in-kernel SMB server) with ksmbd-tools; not when SVC_SMB=0 in
+# /etc/diet.conf (switched off from the DIET interface).
 case "$1" in
 start)
+	grep -qs '^SVC_SMB=0' /etc/diet.conf && { echo "ksmbd: disabled (/etc/diet.conf)"; exit 0; }
 	mkdir -p /c /var/run
 	printf "Starting ksmbd: "
 	ksmbd.mountd && echo OK || echo FAIL

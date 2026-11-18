@@ -446,6 +446,8 @@ const I18N = {
   "A SMART report wakes the disk.": ["Un rapport SMART réveille le disque.", "Ein SMART-Bericht weckt die Platte."],
   "SMB service": ["Service SMB", "SMB-Dienst"],
   "NFS service": ["Service NFS", "NFS-Dienst"],
+  "SMB service": ["Service SMB", "SMB-Dienst"],
+  "Windows, macOS and Linux file sharing; shares and SMB settings in the Shares tab.": ["Partage de fichiers Windows, macOS et Linux ; partages et réglages SMB dans l’onglet Partages.", "Dateifreigabe für Windows, macOS und Linux; Freigaben und SMB-Einstellungen im Reiter Freigaben."],
   "NFS service stopped: the exports are kept and applied when it is started again.": ["Service NFS arrêté : les exports sont gardés et appliqués à son redémarrage.", "NFS-Dienst gestoppt: die Exporte bleiben erhalten und gelten beim nächsten Start."],
   "Kernel NFS server (v3 and v4); the exports below can be edited also while the service is stopped.": ["Serveur NFS du noyau (v3 et v4) ; les exports ci-dessous restent modifiables quand le service est arrêté.", "NFS-Server des Kernels (v3 und v4); die Exporte unten bleiben auch bei gestopptem Dienst änderbar."],
   "Interface language": ["Langue de l’interface", "Sprache der Oberfläche"],
@@ -963,9 +965,9 @@ function render(s){
   const names = {nfs:'NFS',ksmbd:'SMB',web:'Web',ssh:'SSH',ntpd:t('Time'),fan:t('Fan'),hwmon:t('Monitoring')};
   // green: running; red: stopped although it should run; grey: switched off on purpose (SVC_NFS=0)
   $('#svc').innerHTML = Object.entries(s.svc).filter(([k,v])=>v||k!=='ntpd').map(([k,v])=>{
-    const off = !v && k==='nfs' && s.nfs_on===0, st = v ? '' : off ? t('disabled') : t('stopped');
+    const off = !v && ((k==='nfs' && s.nfs_on===0) || (k==='ksmbd' && s.smb_on===0)), st = v ? '' : off ? t('disabled') : t('stopped');
     return `<span class="chip"><span class="led ${v?'on':off?'':'dn'}" aria-hidden="true"></span>${names[k]||k}${st ? ' · '+st : ''}</span>`; }).join('');
-  $('#smbst').innerHTML = `<span class="chip"><span class="led ${s.svc.ksmbd?'on':'dn'}" aria-hidden="true"></span>${s.svc.ksmbd?t('running'):t('stopped')}</span>`;
+  $('#smbst').innerHTML = `<span class="chip"><span class="led ${s.svc.ksmbd?'on':s.smb_on===0?'':'dn'}" aria-hidden="true"></span>${s.svc.ksmbd?t('running'):s.smb_on===0?t('disabled'):t('stopped')}</span>`;
   $('#upd').textContent = t('Updated {0}', new Date().toLocaleTimeString(LANG));
   nfsState(s.nfs_on);
   busyUi(s.busy || []);
@@ -1534,6 +1536,7 @@ async function loadSvc(){
   let info = d.files ? t('Indexed files: {0} audio, {1} video, {2} images', ...d.files) : '';
   if(d.db!=null) info += (info?' · ':'')+t('database {0}', kb(d.db/1024));
   $('#svl').innerHTML =
+    (s.smb ? row('smb', t('SMB service'), s.smb.on, s.smb.run, t('Windows, macOS and Linux file sharing; shares and SMB settings in the Shares tab.')) : '') +
     row('minidlna', 'MiniDLNA (DLNA/UPnP)', d.on, d.run, `${esc(info)}
       <div class="btns" style="margin-top:6px"><input ${inp} id="dlname" maxlength="40" value="${esc(d.name)}" title="${t('Name shown on players')}" aria-label="${t('Name shown on players')}"></div>
       <textarea class="inp" id="dldirs" aria-label="${t('MiniDLNA folders')}" rows="3" spellcheck="false" style="width:100%;margin-top:6px;font:12.5px ui-monospace,monospace">${esc(d.dirs.join('\n'))}</textarea>
