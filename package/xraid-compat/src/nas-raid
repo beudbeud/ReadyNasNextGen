@@ -17,6 +17,9 @@
 #   nas-raid quick-accept                  after a quick check without difference on
 #                                          an unclean superblock: accepted as a full
 #                                          check would be (--confirm ACCEPT --yes)
+#   nas-raid decide                        mode a mount would give now ("rw" or "ro"
+#                                          + reasons), read-only (the web API remounts
+#                                          /c read-write once a check lifts a safeguard)
 #   nas-raid repair                        copies the base onto the mirror (md repair)
 #   nas-raid watch                         read-write X-RAID: a failed leg is recorded
 #                                          in the superblock, /c goes read-only (S35storage)
@@ -31,7 +34,7 @@
 # becomes two dm-linear (base, mirror) assembled by "mdadm --build" (RAID 1
 # without metadata); the partitions of the base disk are mapped by dm-linear
 # onto these md; LVM (VG c) then /c mounted by the kernel (ext3 with 16 KiB
-# blocks: ext4 driver, 16 KiB pages since linux/0003).
+# blocks: ext4 driver, 16 KiB pages since linux/0020).
 #
 # Tests on a PC: NAS_RAID_ROOT prefixes /proc, /var, /etc and puts
 # $NAS_RAID_ROOT/bin first in PATH; NAS_RAID_DISKS replaces the list of
@@ -532,6 +535,7 @@ remount) lock; legacy_state; do_remount ;;
 verify) lock; legacy_state; verify ;;
 quick-verify) lock; legacy_state; quick_verify ;;
 quick-accept) lock; legacy_state; quick_accept ;;
+decide) legacy_state; analyse; decide; echo "$MODE${WHY:+ $WHY}" ;;
 repair) lock; legacy_state; repair ;;
 watch) watch ;;
 migrate|create|add|grow) md_disabled ;;

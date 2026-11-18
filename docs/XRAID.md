@@ -185,7 +185,7 @@ Only one `nas-raid` action at a time (lock).
 - Do not reassemble the md by hand with `--assume-clean`.
 - The ext3 with 16 KiB blocks is mounted by the kernel's ext4 driver: this
   needs pages at least as large as the blocks, hence the 16 KiB pages of the
-  Padre kernel (patch `linux/0003`, like the stock 2.6.17 kernel). Before,
+  Padre kernel (patch `linux/0020`, like the stock 2.6.17 kernel). Before,
   fuse2fs (user space) read 3.3 MiB/s and wrote ~110 KB/s; the kernel reads
   11.8 MiB/s (200 MiB, cold cache, disks in PIO). ext4 does not add any
   ext4 feature to an ext3 it mounts: RAIDiator can still read it. A journal
@@ -279,6 +279,12 @@ Decision (`nas-raid quick-verify`, same lock and log as `verify`; state in
   `mirror_differs` at the next rw attempt): repair needed as today (§5).
 - `incomplete` or `errors`: nothing is lifted.
 - the X-RAID mounted read-write: the result is informative, nothing is lifted.
+
+In DIET, with writing switched on (`XRAID_RW=yes`), `/c` does not wait for the
+next mount: after a full check, a quick check that lifted the marker, or an
+acceptance, the API asks `nas-raid decide` (read-only: the mode a mount would
+give now) and, if it answers `rw`, stops the services that use `/c`, runs
+`nas-raid remount` and starts them again (`auto_rw` in `cgi-bin/api`).
 
 **Volume and duration on the NAS** (750 GB disks, estimates: the
 geometry of the data volume was not read on the NAS; `xraid-info quick
