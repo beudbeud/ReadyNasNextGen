@@ -132,7 +132,7 @@ setup** page, without login, to choose:
 - optionally, for **SSH** (user `root`): a root password and/or your public key (for example
   the contents of `~/.ssh/id_ed25519.pub`). SSH refuses root as long as it has neither (its
   password is empty and dropbear refuses empty passwords). Both can be set later in
-  **Settings → SSH access**.
+  **System → SSH access**.
 
 The page answers only once: as soon as the administrator password is saved, it is gone and
 the whole interface asks for the password. Set it up right after the first boot, and only
@@ -149,7 +149,7 @@ sudo umount /mnt
 ### Updating
 
 `make update-package` builds `readynasng-update-<version>.tar` (and its `.sha256`) from
-`output-rapide/images`. In the web interface, **Settings → System update**: upload it (or
+`output-rapide/images`. In the web interface, **System → System update**: upload it (or
 give its GitHub release address and SHA-256), then **Restart to try it**. The new version
 goes into the second system slot of the stick with the settings of this NAS; if it does not
 start completely (cut the power if it hangs), the next power-on goes back to the current
@@ -199,7 +199,9 @@ Unplug the stick and restart: RAIDiator starts. With the stick plugged in, RAIDi
 `touch /.relay_skip_once` in 6.18. Never relay again: `touch /relay/disabled` on the system
 volume (from RAIDiator over SSH), or install `ReadyNasNextGen_relay_remove_<version>.bin` the
 same way as the relay add-on: it puts the previous `/sbin/init` back and deletes `/relay`.
-The flash memory, where the original firmware lives, is never modified.
+The flash memory, where the original firmware lives, is never modified: **the flash is never
+written**. A read-only backup of it from Linux 6.18 is shelved for now
+([docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#nand-flash-read-only-backup-shelved)).
 
 **Never write to the flash** (`iboot` NAND write commands, `/dev/mtd*`): a corrupted flash
 makes the NAS unusable without recovery hardware.
