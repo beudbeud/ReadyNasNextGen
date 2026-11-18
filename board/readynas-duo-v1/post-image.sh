@@ -32,7 +32,10 @@ echo "   vmlinux.bin: $size bytes (max $((0x81000000 - 0x80004000)))"
 
 echo "-- forbidden instructions (sdiv/sdivcc: wrong on Padre; casa: missing)"
 "${X}objdump" -d --no-show-raw-insn "$B/vmlinux" > "$BUILD_DIR/vmlinux.dis"
-if grep -E '[[:space:]](sdiv|sdivcc|casa)[[:space:]]' "$BUILD_DIR/vmlinux.dis"; then
+# "sdiv …, %g0" is skipped: its result is thrown away (so the Padre bug cannot
+# matter), no compiler emits it, and jump tables in .init.text whose entries
+# are kernel addresses 0x8079xxxx-0x807fxxxx decode exactly as that
+if grep -E '[[:space:]](sdiv|sdivcc|casa)[[:space:]]' "$BUILD_DIR/vmlinux.dis" | grep -Ev '[[:space:]]sdiv[[:space:]].*, %g0$'; then
 	echo "ERROR: forbidden instruction in vmlinux"
 	exit 1
 fi
