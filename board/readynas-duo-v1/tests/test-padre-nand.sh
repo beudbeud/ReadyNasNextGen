@@ -32,7 +32,7 @@ check "pn_op: interrupts off, USB (EHCI) stopped before PCI goes off, PCI_FEATUR
 
 # host build of the block between host-test-begin and host-test-end
 {
-	printf '#include <stdio.h>\n#include <string.h>\n#include <stdlib.h>\ntypedef unsigned char u8;\ntypedef int bool;\n'
+	printf '#include <stdio.h>\n#include <string.h>\n#include <stdlib.h>\n#include <stdbool.h>\ntypedef unsigned char u8;\n'
 	sed -n '/host-test-begin/,/host-test-end/p' "$C"
 	cat <<'EOF'
 static int fails;
