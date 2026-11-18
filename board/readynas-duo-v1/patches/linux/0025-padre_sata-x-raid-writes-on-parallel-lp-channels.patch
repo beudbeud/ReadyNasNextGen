@@ -1,0 +1,146 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 25/27] padre_sata: X-RAID writes on parallel LP channels
+
+The driver let only one port at a time have a list on the List Processor
+(lp_owner + ATA_DEFER_PORT), so the two halves of every RAID 1 write went
+to the disks one after the other, and the deferred port only retried
+after a SCSI host-busy requeue.
+
+The LP firmware does not need this: it runs one state machine per channel
+and, for a list without the "meta" flag (this driver never sets it), only
+touches that channel's SATA block, MC FIFO, DJ route and interrupt bit.
+Only "meta" lists (the 2.6.17 X-RAID multi-disk commands) wait on the
+other disks.
+
+New run-time switch padre_sata.lp_parallel (default 1; 0 = previous
+behaviour): 1 lets each port have its own list in flight. The owner
+pointer becomes a per-port busy mask; descriptors and commands are
+unchanged. Any LP timeout or DMA error sets lp_parallel back to 0.
+dma_overlap counts the lists started while the other port had one.
+---
+ drivers/platform/padre/padre_sata.c | 56 ++++++++++++++++++++++++++++++-------
+ 1 file changed, 46 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/platform/padre/padre_sata.c b/drivers/platform/padre/padre_sata.c
+index cd8ea3288b8d0798a0cc27ccfbfb90cf988884be..bb02cdd50a3d3d3050ef7b25544a3f49ed318f4a 100644
+--- a/drivers/platform/padre/padre_sata.c
++++ b/drivers/platform/padre/padre_sata.c
+@@ -276,8 +276,10 @@ static int padre_hardreset(struct ata_link *link, unsigned int *class,
+  * and its README §9. One command = one list: head descriptor (sop) with
+  * READ/WRITE DMA EXT for the TOTAL sector count + 1st segment, then one
+  * descriptor per segment (words 4-7 zero), eop|intr0 on the last one.
+- * Completion: IRQ 44, acknowledged by LP+0x14 = LP+0x10. The LP serves one
+- * channel at a time (qc_defer). Firmware loaded by head_32.S (like 2.6.17).
++ * Completion: IRQ 44, acknowledged by LP+0x14 = LP+0x10. By default the
++ * LP serves one channel at a time (qc_defer); lp_parallel=1 lets each
++ * channel run its own list at the same time (see below). Firmware loaded by
++ * head_32.S (like 2.6.17).
+  */
+ #define LP(o)		((void __iomem *)(PADRE_APB + 0x1000 + (o)))
+ #define LP_STAT		0x000		/* low byte: 1 = READY */
+@@ -322,6 +324,19 @@ MODULE_PARM_DESC(dma, "1 = DMA through the List Processor after self-test (defau
+ static unsigned long dma_cmds;	/* commands served by the LP */
+ module_param(dma_cmds, ulong, 0444);
+ 
++/* The LP firmware keeps one state machine per channel and, for a list
++ * without the "meta" flag (ours never set it), only touches that channel's
++ * SATA block, MC FIFO and DJ route: two lists can run together. 1 (default)
++ * = one list per channel in flight; 0 = one list at a time on the LP.
++ * Writable at run time; forced back to 0 on any LP timeout or DMA error
++ * (reads and mirror writes compared byte for byte on the NAS).
++ */
++static bool lp_parallel = true;
++module_param(lp_parallel, bool, 0644);
++MODULE_PARM_DESC(lp_parallel, "1 = both channels may have a list on the LP at once (default 1)");
++static unsigned long dma_overlap;	/* lists started while another one ran */
++module_param(dma_overlap, ulong, 0444);
++
+ struct padre_port {
+ 	u8 *list;			/* one page: up to 128 descriptors */
+ 	struct ata_queued_cmd *dma_qc;	/* DMA command in flight */
+@@ -330,7 +345,7 @@ struct padre_port {
+ 	u32 ffctrl0;
+ };
+ 
+-static struct ata_port *lp_owner;	/* port currently using the LP */
++static unsigned int lp_busy;		/* bit n: port n has a list on the LP (host lock) */
+ static u8 lp_chmap;			/* byte 0x0C: disks present (0x03 on the Duo) */
+ static bool dma_chan[NCHAN_MAX];
+ 
+@@ -438,14 +453,29 @@ static enum ata_completion_errors padre_qc_prep(struct ata_queued_cmd *qc)
+ 	return AC_ERR_OK;
+ }
+ 
++/* another port has a list on the LP (host lock held) */
++static bool lp_other_busy(struct ata_port *ap)
++{
++	return lp_busy & ~(1u << ap->port_no);
++}
++
++/* back to one list at a time (host lock held) */
++static void lp_serialize(struct ata_port *ap, const char *why)
++{
++	if (lp_parallel) {
++		lp_parallel = false;
++		ata_port_warn(ap, "%s: lp_parallel set back to 0\n", why);
++	}
++}
++
+ static int padre_qc_defer(struct ata_queued_cmd *qc)
+ {
+ 	int rc = ata_std_qc_defer(qc);
+ 
+ 	if (rc)
+ 		return rc;
+-	/* the LP serves one channel at a time */
+-	if (qc->tf.protocol == ATA_PROT_DMA && lp_owner && lp_owner != qc->ap)
++	/* unless lp_parallel, the LP serves one channel at a time */
++	if (qc->tf.protocol == ATA_PROT_DMA && !lp_parallel && lp_other_busy(qc->ap))
+ 		return ATA_DEFER_PORT;
+ 	return 0;
+ }
+@@ -481,10 +511,13 @@ static unsigned int padre_qc_issue(struct ata_queued_cmd *qc)
+ 		qc->tf.flags |= ATA_TFLAG_POLLING;
+ 		return ata_sff_qc_issue(qc);
+ 	}
+-	if ((lp_rd(LP_STAT) & 0xff) != 1 || lp_owner)
++	if ((lp_rd(LP_STAT) & 0xff) != 1 || pp->dma_qc ||
++	    (!lp_parallel && lp_other_busy(ap)))
+ 		return AC_ERR_SYSTEM;
+ 	dma_cmds++;
+-	lp_owner = ap;
++	if (lp_other_busy(ap))
++		dma_overlap++;
++	lp_busy |= 1u << ap->port_no;
+ 	pp->dma_qc = qc;
+ 	lp_start(ap->port_no, pp->list, qc->n_elem);
+ 	return 0;
+@@ -511,14 +544,16 @@ static irqreturn_t padre_lp_irq(int irq, void *dev)
+ 		if (!(ist & LP_BIT(i)) || !qc)
+ 			continue;
+ 		pp->dma_qc = NULL;
+-		lp_owner = NULL;
++		lp_busy &= ~(1u << i);
+ 		st = padre_check_status(ap);	/* reads and drops the disk INTRQ */
+ 		if (pp->irq_off) {
+ 			pp->irq_off = false;
+ 			enable_irq(pp->irq);
+ 		}
+-		if (!(st & ATA_DRDY) || (st & (ATA_BUSY | ATA_ERR | ATA_DRQ)))
++		if (!(st & ATA_DRDY) || (st & (ATA_BUSY | ATA_ERR | ATA_DRQ))) {
+ 			qc->err_mask |= AC_ERR_DEV;
++			lp_serialize(ap, "DMA error");
++		}
+ 		ata_qc_complete(qc);
+ 	}
+ 	spin_unlock_irqrestore(&host->lock, flags);
+@@ -562,7 +597,8 @@ static void padre_error_handler(struct ata_port *ap)
+ 			      lp_rd(LP_STAT) & 0xff, lp_rd(LP_CH_ENABLE), lp_rd(LP_ISTAT));
+ 		lp_stop(ap->port_no, pp->ffctrl0);
+ 		pp->dma_qc = NULL;
+-		lp_owner = NULL;
++		lp_busy &= ~(1u << ap->port_no);
++		lp_serialize(ap, "LP timeout");
+ 		if (pp->irq_off) {
+ 			pp->irq_off = false;
+ 			enable_irq(pp->irq);
