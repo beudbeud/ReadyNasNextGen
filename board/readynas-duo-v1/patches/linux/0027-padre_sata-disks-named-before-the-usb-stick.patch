@@ -1,0 +1,57 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 27/27] padre_sata: the disks are named before the USB stick
+
+With usb-storage.delay_use=0 (fast boot) the system USB stick was scanned
+before padre_sata even started (late_initcall), so it took sda and the
+disks became sdb and sdc.
+
+padre_sata now starts at fs_initcall (after libata and SCSI, before the
+device initcalls: sd, EHCI, usb-storage), so the ports are probed in the
+background before USB is up, and usb-storage waits for pending async
+probes (async_synchronize_full) right before scanning a device: the
+disks are always sda (bay 1) and sdb (bay 2), the stick sdc, without
+blocking the boot on the disk probe.
+---
+ drivers/platform/padre/padre_sata.c |    7 ++++++-
+ drivers/usb/storage/usb.c           |    6 ++++++
+ 2 files changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/platform/padre/padre_sata.c b/drivers/platform/padre/padre_sata.c
+index bb02cdd50a3d3d3050ef7b25544a3f49ed318f4a..05660a7fa69dbce98c12a331dd70ef94b6e64e85 100644
+--- a/drivers/platform/padre/padre_sata.c
++++ b/drivers/platform/padre/padre_sata.c
+@@ -915,4 +915,9 @@ static int __init padre_sata_init(void)
+ 		pr_warn(DRV_NAME ": read-only\n");
+ 	return rc;
+ }
+-late_initcall(padre_sata_init);
++/* after libata and SCSI (subsys), before the device initcalls (sd, EHCI,
++ * usb-storage): the ports are probed (asynchronously) before USB is even up,
++ * and usb-storage waits for these probes before scanning the stick, so the
++ * disks are sda and sdb and the system stick comes after them
++ */
++fs_initcall(padre_sata_init);
+diff --git a/drivers/usb/storage/usb.c b/drivers/usb/storage/usb.c
+index 27901b7a000ad0bb40537d88d5c7f0e789544caf..49e71d1d0d827dfb9c8ca3a938025dbc51deb4e2 100644
+--- a/drivers/usb/storage/usb.c
++++ b/drivers/usb/storage/usb.c
+@@ -35,6 +35,7 @@
+ #endif
+ 
+ #include <linux/sched.h>
++#include <linux/async.h>
+ #include <linux/errno.h>
+ #include <linux/module.h>
+ #include <linux/slab.h>
+@@ -995,6 +996,11 @@ static void usb_stor_scan_dwork(struct work_struct *work)
+ 			us_to_host(us)->max_lun = us->max_lun+1;
+ 		mutex_unlock(&us->dev_mutex);
+ 	}
++	/* disks being probed asynchronously (libata) get their sd names
++	 * first: on the ReadyNAS the system stick must not come before the
++	 * SATA disks, whatever delay_use
++	 */
++	async_synchronize_full();
+ 	scsi_scan_host(us_to_host(us));
+ 	dev_dbg(dev, "scan complete\n");
+ 
