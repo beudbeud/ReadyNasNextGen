@@ -1,23 +1,30 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 23/23] padre_gmac: transmit checksum by the engine, off by default, with a way back
+Subject: [PATCH 23/27] padre_gmac: transmit checksum and scatter-gather by the engine, with a way back
 
-Transmit checksum (TCP/UDP over IPv4) and scatter-gather through the GMT
+Transmit checksum (TCP over IPv4) and scatter-gather through the GMT
 engine, rebuilt from the 2.6.17 driver (GMAC description §5.3): a "meta"
-descriptor (bit 26, 2 bytes {old command, new command}, command bit 6 =
-insert the checksum, no interrupt, handed to the engine first), then one
-descriptor per buffer, the first of the frame handed over last. The
-command bytes sit in the uncached SRAM after the rings, one 16-byte slot
-per transmit entry. As in 2.6.17 a command is only sent when an IPv4 frame
-needs the other state (a frame whose checksum is complete must go out
-with the engine off: it sums the L4 part again, field included); other
-frames leave the engine alone. Anything else than plain TCP/UDP over IPv4
-(options, fragments) is summed in software.
+descriptor (bit 26, 2 bytes {old command, new command}, no interrupt,
+handed to the engine first), then one descriptor per buffer, the first of
+the frame handed over last. The command bytes sit in ordinary memory, one
+16-byte slot per transmit entry, like 2.6.17: read from the SRAM after
+the rings, they are misread by the engine (the frame right after a command
+gets the word before its checksum field, and commands no longer turn it
+off), which was the failure of the first attempt; meta_ddr=0 brings that
+back for comparison. Commands as the
+2.6.17 driver sends them (read on the NAS with tools/gmpeek): 0xc0
+(checksum 0x40 + TSO 0x80, frames never above the 1500-byte segment size)
+for a frame left to the engine, 0x00 for any other frame, which must go
+out with the engine off (it sums the L4 part again, field included); a
+command only when the state changes. UDP (summed wrong by the engine), IP
+options and fragments are summed in software.
 
-Off by default: padre_gmac.tx_csum=1, the same parameter in
-/sys/module/padre_gmac/parameters at run time, or ethtool -K eth0 tx on
-(then sg on). Not validated on the NAS: a first attempt left the engine
-in the opposite state of the commands, which cut TCP until a power cycle.
-Hence:
+On by default, with scatter-gather: padre_gmac.tx_csum=0 (or the same
+parameter in /sys/module/padre_gmac/parameters at run time, or ethtool
+-K eth0 tx off) turns it off, the sg parameter (ethtool -K eth0 sg)
+scatter-gather alone. Tried on the NAS: loopback experiment as expected,
+raw TCP, SSH and SMB transfers byte for byte, no checksum error on the
+peer; reads +38 % (write) to +60 % (sendfile) over TCP, CPU no longer
+saturated with sendfile. Still:
 
 - every change of the feature restarts the MAC and the engine (2.6.17
   recovery: GMT mode 2, FIFO flush, open sequence), so that turning it
@@ -37,11 +44,11 @@ ethtool -S: tx_csum_hw, tx_csum_sw, tx_meta, tx_underrun,
 tx_csum_fallback. With the feature off no command is ever sent and the
 registers are written as before.
 ---
- drivers/platform/padre/padre_gmac.c | 581 +++++++++++++++++++++++++---
- 1 file changed, 528 insertions(+), 53 deletions(-)
+ drivers/platform/padre/padre_gmac.c |  637 ++++++++++++++++++++++++++++++++---
+ 1 file changed, 584 insertions(+), 53 deletions(-)
 
 diff --git a/drivers/platform/padre/padre_gmac.c b/drivers/platform/padre/padre_gmac.c
-index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadafb787e406 100644
+index ffe66784e1a451935cba792b4cb3b117604f8045..5beb6069978024b4dbade420883aea48363344a3 100644
 --- a/drivers/platform/padre/padre_gmac.c
 +++ b/drivers/platform/padre/padre_gmac.c
 @@ -10,8 +10,11 @@
@@ -51,9 +58,9 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
 - * received frames checked by the engine (GMT block). No transmit checksum:
 - * the engine's "meta" command descriptors gave wrong checksums on the NAS.
 + * received frames checked by the engine (GMT block). Transmit checksum by
-+ * the engine ("meta" command descriptors) and scatter-gather: off unless
-+ * padre_gmac.tx_csum=1 or ethtool -K eth0 tx on, not validated on the NAS
-+ * yet (docs/DEVELOPMENT.md); the driver goes back to software checksums by
++ * the engine ("meta" command descriptors) and scatter-gather, on unless
++ * padre_gmac.tx_csum=0 or ethtool -K eth0 tx off (docs/DEVELOPMENT.md);
++ * validated on the NAS; the driver goes back to software checksums by
 + * itself when transmission looks wrong.
   *
   * Copyright (C) 2026 the ReadyNasNextGen authors
@@ -105,11 +112,17 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
  #define D_EOP		(1u << 25)
  #define D_RXOVR		(1u << 23)	/* ctl on RX: FIFO overflow */
  /* ctl on RX, checksum result: 17/19/21 one of them = L4 checked, 22 = IPv4,
-@@ -151,10 +161,16 @@ struct m4d {
+@@ -151,10 +161,29 @@ struct m4d {
  
  #define PA(v)		((u32)(unsigned long)(v) - 0x40000000)	/* virtual -> bus */
  #define DESC_SRAM	0x70001000UL	/* S3 SRAM, uncached view */
-+#define META_CSUM	0x40		/* command: insert the checksum (0x80: TSO, unused) */
++/* command bytes as the 2.6.17 driver sends them (seen with tools/gmpeek):
++ * 0xc0 (checksum 0x40 + TSO 0x80) is its resting state, 0x00 for one frame
++ * that must not be summed. Without the TSO bit (00<->40 only) the engine
++ * missed commands and "40->00" did not turn it off (tx_csum_verify).
++ * GMT0_MSS = 1500 and frames of at most 1514 bytes: TSO never splits.
++ */
++#define META_CSUM	0xc0
  
  #define RING		128
  #define RMASK		(RING - 1)
@@ -120,10 +133,17 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
 + * original: a buffer under 8 bytes must be 8-byte aligned)
 + */
 +#define META_SRAM	(DESC_SRAM + 2 * RING * sizeof(struct m4d))
++/* meta_ddr: the command bytes in ordinary memory like 2.6.17 (its slots are
++ * in RAM), 0: in the SRAM after the rings. In SRAM, a frame right after a
++ * command came back with the word before the checksum field copied into it.
++ */
++static bool meta_ddr = true;
++module_param(meta_ddr, bool, 0644);
++static u8 meta_ram[RING * 16] __aligned(16);
  #define RXBUF		1536
  #define RXALLOC		(RXBUF + 64)
  #define GM_HWIRQ	41
-@@ -177,8 +193,21 @@ module_param(csum_verify, bool, 0644);
+@@ -177,8 +206,21 @@ module_param(csum_verify, bool, 0644);
  static int gphy = -1, glink, gspeed, gfdx, gbusy;
  static unsigned int gm_irq_nr;
  static DEFINE_SPINLOCK(glock);
@@ -139,7 +159,7 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
 + */
 +static int tx_guard = 4;
 +module_param(tx_guard, int, 0644);
-+static bool eng_ok;		/* the engine may be given commands and frames to sum */
++static bool eng_ok = true;	/* the engine may be given commands and frames to sum */
 +static u8 meta_cur;		/* last command given to the engine (0 after a reset) */
 +static const char *gfault;	/* why the transmit side is being reset */
 +static int gtest;		/* tx_csum_verify runs: received frames stay here */
@@ -147,7 +167,7 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
  
  static void gctrl_set(u32 set, u32 clr)
  {
-@@ -495,6 +524,9 @@ static void hw_start(struct net_device *dev)
+@@ -495,6 +537,9 @@ static void hw_start(struct net_device *dev)
  	DJ_set(GMT0, 2);
  	mac_reset();
  	DJ_set(GMT0, GMT_CSUM);
@@ -157,7 +177,7 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
  
  	M4_set(M_TX_CTRL, 8);
  	M4_set(M_RX_CTRL, 8);
-@@ -550,6 +582,22 @@ static bool rx_csum(struct net_device *dev, struct sk_buff *skb, u32 ctl)
+@@ -550,6 +595,22 @@ static bool rx_csum(struct net_device *dev, struct sk_buff *skb, u32 ctl)
  	       !ip_is_fragment(iph);
  }
  
@@ -180,7 +200,7 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
  static int rx_poll(struct net_device *dev, int budget)
  {
  	int n;
-@@ -576,13 +624,17 @@ static int rx_poll(struct net_device *dev, int budget)
+@@ -576,13 +637,17 @@ static int rx_poll(struct net_device *dev, int budget)
  						 (unsigned long)skb->data + len + 2);
  			skb_reserve(skb, 2);
  			skb_put(skb, len - 4);	/* without the CRC */
@@ -204,7 +224,7 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
  		}
  		rx_arm(rx_cur);
  		rx_cur = (rx_cur + 1) & RMASK;
-@@ -603,21 +655,28 @@ static void tx_clean(struct net_device *dev, int budget)
+@@ -603,21 +668,28 @@ static void tx_clean(struct net_device *dev, int budget)
  {
  	spin_lock(&glock);		/* uniprocessor: against reset_task */
  	while (tx_tail != tx_head && !(txd[tx_tail]->ctl & D_OWN)) {
@@ -243,7 +263,7 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
  		netif_wake_queue(dev);
  	spin_unlock(&glock);
  }
-@@ -654,36 +713,142 @@ static irqreturn_t gm_irq(int irq, void *dev_id)
+@@ -654,36 +726,144 @@ static irqreturn_t gm_irq(int irq, void *dev_id)
  	return IRQ_HANDLED;
  }
  
@@ -287,10 +307,12 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
 -		dev_kfree_skb_any(skb);
 -		return NETDEV_TX_OK;
 +	if (meta >= 0) {
-+		volatile u8 *m = (volatile u8 *)(META_SRAM + i * 16);
++		volatile u8 *m = meta_ddr ? meta_ram + i * 16 : (volatile u8 *)(META_SRAM + i * 16);
 +
 +		m[0] = meta >> 8;
 +		m[1] = meta;
++		if (meta_ddr)
++			padre_clean_dcache_range((unsigned long)m, (unsigned long)m + 16);
 +		tx_fill(i, PA(m), D_META | 2);
 +		i = (i + 1) & RMASK;
 +	}
@@ -323,7 +345,7 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
 +	return skb->protocol == htons(ETH_P_IP) &&
 +	       skb_headlen(skb) >= ETH_HLEN + sizeof(*iph) + sizeof(struct udphdr) &&
 +	       iph->ihl == 5 && !ip_is_fragment(iph) &&
-+	       (iph->protocol == IPPROTO_TCP || iph->protocol == IPPROTO_UDP) &&
++	       iph->protocol == IPPROTO_TCP &&	/* the engine sums UDP wrong */
 +	       skb_checksum_start_offset(skb) == ETH_HLEN + sizeof(*iph);
 +}
 +
@@ -340,7 +362,7 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
 +		if (!skb_frag_size(fr) ||
 +		    (skb_frag_size(fr) < 8 && ((unsigned long)skb_frag_address(fr) & 7)))
 +			return false;
- 	}
++	}
 +	return true;
 +}
 +
@@ -355,15 +377,15 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
 +		if (skb_checksum_help(skb))
 +			goto drop;
 +		tx_csum_sw++;
-+	}
+ 	}
 +	/* ponytail: rare odd fragments are copied, no bounce buffers */
 +	if (skb_shinfo(skb)->nr_frags && !tx_sg_ok(skb) && skb_linearize(skb))
 +		goto drop;
-+	/* Like 2.6.17: only an IPv4 frame changes the state of the engine,
-+	 * which leaves the other frames alone (?). A summed IPv4 frame must
-+	 * go out with the engine off.
++	/* Every frame that is not left to the engine goes out with the engine
++	 * off (2.6.17 skipped this for frames that are not IPv4; ponytail: one
++	 * more command for ARP, nothing to guess for IPv6).
 +	 */
-+	if (eng && skb->protocol == htons(ETH_P_IP))
++	if (eng)
 +		need = skb->ip_summed == CHECKSUM_PARTIAL ? META_CSUM : 0;
 +
  	spin_lock(&glock);		/* called with bottom halves off */
@@ -403,7 +425,7 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
  }
  
  /* ---------- events for /etc/hotplug/gmac.agent (like 2.6.17) ---------- */
-@@ -714,6 +879,45 @@ static void hotplug(const char *action, int up, int speed)
+@@ -714,6 +894,45 @@ static void hotplug(const char *action, int up, int speed)
  
  /* ---------- link (88E1111 polled every second) ---------- */
  
@@ -449,7 +471,7 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
  static void link_poll(struct work_struct *unused)
  {
  	int s, up, speed = 0, fdx = 0;
-@@ -746,33 +950,280 @@ static void link_poll(struct work_struct *unused)
+@@ -746,33 +965,321 @@ static void link_poll(struct work_struct *unused)
  		netdev_info(gdev, "link lost\n");
  		hotplug("link", 0, 0);
  	}
@@ -524,8 +546,8 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
  	dev->stats.tx_errors++;
 -	schedule_work(&reset_work);
 +	gm_fault("transmit timeout");
-+}
-+
+ }
+ 
 +/* ---------- tx_csum_verify: what the engine does, seen in MAC loopback ----------
 + *
 + * echo 1 > /sys/module/padre_gmac/parameters/tx_csum_verify (link up; the
@@ -540,27 +562,34 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
 + */
 +enum { VT_UDP, VT_TCP, VT_ICMP, VT_ARP, VT_OPT, VT_FRAG };
 +
++/* the sequences of the 2.6.17 driver: resting state c0, 00 for one frame */
 +static const struct vt_step {
 +	u8 kind, reset;
-+	s16 meta;
++	int meta;
 +	u16 pay;
++	char want;
 +	const char *what;
 +} vt_steps[] = {
-+	{ VT_UDP,  1, -1,     100,  "reset, no command" },		/* U */
-+	{ VT_UDP,  0, 0x0040, 100,  "command 00->40" },			/* S */
-+	{ VT_UDP,  1, -1,     100,  "reset from on, no command" },	/* U: the reset clears */
-+	{ VT_UDP,  0, 0x0040, 101,  "command 00->40, odd length" },	/* S */
-+	{ VT_TCP,  0, -1,     0,    "TCP without data" },		/* S */
-+	{ VT_TCP,  0, -1,     1460, "TCP, full frame" },		/* S */
-+	{ VT_ICMP, 0, -1,     56,   "ICMP" },				/* S on the NAS */
-+	{ VT_ARP,  0, -1,     28,   "not IPv4 (ARP type)" },		/* U */
-+	{ VT_OPT,  0, -1,     100,  "UDP, IPv4 options" },
-+	{ VT_FRAG, 0, -1,     100,  "UDP, first fragment" },
-+	{ VT_UDP,  0, 0x4040, 100,  "command 40->40" },			/* U: any command toggles */
-+	{ VT_UDP,  0, 0x0040, 100,  "command 00->40 again" },		/* S: absolute, U: old^new */
-+	{ VT_UDP,  1, 0x0040, 100,  "reset, command 00->40" },		/* S */
-+	{ VT_UDP,  0, 0x4000, 100,  "command 40->00" },			/* U */
++	{ VT_TCP,  1, -1,     100,  'U', "reset, no command" },
++	{ VT_TCP,  0, 0x00c0, 100,  'S', "command 00->c0" },
++	{ VT_TCP,  0, -1,     100,  'S', "no command, still on" },
++	{ VT_TCP,  0, -1,     1460, 'S', "TCP, full frame" },
++	{ VT_TCP,  0, -1,     101,  'S', "TCP, odd length" },
++	{ VT_TCP,  0, -1,     0,    'S', "TCP without data" },
++	{ VT_ARP,  0, -1,     28,   'U', "not IPv4 (ARP type)" },
++	{ VT_ICMP, 0, 0xc000, 56,   'U', "command c0->00, ICMP" },
++	{ VT_UDP,  0, -1,     100,  'U', "UDP, engine off" },
++	{ VT_TCP,  0, 0x00c0, 100,  'S', "command 00->c0 again" },
++	{ VT_TCP,  0, 0xc080, 100,  'U', "command c0->80" },
++	{ VT_TCP,  0, 0x80c0, 100,  'S', "command 80->c0" },
++	{ VT_TCP,  1, -1,     100,  'U', "reset from on" },
++	{ VT_TCP,  0, 0x00c0, 100,  'S', "command 00->c0 after reset" },
++	{ VT_TCP,  0, 0xc000, 100,  'U', "command c0->00" },
++	{ VT_TCP,  0, 0x0040, 100,  'S', "command 00->40" },
++	{ VT_TCP,  0, 0x40c0, 100,  'S', "command 40->c0" },
++	{ VT_TCP,  0, 0xc000, 100,  'U', "command c0->00, last" },
 +};
++#define VT_ALT	40		/* then 00->c0 (S), c0->00 (U), alternately */
 +
 +/* *off: offset of the checksum field (0: none), *full: the complete checksum */
 +static struct sk_buff *vt_frame(struct net_device *dev, const struct vt_step *s,
@@ -616,9 +645,8 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
 +	return skb;
 +}
 +
-+static char vt_step(struct net_device *dev, unsigned int n)
++static char vt_step(struct net_device *dev, const struct vt_step *s, unsigned int n)
 +{
-+	const struct vt_step *s = &vt_steps[n];
 +	unsigned int off = 0, len;
 +	__sum16 full = 0, sent = 0, got = 0;
 +	struct sk_buff *skb, *b;
@@ -655,19 +683,22 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
 +		}
 +		r = memcmp(b->data, ref, len) ? 'X' : got == sent ? 'U' : got == full ? 'S' : 'X';
 +	}
-+	netdev_info(dev, "tx_csum_verify %2u %-26s: %c (sent %04x got %04x full %04x, rx %02x, gmt %08x)\n",
++	if (n < ARRAY_SIZE(vt_steps) || r != s->want)
++		netdev_info(dev, "tx_csum_verify %2u %-26s: %c (sent %04x got %04x full %04x, rx %02x, gmt %08x)\n",
 +		    n, s->what, r, ntohs(sent), ntohs(got), ntohs(full),
 +		    b ? (vt_ctl >> 17) & 0x3f : 0, DJ_get(GMT0_STAT));
 +	kfree_skb(b);
 +	kfree(ref);
 +	return r;
- }
- 
++}
++
 +static int vt_run(struct net_device *dev)
 +{
-+	char r[ARRAY_SIZE(vt_steps) + 1] = "";
-+	unsigned int i;
-+	bool ok;
++	static const struct vt_step on = { VT_TCP, 0, 0x00c0, 100, 'S', "alternation 00->c0" },
++				    off = { VT_TCP, 0, 0xc000, 100, 'U', "alternation c0->00" };
++	char r[ARRAY_SIZE(vt_steps) + 1] = "", alt[VT_ALT + 1] = "";
++	unsigned int i, bad = 0;
++	bool ok = true;
 +
 +	netdev_info(dev, "tx_csum_verify: MAC loopback, the network stops for a few seconds\n");
 +	netif_device_detach(dev);
@@ -675,9 +706,16 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
 +	for (i = 0; i < ARRAY_SIZE(vt_steps); i++) {
 +		if (vt_steps[i].reset)
 +			hw_restart(dev, true);
-+		r[i] = vt_step(dev, i);
++		r[i] = vt_step(dev, &vt_steps[i], i);
 +		if (i < 2 && r[i] == 'L')
 +			break;
++		ok &= r[i] == vt_steps[i].want;
++	}
++	for (i = 0; ok && i < VT_ALT; i++) {
++		const struct vt_step *s = i & 1 ? &off : &on;
++
++		alt[i] = vt_step(dev, s, ARRAY_SIZE(vt_steps) + i);
++		bad += alt[i] != s->want;
 +	}
 +	gtest = 0;
 +	hw_restart(dev, false);
@@ -686,13 +724,10 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
 +		netdev_err(dev, "tx_csum_verify: %s, nothing comes back: no MAC loopback here, capture on the peer instead\n", r);
 +		return -ENODATA;
 +	}
-+	ok = !strncmp(r, "USUSSS", 6) && r[7] == 'U' && r[10] == 'S' && r[12] == 'S' &&
-+	     r[13] == 'U';
-+	netdev_info(dev, "tx_csum_verify: %s: engine %s; a reset %s; a repeated command %s\n",
-+		    r, ok ? "as the driver expects" : "NOT as the driver expects",
-+		    r[2] == 'U' ? "clears it" : "does NOT clear it",
-+		    r[10] != 'S' ? "toggles it" :
-+		    r[11] == 'S' ? "changes nothing (absolute)" : "toggles it when 'old' is wrong (old^new)");
++	ok &= alt[0] && !bad;
++	netdev_info(dev, "tx_csum_verify: %s %s: engine %s (%u of %u alternations wrong)\n",
++		    r, alt, ok ? "as the driver expects" : "NOT as the driver expects",
++		    bad, VT_ALT);
 +	return ok ? 0 : -EIO;
 +}
 +
@@ -737,10 +772,38 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
 +static const struct kernel_param_ops tc_ops = { .set = tc_set, .get = param_get_bool };
 +module_param_cb(tx_csum, &tc_ops, &eng_ok, 0644);
 +
++/* sg: scatter-gather without an ethtool binary; needs tx_csum (the stack
++ * drops it otherwise), turned off with it. Read back: the device features.
++ */
++static int sg_set(const char *val, const struct kernel_param *kp)
++{
++	bool on;
++	int r = kstrtobool(val, &on);
++
++	if (r || !gdev)
++		return r ?: -ENODEV;
++	rtnl_lock();
++	if (on)
++		gdev->wanted_features |= NETIF_F_SG;
++	else
++		gdev->wanted_features &= ~NETIF_F_SG;
++	netdev_update_features(gdev);
++	rtnl_unlock();
++	return 0;
++}
++
++static int sg_get(char *buf, const struct kernel_param *kp)
++{
++	return sysfs_emit(buf, "%c\n", gdev && (gdev->features & NETIF_F_SG) ? 'Y' : 'N');
++}
++
++static const struct kernel_param_ops sg_ops = { .set = sg_set, .get = sg_get };
++module_param_cb(sg, &sg_ops, NULL, 0644);
++
  /* ---------- open / close ---------- */
  
  static void rx_free(void)
-@@ -818,7 +1269,7 @@ static int gm_close(struct net_device *dev)
+@@ -818,7 +1325,7 @@ static int gm_close(struct net_device *dev)
  
  	netif_stop_queue(dev);
  	cancel_delayed_work_sync(&link_work);
@@ -749,7 +812,7 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
  	napi_disable(&gnapi);
  	dma_stop();
  	free_irq(gm_irq_nr, dev);
-@@ -883,6 +1334,7 @@ static int gm_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
+@@ -883,6 +1390,7 @@ static int gm_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
  
  static const char gm_stat_names[][ETH_GSTRING_LEN] = {
  	"rx_csum_ok", "rx_csum_bad", "rx_csum_wrong", "rx_csum_missed",
@@ -757,7 +820,7 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
  };
  
  static int gm_sset_count(struct net_device *dev, int sset)
-@@ -902,6 +1354,11 @@ static void gm_get_ethtool_stats(struct net_device *dev, struct ethtool_stats *s
+@@ -902,6 +1410,11 @@ static void gm_get_ethtool_stats(struct net_device *dev, struct ethtool_stats *s
  	v[1] = rx_csum_bad;
  	v[2] = rx_csum_wrong;
  	v[3] = rx_csum_missed;
@@ -769,7 +832,7 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
  }
  
  static const struct ethtool_ops gm_ethtool = {
-@@ -911,6 +1368,23 @@ static const struct ethtool_ops gm_ethtool = {
+@@ -911,6 +1424,23 @@ static const struct ethtool_ops gm_ethtool = {
  	.get_ethtool_stats	= gm_get_ethtool_stats,
  };
  
@@ -793,7 +856,7 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
  static const struct net_device_ops gm_ops = {
  	.ndo_open		= gm_open,
  	.ndo_stop		= gm_close,
-@@ -919,6 +1393,7 @@ static const struct net_device_ops gm_ops = {
+@@ -919,6 +1449,7 @@ static const struct net_device_ops gm_ops = {
  	.ndo_set_rx_mode	= set_multicast,
  	.ndo_set_mac_address	= gm_set_mac,
  	.ndo_tx_timeout		= gm_tx_timeout,
@@ -801,14 +864,14 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..1fc57305d247d8b50dd0d82a551aadaf
  	.ndo_eth_ioctl		= gm_ioctl,
  	.ndo_validate_addr	= eth_validate_addr,
  };
-@@ -982,11 +1457,11 @@ static int __init gm_init(void)
+@@ -982,11 +1513,11 @@ static int __init gm_init(void)
  	dev->netdev_ops = &gm_ops;
  	dev->ethtool_ops = &gm_ethtool;
  	dev->watchdog_timeo = 5 * HZ;
 -	dev->hw_features = NETIF_F_RXCSUM;
 -	dev->features = NETIF_F_RXCSUM;
 +	dev->hw_features = NETIF_F_RXCSUM | NETIF_F_IP_CSUM | NETIF_F_SG;
-+	dev->features = NETIF_F_RXCSUM | (eng_ok ? NETIF_F_IP_CSUM : 0);
++	dev->features = NETIF_F_RXCSUM | (eng_ok ? NETIF_F_IP_CSUM | NETIF_F_SG : 0);
  	netif_napi_add(dev, &gnapi, gm_poll);
  	INIT_DELAYED_WORK(&link_work, link_poll);
 -	INIT_WORK(&reset_work, reset_task);

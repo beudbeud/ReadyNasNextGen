@@ -131,7 +131,9 @@ int cmain(int argc, char **argv)
 	u32 d, s, i, w[4];
 	static const struct { long sec, nsec; } nap = { 0, 20000000 };
 
-	sock = sys(97, 2, 2, 0);		/* socket(AF_INET, SOCK_DGRAM, 0) */
+	static long sa[3] = { 2, 2, 0 };	/* AF_INET, SOCK_DGRAM, 0 */
+
+	sock = sys(206, 1, (long)sa, 0);	/* socketcall(SYS_SOCKET): 2.6.17 has no socket (97) */
 	if (sock < 0 || peek(GM_BASE + 0x400, 1) < 0) {
 		puts_("gmpeek: no eth0 or no 0x89f2 ioctl (not the stock driver?)\n");
 		flush();
@@ -172,7 +174,8 @@ int cmain(int argc, char **argv)
 			putch(' ');
 			hex(w[3], 8);
 			/* command bytes {old, new} of a meta descriptor */
-			if ((w[2] & (1u << 26)) && w[1] >= 0x40000000u &&
+			/* bit 26 is gone once the engine is done: size 2 then */
+			if (((w[2] & (1u << 26)) || (w[2] & 0xffffff) == 2) && w[1] >= 0x40000000u &&
 			    w[1] - 0x40000000u < ram - 4 && peek((w[1] & ~3u) + BUS2VIRT, 1) >= 0) {
 				puts_(" meta word ");	/* the 2 bytes start at byte (buffer & 3) */
 				hex(buf[2], 8);
