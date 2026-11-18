@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 15/23] platform: padre: add the LEDs and backup button
+Subject: [PATCH 15/27] platform: padre: add the LEDs and backup button
 
 Ported from the GPL 2.6.17 led_button driver, same interface
 (/proc/sys/dev/led, /proc/sys/dev/button, uevent_helper "button" on

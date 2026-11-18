@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 20/23] sparc: Padre: 16 KiB pages, like the stock 2.6.17 kernel
+Subject: [PATCH 20/27] sparc: Padre: 16 KiB pages, like the stock 2.6.17 kernel
 
 A Linux page is 4 consecutive 4 KiB entries of the Infrant MMU
 (2.6.17 CONFIG_PADRE_16K_PAGE): pte_t holds the 4 hardware words,

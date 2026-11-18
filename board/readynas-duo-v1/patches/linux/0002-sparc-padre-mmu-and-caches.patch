@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 02/23] sparc: Padre: MMU and caches
+Subject: [PATCH 02/27] sparc: Padre: MMU and caches
 
 The Padre MMU is not an SRMMU: it walks a two-level i386-like table
 (1024 x 4 MB directory, 1024 x 4 KB tables), has its own fault

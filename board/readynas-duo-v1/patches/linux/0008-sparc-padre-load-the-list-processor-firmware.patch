@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 08/23] sparc: Padre: load the List Processor firmware
+Subject: [PATCH 08/27] sparc: Padre: load the List Processor firmware
 
 The IT3107 has a second core, the List Processor (LP), that runs a
 small firmware used for DMA. As 2.6.17 did (head.S load_lp/init_lp),

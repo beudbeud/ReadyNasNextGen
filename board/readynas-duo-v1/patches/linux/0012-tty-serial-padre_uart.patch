@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 12/23] tty: serial: add the Padre UART driver
+Subject: [PATCH 12/27] tty: serial: add the Padre UART driver
 
 The two UARTs of the IT3107 (ttyS0 at 0x6000_0070, ttyS1 at
 0x6000_0060, console at 9600 baud on the ReadyNAS Duo v1), same

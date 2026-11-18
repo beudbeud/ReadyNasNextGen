@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 09/23] sparc: Padre: PCI host bridge
+Subject: [PATCH 09/27] sparc: Padre: PCI host bridge
 
 The PCI bridge of the IT3107 carries the VIA VT6212 USB controller of
 the ReadyNAS Duo v1. padre_pci.c (after 2.6.17 pcic.c/setup.c):

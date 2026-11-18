@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 01/23] sparc: add the Infrant IT3107 "Padre" platform
+Subject: [PATCH 01/27] sparc: add the Infrant IT3107 "Padre" platform
 
 The NETGEAR ReadyNAS Duo v1 runs on the Infrant IT3107 "Padre", a
 SPARC v8 SoC with its own MMU, no PROM and no FPU; NETGEAR only ever

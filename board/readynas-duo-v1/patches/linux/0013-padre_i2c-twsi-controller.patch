@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 13/23] platform: padre: add the TWSI I2C controller
+Subject: [PATCH 13/27] platform: padre: add the TWSI I2C controller
 
 Adds drivers/platform/padre for the ReadyNAS Duo v1 on-board devices,
 starting with the SoC "TWSI" I2C controller, ported from the GPL 2.6.17

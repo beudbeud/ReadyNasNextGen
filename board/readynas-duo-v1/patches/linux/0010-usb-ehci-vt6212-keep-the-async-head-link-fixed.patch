@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 10/23] usb: ehci: VT6212 on Padre, keep the async head link fixed
+Subject: [PATCH 10/27] usb: ehci: VT6212 on Padre, keep the async head link fixed
 
 The VIA VT6212 on the Padre never re-reads the horizontal link of the
 async head QH once the CPU has rewritten it: only the first linked QH

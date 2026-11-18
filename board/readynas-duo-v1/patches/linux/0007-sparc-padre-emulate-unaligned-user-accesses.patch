@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 07/23] sparc: Padre: emulate unaligned user accesses
+Subject: [PATCH 07/27] sparc: Padre: emulate unaligned user accesses
 
 Stock sparc32 sends SIGBUS on an unaligned user access; 2.6.17 on the
 Padre (and sparc64) emulates integer ones, and userland relies on it

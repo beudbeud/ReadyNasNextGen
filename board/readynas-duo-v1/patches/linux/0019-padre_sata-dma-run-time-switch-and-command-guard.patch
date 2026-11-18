@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 19/23] padre_sata: DMA switchable at run time, command guard
+Subject: [PATCH 19/27] padre_sata: DMA switchable at run time, command guard
 
 padre_sata: LP DMA switchable at run time (dma=2 at boot: ready, starting in
 PIO), non read/write DMA commands refused (READ LOG DMA EXT, FUA, TRIM),

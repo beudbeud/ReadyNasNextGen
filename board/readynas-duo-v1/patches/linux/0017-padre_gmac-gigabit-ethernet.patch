@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 17/23] platform: padre: add the GM0 Gigabit Ethernet driver
+Subject: [PATCH 17/27] platform: padre: add the GM0 Gigabit Ethernet driver
 
 Ported from the GPL 2.6.17 gmac driver (validated there) to the 6.18
 net_device API: MAC address from boot_param, descriptors in the

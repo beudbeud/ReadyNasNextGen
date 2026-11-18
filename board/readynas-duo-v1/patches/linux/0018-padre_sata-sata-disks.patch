@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 18/23] platform: padre: add the SATA driver
+Subject: [PATCH 18/27] platform: padre: add the SATA driver
 
 libata SFF driver for the two SATA ports of the IT3107, written from
 the GPL 2.6.17 IDE driver (PIO) and its IO description: 32-bit shadow

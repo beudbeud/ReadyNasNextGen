@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 05/23] sparc: math-emu: fix the fmovs/fabss/fnegs result
+Subject: [PATCH 05/27] sparc: math-emu: fix the fmovs/fabss/fnegs result
 
 The instruction type of FMOVS/FABSS/FNEGS (r=1, no packing) makes
 do_one_mathemu() write rd->s = IR at the end, so the result computed

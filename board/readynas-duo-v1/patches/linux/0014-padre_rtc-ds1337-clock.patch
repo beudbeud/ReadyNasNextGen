@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 14/23] platform: padre: add the DS1337 hardware clock
+Subject: [PATCH 14/27] platform: padre: add the DS1337 hardware clock
 
 The DS1337 RTC at I2C address 0x68, accessed through padre_i2c, exposed
 as /dev/rtc0 (rtc class); with RTC_HCTOSYS the time is restored at boot.

@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 04/23] sparc: Padre: avoid the broken sdiv instruction
+Subject: [PATCH 04/27] sparc: Padre: avoid the broken sdiv instruction
 
 On this CPU sdiv gives wrong results; udiv, umul and smul are correct.
 C code is compiled with -mcpu=v7, so gcc calls .mul/.umul/.div/.udiv/

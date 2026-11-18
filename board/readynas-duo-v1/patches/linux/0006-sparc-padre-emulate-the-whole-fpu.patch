@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 06/23] sparc: Padre: emulate the whole FPU
+Subject: [PATCH 06/27] sparc: Padre: emulate the whole FPU
 
 The Padre has no FPU. As in the 2.6.17 kernel, PSR.EF is never set and
 every floating-point instruction traps to do_fpd_trap(), which runs

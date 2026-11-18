@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 21/23] sparc: Padre: modules can multiply and divide
+Subject: [PATCH 21/27] sparc: Padre: modules can multiply and divide
 
 The kernel is compiled with -mcpu=v7 (sdiv is broken on this CPU), so
 gcc calls .mul/.umul/.div/.udiv/.rem/.urem, and a module that uses them

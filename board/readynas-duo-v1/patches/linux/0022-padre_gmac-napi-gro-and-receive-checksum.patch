@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 22/23] padre_gmac: NAPI, GRO and receive checksum by the engine
+Subject: [PATCH 22/27] padre_gmac: NAPI, GRO and receive checksum by the engine
 
 Receive and transmit completion move from the hard interrupt to a NAPI
 poll: the interrupt masks the M4 engine and schedules the poll, which

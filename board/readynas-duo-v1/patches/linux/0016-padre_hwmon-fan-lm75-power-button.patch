@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 16/23] platform: padre: add the fan, LM75 and power button driver
+Subject: [PATCH 16/27] platform: padre: add the fan, LM75 and power button driver
 
 Ported from the GPL 2.6.17 hwmon driver, same interface
 (/proc/sys/dev/hwmon, /proc/sys/dev/boot/info, uevent_helper

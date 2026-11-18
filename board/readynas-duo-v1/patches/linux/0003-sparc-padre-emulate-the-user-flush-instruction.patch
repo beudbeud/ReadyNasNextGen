@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 03/23] sparc: Padre: emulate the user "flush" instruction
+Subject: [PATCH 03/27] sparc: Padre: emulate the user "flush" instruction
 
 "flush" traps on the Padre (2.6.17 emulated it). The uClibc dynamic
 loader uses it after rewriting the PLT: the write-back D-cache must be

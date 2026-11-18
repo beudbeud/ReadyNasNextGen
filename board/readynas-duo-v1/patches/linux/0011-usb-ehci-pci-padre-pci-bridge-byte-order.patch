@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 11/23] usb: ehci-pci, pci-quirks: Padre PCI bridge byte order
+Subject: [PATCH 11/27] usb: ehci-pci, pci-quirks: Padre PCI bridge byte order
 
 The Padre PCI bridge (PCI_SWAP = 0x4444) already presents the EHCI
 registers in CPU order: use big_endian_mmio (descriptors stay
