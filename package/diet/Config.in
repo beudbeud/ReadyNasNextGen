@@ -8,6 +8,9 @@ config BR2_PACKAGE_DIET
 	select BR2_PACKAGE_LIGHTTPD_MBEDTLS
 	select BR2_PACKAGE_MBEDTLS_PROGRAMS # gen_key, cert_write
 	select BR2_PACKAGE_MDADM
+	select BR2_PACKAGE_LIBCURL
+	select BR2_PACKAGE_LIBCURL_CURL
+	select BR2_PACKAGE_CA_CERTIFICATES
 	help
 	  DIET dashboard ported to Linux 6.18: /www page and CGI API
 	  (busybox shell and awk) served by lighttpd over HTTPS
@@ -16,7 +19,8 @@ config BR2_PACKAGE_DIET
 	  md RAID (/proc/mdstat, mdadm), padre-fan display and
 	  settings, Telegram notifications, network, language,
 	  time (ntpd), shutdown.
-	  Enables in busybox: ntpd, HTTPS wget.
+	  Enables in busybox: ntpd. HTTPS downloads (Telegram, system
+	  updates) go through curl, which checks the certificates.
 	  See docs/DIET.md.
 
 comment "diet needs ksmbd-tools, nfs-utils and shared libraries"

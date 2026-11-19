@@ -295,7 +295,11 @@ job)	# background part of receive / fetch
 	if [ "$2" = fetch ]; then
 		setstate busy "$(tx "Downloading" "Téléchargement" "Download läuft")"
 		mkdir -p "$S/update"; log "download of $3"
-		wget -q -T 60 -O - "$3" 2>/dev/null | head -c $MAXPKG > "$PKG"
+		# certificate checked (CA bundle), redirects (GitHub's download host) only to https,
+		# given up when stalled 60 s
+		curl -fsSL --proto =https --proto-redir =https --cacert /etc/ssl/certs/ca-certificates.crt \
+			--connect-timeout 30 --speed-limit 1 --speed-time 60 --max-filesize $MAXPKG \
+			"$3" 2>/dev/null | head -c $MAXPKG > "$PKG"
 		[ "$(sha256sum < "$PKG" | cut -d' ' -f1)" = "$4" ] || jfail "$(tx "Download failed or SHA-256 different from the expected one" "Téléchargement échoué ou SHA-256 différente de celle attendue" "Download fehlgeschlagen oder SHA-256 anders als erwartet")"
 	fi
 	install_pkg "$PKG" ;;

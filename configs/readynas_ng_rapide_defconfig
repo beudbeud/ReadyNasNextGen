@@ -83,6 +83,11 @@ BR2_PACKAGE_LIGHTTPD_MBEDTLS=y
 BR2_PACKAGE_LIGHTTPD_PCRE=y
 BR2_PACKAGE_MBEDTLS=y
 BR2_PACKAGE_MBEDTLS_PROGRAMS=y
+# HTTPS client that checks certificates (Telegram, system updates)
+BR2_PACKAGE_LIBCURL=y
+BR2_PACKAGE_LIBCURL_CURL=y
+BR2_PACKAGE_LIBCURL_MBEDTLS=y
+BR2_PACKAGE_CA_CERTIFICATES=y
 
 # Root: rootfs.tar to extract into /rootfs-6.18 on an ext3/ext4 USB key;
 # the kernel initramfs looks for that folder and switches to it (see README.md).

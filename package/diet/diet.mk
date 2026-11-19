@@ -10,7 +10,7 @@ DIET_VERSION = 3.0
 DIET_SITE = $(BR2_EXTERNAL_READYNAS_NG_PATH)/package/diet/src
 DIET_SITE_METHOD = local
 DIET_LICENSE = GPL-2.0
-DIET_DEPENDENCIES = busybox lighttpd mbedtls ksmbd-tools nfs-utils mdadm
+DIET_DEPENDENCIES = busybox lighttpd mbedtls ksmbd-tools nfs-utils mdadm libcurl ca-certificates
 
 # System account of the WebDAV lighttpd instance (S51webdav): files uploaded
 # through WebDAV belong to it, never to root; it is a member of each user's
@@ -27,7 +27,7 @@ endef
 # of the initramfs (package/readynas-initramfs) is not affected.
 define DIET_BUSYBOX_CONFIG_FIXUPS
 	$(call KCONFIG_ENABLE_OPT,CONFIG_NTPD)
-	$(call KCONFIG_ENABLE_OPT,CONFIG_FEATURE_WGET_HTTPS)
+	$(call KCONFIG_DISABLE_OPT,CONFIG_FEATURE_WGET_HTTPS)
 	$(call KCONFIG_ENABLE_OPT,CONFIG_FEATURE_PREFER_APPLETS)
 	$(call KCONFIG_ENABLE_OPT,CONFIG_FEATURE_SH_STANDALONE)
 	$(call KCONFIG_ENABLE_OPT,CONFIG_FEATURE_SH_NOFORK)

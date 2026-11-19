@@ -2,14 +2,16 @@
 # Sends a Telegram notification: diet-notify "text"
 # Settings in /etc/diet-notify.conf (TG_TOKEN, TG_CHAT), written by the web
 # interface on the NAS (never in the image). Exit: 0 sent, 1 failed, 2 not set up.
-# ponytail: busybox TLS wget does not check the certificate; real checking would need curl + CA certificates.
+# curl checks the api.telegram.org certificate against the CA bundle (needs the right
+# time: hardware clock, then NTP).
 R=${DIET_ROOT:-}
 CONF=$R/etc/diet-notify.conf
 [ -r $R/etc/diet-lang.sh ] && . $R/etc/diet-lang.sh || tx() { printf "%s" "$1"; }
 [ -r "$CONF" ] && . "$CONF"
 [ -n "$TG_TOKEN" ] && [ -n "$TG_CHAT" ] || { echo "$(tx "Telegram not set up" "Telegram non configuré" "Telegram nicht eingerichtet")"; exit 2; }
 enc=$(printf '%s' "$(hostname) : $1" | od -An -tx1 | tr -d ' \n' | sed 's/\(..\)/%\1/g')
-out=$(wget -T 20 -q -O - --post-data "chat_id=$TG_CHAT&text=$enc" "https://api.telegram.org/bot$TG_TOKEN/sendMessage" 2>&1)
+out=$(curl -sS --max-time 20 --proto =https --cacert /etc/ssl/certs/ca-certificates.crt \
+	--data "chat_id=$TG_CHAT&text=$enc" "https://api.telegram.org/bot$TG_TOKEN/sendMessage" 2>&1)
 case "$out" in *'"ok":true'*) exit 0 ;; esac
-echo "$out" | grep -v 'certificate' | tail -n 1
+echo "$out" | tail -n 1
 exit 1
