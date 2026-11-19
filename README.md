@@ -13,12 +13,20 @@ touching the original firmware.
 ## What you get
 
 - **Network shares**: SMB 3 (Windows, macOS, Linux, through ksmbd), and NFS v3/v4.
-  Measured from a Wi-Fi PC (0.1.3): SMB reads 17–20 MiB/s, 3.4–3.6 MiB/s signed (Windows and
-  macOS sign by default), writes about 9 MiB/s
-  ([details](docs/DEVELOPMENT.md#smb-zero-copy-reads-and-signing)).
+  Measured on 0.1.4, NAS wired to the box at 1000 Mbit/s, PC on Wi-Fi, 500 MiB files compared
+  byte for byte:
+
+  | | read | write |
+  |---|---|---|
+  | SMB 3, unsigned (Linux clients) | 28–39 MiB/s | 12–14 MiB/s |
+  | SMB 3, signed (Windows and macOS sign by default) | 4.1 MiB/s | 3.2 MiB/s |
+  | NFS v3 | 30 MiB/s | 11 MiB/s |
+
+  Reads are limited by the Wi-Fi of the PC (the NAS stays around 50–60 % busy), writes and
+  signed transfers by the CPU of the NAS ([details](docs/DEVELOPMENT.md#smb-writes)).
 - **Web interface** over HTTPS (French, German, English), derived from
   [DIET](https://github.com/mfe-/ReadyNASDuoSparc): NAS status, disks, shares, users,
-  services, logs.
+  services, logs, SMART reports and self-tests of the disks.
 - **Optional services**, each switched on from the web interface: NFS, MiniDLNA (TVs,
   media players), automatic discovery on the network (`<name>.local`), per-user rsync and
   WebDAV. Out of the box only SMB, the web interface and SSH run.

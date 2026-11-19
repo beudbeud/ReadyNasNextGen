@@ -620,10 +620,17 @@ by the NAS, 300 MB, 3 runs each:
 | 0.1.4, TSO on | 44.8–45.4 | 68–70 % | 0.015–0.016 |
 
 NFSv3 reads with 1 MiB blocks: 23.9 MiB/s with TSO off, 29.7–29.9 MiB/s (80–85 % busy) with
-TSO on. Not checked yet: SMB reads compared byte for byte (no SMB account on the test NAS; same
-send path as nfsd, `MSG_SPLICE_PAGES`), and the guard on a failing link with TSO off (on the
-earlier trial it turned the engine off once while the PC's Wi-Fi was failing, most likely a
-false alarm: retransmissions are counted per segment, a TSO frame sent again counts for up to 45).
+TSO on. SMB 3 reads with TSO (ksmbd zero-copy reads, `MSG_SPLICE_PAGES`), 500 MiB each,
+compared by SHA-256: 15 runs identical, 28–39 MiB/s with the NAS 51–59 % busy (unsigned),
+4.1 MiB/s signed.
+
+**Known false alarm of `tx_guard`.** Once in those runs the PC's Wi-Fi dropped its association
+for 12 s (`CTRL-EVENT-DISCONNECTED` in its log, at the same second): the NAS could only
+retransmit, `tx_guard` read that as peers refusing its checksums ("TCP only retransmits") and
+turned the engine checksum, scatter-gather and TSO off until the next boot (the SMB transfer
+in progress failed, the file on disk was intact). It costs speed, not data. To do: tell a
+peer that is gone from a peer that refuses the checksums (for example retransmissions while
+ACKs still arrive). Back on without a reboot: `echo 1` to `tx_csum`, then `sg`, then `tso`.
 
 ### Jumbo frames (`patches/linux/0030`)
 
