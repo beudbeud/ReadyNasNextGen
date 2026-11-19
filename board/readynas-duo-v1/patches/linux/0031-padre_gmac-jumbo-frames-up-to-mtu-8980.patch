@@ -1,0 +1,208 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 31/31] padre_gmac: jumbo frames, MTU up to 8980
+
+MTU up to 8980, the largest of the 2.6.17 driver (receive buffers of 8000
+or 9024 bytes there, MTU 7936 or 8980, MFL = MTU + 36). The receive buffer
+and the MAC_MFL register follow the MTU (MTU + 36: 1536 at 1500, the value
+used so far). ndo_change_mtu allocates the new receive buffers first (a
+lack of memory changes nothing), then stops the MAC and the engine, swaps
+the buffers and starts again like a transmit reset, without the close and
+link hotplug events. A TCP frame over 1514 bytes is summed in software and
+sent with the engine off: with the resting command 0xc0 and GMT0_MSS at
+1500, the engine would segment it.
+
+Tried on the NAS: 9000 refused, 8980 and back to 1500 accepted, small
+pings answered at 8980, one ping lost out of 600 from the PC over the two
+restarts; at 1500 afterwards, transfers byte for byte with TSO, and both
+loopback experiments as before. Not tried end to end: no host of the test
+network answers an unfragmented ping of 3000 or 8000 bytes (the test PC is
+on Wi-Fi).
+---
+ drivers/platform/padre/padre_gmac.c | 80 ++++++++++++++++----
+ 1 file changed, 66 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/platform/padre/padre_gmac.c b/drivers/platform/padre/padre_gmac.c
+index 77d0e1e19325dfa66b7642fe724a8e47ca40e214..3629949afa3f6eafd16a0f9d16696236ae431026 100644
+--- a/drivers/platform/padre/padre_gmac.c
++++ b/drivers/platform/padre/padre_gmac.c
+@@ -187,8 +187,9 @@ struct m4d {
+ static bool meta_ddr = true;
+ module_param(meta_ddr, bool, 0644);
+ static u8 meta_ram[RING * 16] __aligned(16);
+-#define RXBUF		1536
+-#define RXALLOC		(RXBUF + 64)
++/* receive buffer = MAC_MFL = MTU + 36 (2.6.17: 1536, jumbo 8000 or 9024) */
++#define MAX_MTU		8980		/* the largest MTU of 2.6.17 */
++static unsigned int rxbuf = ETH_DATA_LEN + 36;
+ #define GM_HWIRQ	41
+ #define ICS		0x69
+ 
+@@ -371,7 +372,7 @@ static void mac_reset(void)
+ 	udelay(100);
+ 	mcx_wr(X_CFG1, 0);
+ 	udelay(100);
+-	mcx_wr(X_MFL, RXBUF);
++	mcx_wr(X_MFL, rxbuf);
+ 	udelay(1);
+ 	mcx_wr(X_CFG1, mcx_rd(X_CFG1) | CFG1_TXE);
+ 	udelay(1);
+@@ -473,10 +474,10 @@ static void set_multicast(struct net_device *dev)
+ 
+ /* ---------- rings ---------- */
+ 
+-static struct sk_buff *rx_alloc(struct napi_struct *napi)
++static struct sk_buff *rx_alloc(struct napi_struct *napi, unsigned int buf)
+ {
+-	struct sk_buff *skb = napi ? napi_alloc_skb(napi, RXALLOC) :
+-				     netdev_alloc_skb(gdev, RXALLOC);
++	struct sk_buff *skb = napi ? napi_alloc_skb(napi, buf + 64) :
++				     netdev_alloc_skb(gdev, buf + 64);
+ 	unsigned long d;
+ 
+ 	if (!skb)
+@@ -484,7 +485,7 @@ static struct sk_buff *rx_alloc(struct napi_struct *napi)
+ 	skb_reserve(skb, (32 - ((unsigned long)skb->data & 31)) & 31);
+ 	d = (unsigned long)skb->data;
+ 	/* write back and invalidate: no dirty line may land on top of the DMA */
+-	padre_flush_dcache_range(d, d + RXBUF + 2);
++	padre_flush_dcache_range(d, d + buf + 2);
+ 	return skb;
+ }
+ 
+@@ -492,7 +493,7 @@ static void rx_arm(int i)
+ {
+ 	rxd[i]->buf = PA(rxs[i]->data);
+ 	rxd[i]->stat = 0;
+-	rxd[i]->ctl = D_OWN | D_SOP | D_INTR0 | RXBUF;	/* ownership last */
++	rxd[i]->ctl = D_OWN | D_SOP | D_INTR0 | rxbuf;	/* ownership last */
+ }
+ 
+ static void rings_init(void)
+@@ -651,9 +652,9 @@ static int rx_poll(struct net_device *dev, int budget)
+ 			udelay(1);
+ 			gctrl_set(C_RXEN, 0);
+ 		}
+-		if ((ctl & (D_ERR | D_RXOVR)) || !(st & S_RXOK) || len < 60 || len > RXBUF - 2) {
++		if ((ctl & (D_ERR | D_RXOVR)) || !(st & S_RXOK) || len < 60 || len > rxbuf - 2) {
+ 			dev->stats.rx_errors++;
+-		} else if (!(nskb = rx_alloc(&gnapi))) {
++		} else if (!(nskb = rx_alloc(&gnapi, rxbuf))) {
+ 			dev->stats.rx_dropped++;
+ 		} else {
+ 			padre_flush_dcache_range((unsigned long)skb->data,
+@@ -869,9 +870,11 @@ static netdev_tx_t gm_xmit(struct sk_buff *skb, struct net_device *dev)
+ 			goto drop;
+ 		}
+ 		tx_tso++;		/* headers as the stack leaves them (tso_verify) */
+-	} else if (skb->len > RXBUF) {
++	} else if (skb->len > rxbuf) {
+ 		goto drop;
+-	} else if (skb->ip_summed == CHECKSUM_PARTIAL && !(eng && tx_hw_ok(skb))) {
++	} else if (skb->ip_summed == CHECKSUM_PARTIAL &&
++		   /* jumbo: the engine would split a TCP frame over GMT0_MSS */
++		   !(eng && tx_hw_ok(skb) && skb->len <= ETH_FRAME_LEN)) {
+ 		if (skb_checksum_help(skb))
+ 			goto drop;
+ 		tx_csum_sw++;
+@@ -1018,7 +1021,7 @@ static void link_poll(struct work_struct *unused)
+  * recovery: GMT mode 2, FIFO flush, then the open sequence), start again.
+  * Sleeps, under rtnl. loop: MAC loopback, queue left stopped.
+  */
+-static void hw_restart(struct net_device *dev, bool loop)
++static void hw_stop(struct net_device *dev)
+ {
+ 	cancel_delayed_work_sync(&link_work);
+ 	disable_irq(gm_irq_nr);
+@@ -1029,6 +1032,10 @@ static void hw_restart(struct net_device *dev, bool loop)
+ 	DJ_set(GMT0, 2);
+ 	gctrl_set(C_TXFLUSH | C_RXFLUSH, 0);
+ 	udelay(10);
++}
++
++static void hw_go(struct net_device *dev, bool loop)
++{
+ 	hw_start(dev);
+ 	if (glink) {			/* hw_start left the MAC at its reset speed */
+ 		dma_stop();
+@@ -1045,6 +1052,12 @@ static void hw_restart(struct net_device *dev, bool loop)
+ 	schedule_delayed_work(&link_work, HZ);
+ }
+ 
++static void hw_restart(struct net_device *dev, bool loop)
++{
++	hw_stop(dev);
++	hw_go(dev, loop);
++}
++
+ static void reset_task(struct work_struct *unused)
+ {
+ 	if (!rtnl_trylock()) {		/* gm_close waits for us with the lock held */
+@@ -1548,7 +1561,7 @@ static int gm_open(struct net_device *dev)
+ 
+ 	M4_set(M_IMASK, 0);
+ 	for (i = 0; i < RING; i++)
+-		if (!(rxs[i] = rx_alloc(NULL))) {
++		if (!(rxs[i] = rx_alloc(NULL, rxbuf))) {
+ 			rx_free();
+ 			return -ENOMEM;
+ 		}
+@@ -1691,6 +1704,43 @@ static int gm_set_features(struct net_device *dev, netdev_features_t f)
+ 	return 0;
+ }
+ 
++/* MTU up to 8980 like 2.6.17 (close + open there): new receive buffers
++ * first, so a lack of memory changes nothing; no hotplug event, the link
++ * stays up
++ */
++static int gm_change_mtu(struct net_device *dev, int mtu)
++{
++	unsigned int buf = mtu + 36;
++	struct sk_buff *n[RING];
++	int i;
++
++	if (!netif_running(dev)) {
++		rxbuf = buf;
++		WRITE_ONCE(dev->mtu, mtu);
++		return 0;
++	}
++	for (i = 0; i < RING; i++)
++		if (!(n[i] = rx_alloc(NULL, buf))) {
++			while (i--)
++				dev_kfree_skb_any(n[i]);
++			return -ENOMEM;
++		}
++	hw_stop(dev);
++	for (i = 0; i < 10 && (M4_get(M_RX_CTRL) & 2); i++)	/* as gm_close */
++		msleep(10);
++	msleep(10);
++	for (i = 0; i < RING; i++) {
++		rxd[i]->ctl = 0;
++		swap(rxs[i], n[i]);
++		dev_kfree_skb_any(n[i]);
++	}
++	rxbuf = buf;
++	WRITE_ONCE(dev->mtu, mtu);
++	hw_go(dev, false);
++	netdev_info(dev, "MTU %d\n", mtu);
++	return 0;
++}
++
+ static const struct net_device_ops gm_ops = {
+ 	.ndo_open		= gm_open,
+ 	.ndo_stop		= gm_close,
+@@ -1701,6 +1751,7 @@ static const struct net_device_ops gm_ops = {
+ 	.ndo_tx_timeout		= gm_tx_timeout,
+ 	.ndo_set_features	= gm_set_features,
+ 	.ndo_features_check	= gm_features_check,
++	.ndo_change_mtu		= gm_change_mtu,
+ 	.ndo_eth_ioctl		= gm_ioctl,
+ 	.ndo_validate_addr	= eth_validate_addr,
+ };
+@@ -1764,6 +1815,7 @@ static int __init gm_init(void)
+ 	dev->netdev_ops = &gm_ops;
+ 	dev->ethtool_ops = &gm_ethtool;
+ 	dev->watchdog_timeo = 5 * HZ;
++	dev->max_mtu = MAX_MTU;
+ 	dev->hw_features = NETIF_F_RXCSUM | NETIF_F_IP_CSUM | NETIF_F_SG | NETIF_F_TSO;
+ 	dev->features = NETIF_F_RXCSUM | (eng_ok ? NETIF_F_IP_CSUM | NETIF_F_SG : 0) |
+ 			(eng_ok && tso_on ? NETIF_F_TSO : 0);

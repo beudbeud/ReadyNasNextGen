@@ -1,0 +1,396 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 30/31] padre_gmac: TCP segmentation by the engine (TSO)
+
+The GMT engine of the GMAC segments TCP by itself (command bit 7, already
+part of the resting command 0xc0 sent since 0023): a TCP frame whose IP
+packet is longer than GMT0_MSS (1500, written at open like 2.6.17) leaves
+as packets of 1500 bytes. Seen in MAC loopback (tso_verify, below) on
+frames shaped like the stack's GSO frames (IP length and checksum of the
+whole frame, 12 bytes of TCP options, ACK+PSH+FIN, 4445 to 60000 bytes,
+buffers of up to 55 KiB at odd addresses): the payload per segment follows
+the TCP header length (1448 with timestamps), IP ids count up from the
+frame's, IP and TCP checksums are right (the engine computes the
+pseudo-header itself), sequence numbers follow, PSH and FIN only on the
+last segment, data and every other header field unchanged.
+
+The engine takes no MSS per frame (2.6.17 compared the length with the
+global tcp_mtu only), so ndo_features_check leaves GSO to the stack unless
+headers + gso_size make exactly 1500 bytes, the frame is TCP over IPv4
+without IP options, the engine is trusted (eng_ok) and the link runs at
+1000 Mbit/s (2.6.17 allowed TSO at that speed only). A GSO frame reaching
+gm_xmit after the engine was turned off is dropped (TCP sends it again,
+segmented by the stack); the fallback of 0023 turns TSO off with the
+checksum. NETIF_F_TSO only: no TSO_ECN (CWR on later segments), no IPv6.
+tso_max (read at boot, default 64 KiB) caps the frame handed over.
+
+On by default: padre_gmac.tso=0, the same parameter in
+/sys/module/padre_gmac/parameters at run time, or ethtool -K eth0 tso off.
+ethtool -S: tx_tso, tx_tso_drop. tso_verify (echo 1 > .../tso_verify, link
+up, the network stops for a few seconds) runs the loopback experiment and
+logs each segment of the first frame.
+
+Tried on the NAS (Wi-Fi PC): segments captured whole on the PC (GRO off
+for the capture), every TCP checksum correct, IP ids consecutive,
+1500-byte segments, no IP header or checksum error counted by the PC;
+500 MiB over raw TCP (sendfile) and NFSv3 reads byte for byte, TSO off/on
+interleaved: NAS CPU 0.049-0.052 -> 0.035-0.046 CPU s/MiB (TCP),
+0.047-0.052 -> 0.038-0.046 (NFS), 18-25 times fewer frames through the
+driver, throughput bound by the Wi-Fi either way.
+---
+ drivers/platform/padre/padre_gmac.c | 264 ++++++++++++++++++-
+ 1 file changed, 259 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/platform/padre/padre_gmac.c b/drivers/platform/padre/padre_gmac.c
+index 7d44f1d10d971133c3c2035e1b5f77e5568f79ce..77d0e1e19325dfa66b7642fe724a8e47ca40e214 100644
+--- a/drivers/platform/padre/padre_gmac.c
++++ b/drivers/platform/padre/padre_gmac.c
+@@ -14,7 +14,9 @@
+  * the engine ("meta" command descriptors) and scatter-gather, on unless
+  * padre_gmac.tx_csum=0 or ethtool -K eth0 tx off (docs/DEVELOPMENT.md);
+  * validated on the NAS; the driver goes back to software checksums by
+- * itself when transmission looks wrong.
++ * itself when transmission looks wrong. TCP segmentation by the engine
++ * (TSO, same command bit 7), on unless padre_gmac.tso=0 or ethtool -K eth0
++ * tso off.
+  *
+  * Copyright (C) 2026 the ReadyNasNextGen authors
+  */
+@@ -29,6 +31,7 @@
+ #include <linux/mii.h>
+ #include <linux/ip.h>
+ #include <linux/udp.h>
++#include <linux/tcp.h>
+ #include <net/ip.h>
+ #include <linux/interrupt.h>
+ #include <linux/workqueue.h>
+@@ -222,6 +225,17 @@ static const char *gfault;	/* why the transmit side is being reset */
+ static int gtest;		/* tx_csum_verify runs: received frames stay here */
+ static unsigned long tx_done, tx_und, tx_meta, tx_csum_hw, tx_csum_sw, tx_fallback;
+ 
++/* TSO: the engine splits a TCP frame whose IP packet is longer than GMT0_MSS
++ * (1500, written at open like 2.6.17) into packets of that size; it is given
++ * no MSS per frame, so only GSO frames whose headers + gso_size make exactly
++ * 1500 bytes go to it (gm_features_check), the stack segments the others.
++ * tso_max: largest frame handed over (read at boot).
++ */
++static bool tso_on = true;
++static unsigned int tso_max = 65536;
++module_param(tso_max, uint, 0444);
++static unsigned long tx_tso, tx_tso_drop;
++
+ static void gctrl_set(u32 set, u32 clr)
+ {
+ 	unsigned long f;
+@@ -600,8 +614,17 @@ static struct sk_buff *vt_back;
+ static u32 vt_ctl;
+ static DECLARE_COMPLETION(vt_done);
+ 
++static struct sk_buff_head tv_q;	/* tso_verify: every frame that comes back */
++
+ static void vt_rx(struct net_device *dev, struct sk_buff *skb, u32 ctl)
+ {
++	if (gtest == 2) {
++		if (skb_queue_len(&tv_q) < 100 && ether_addr_equal(skb->data + ETH_ALEN, dev->dev_addr))
++			skb_queue_tail(&tv_q, skb);
++		else
++			dev_kfree_skb_any(skb);
++		return;
++	}
+ 	if (vt_back || !ether_addr_equal(skb->data + ETH_ALEN, dev->dev_addr)) {
+ 		dev_kfree_skb_any(skb);
+ 		return;
+@@ -819,14 +842,36 @@ static bool tx_sg_ok(const struct sk_buff *skb)
+ 	return true;
+ }
+ 
++/* GSO frames the engine segments as the stack wants: TCP over IPv4 without
++ * options, headers + gso_size = GMT0_MSS, at 1000 Mbit/s like 2.6.17
++ */
++static netdev_features_t gm_features_check(struct sk_buff *skb, struct net_device *dev,
++					   netdev_features_t f)
++{
++	if (skb_is_gso(skb) &&
++	    (!READ_ONCE(eng_ok) || gspeed != 1000 || skb->protocol != htons(ETH_P_IP) ||
++	     !(skb_shinfo(skb)->gso_type & SKB_GSO_TCPV4) || ip_hdr(skb)->ihl != 5 ||
++	     skb_transport_offset(skb) != ETH_HLEN + sizeof(struct iphdr) ||
++	     sizeof(struct iphdr) + tcp_hdrlen(skb) + skb_shinfo(skb)->gso_size != ETH_DATA_LEN))
++		f &= ~NETIF_F_GSO_MASK;
++	return f;
++}
++
+ static netdev_tx_t gm_xmit(struct sk_buff *skb, struct net_device *dev)
+ {
+ 	bool eng = READ_ONCE(eng_ok);
+ 	int need = -1, meta = -1;
+ 
+-	if (skb->len > RXBUF)
++	if (skb_is_gso(skb)) {
++		/* the engine was turned off after gm_features_check: TCP sends again */
++		if (!eng || !tx_hw_ok(skb)) {
++			tx_tso_drop++;
++			goto drop;
++		}
++		tx_tso++;		/* headers as the stack leaves them (tso_verify) */
++	} else if (skb->len > RXBUF) {
+ 		goto drop;
+-	if (skb->ip_summed == CHECKSUM_PARTIAL && !(eng && tx_hw_ok(skb))) {
++	} else if (skb->ip_summed == CHECKSUM_PARTIAL && !(eng && tx_hw_ok(skb))) {
+ 		if (skb_checksum_help(skb))
+ 			goto drop;
+ 		tx_csum_sw++;
+@@ -1227,6 +1272,176 @@ static int vt_set(const char *val, const struct kernel_param *kp)
+ static const struct kernel_param_ops vt_ops = { .set = vt_set };
+ module_param_cb(tx_csum_verify, &vt_ops, NULL, 0200);
+ 
++/* ---------- tso_verify: what the engine makes of a long TCP frame ----------
++ *
++ * echo 1 > /sys/module/padre_gmac/parameters/tso_verify (link up, the network
++ * stops for a few seconds). A TCP frame shaped like a GSO frame of the stack
++ * (IP total length and checksum of the whole frame, 12 bytes of timestamp
++ * option, ACK+PSH+FIN, pseudo-header sum of the whole length) goes out
++ * with the command 00->c0 in MAC loopback; every frame that comes back is
++ * checked: IP length, id and checksum, sequence, flags, TCP checksum, header
++ * fields and data. Seen on the NAS: segments of 1500 bytes of IP whatever
++ * the TCP header length, ids counting up, both checksums, sequence and
++ * flags right (PSH and FIN on the last one only); the engine computes the
++ * pseudo-header itself (a field of 0 or without the length gives the same).
++ */
++#define TV_HDR	(ETH_HLEN + 20 + 32)
++#define TV_SEQ	0x10000000u
++#define TV_MSS	(ETH_DATA_LEN - 20 - 32)
++
++static u8 tv_byte(unsigned int i)
++{
++	return i ^ (i >> 8) ^ 0x5a;
++}
++
++/* pay bytes of payload, hpay of them after the headers, the rest in two
++ * fragments of pg (the first one at an odd address)
++ */
++static struct sk_buff *tv_frame(struct net_device *dev, struct page *pg, unsigned int pay,
++				unsigned int hpay)
++{
++	struct sk_buff *skb = alloc_skb(NET_IP_ALIGN + TV_HDR + hpay, GFP_KERNEL);
++	unsigned int rest = pay - hpay, f1 = min(rest, 5001u), i;
++	u8 *p, *d = page_address(pg);
++	struct iphdr *iph;
++	struct tcphdr *th;
++
++	if (!skb)
++		return NULL;
++	skb_reserve(skb, NET_IP_ALIGN);
++	p = skb_put_zero(skb, TV_HDR + hpay);
++	memcpy(p, dev->dev_addr, ETH_ALEN);
++	memcpy(p + ETH_ALEN, dev->dev_addr, ETH_ALEN);
++	p[12] = 0x08;
++	iph = (struct iphdr *)(p + ETH_HLEN);
++	th = (struct tcphdr *)(iph + 1);
++	iph->version = 4;
++	iph->ihl = 5;
++	iph->tot_len = htons(20 + 32 + pay);
++	iph->id = htons(0x1234);
++	iph->frag_off = htons(IP_DF);
++	iph->ttl = 64;
++	iph->protocol = IPPROTO_TCP;
++	iph->saddr = htonl(0xc0000201);
++	iph->daddr = htonl(0xc0000202);
++	iph->check = ip_fast_csum(iph, 5);
++	th->source = htons(0x1111);
++	th->dest = htons(0x2222);
++	th->seq = htonl(TV_SEQ);
++	th->ack_seq = htonl(0x20000000);
++	th->doff = 8;
++	th->ack = th->psh = th->fin = 1;
++	th->window = htons(0x1000);
++	memcpy(th + 1, "\x01\x01\x08\x0a\x01\x02\x03\x04\x05\x06\x07\x08", 12);
++	th->check = ~csum_tcpudp_magic(iph->saddr, iph->daddr, 32 + pay, IPPROTO_TCP, 0);
++	for (i = 0; i < hpay; i++)
++		p[TV_HDR + i] = tv_byte(i);
++	for (i = 0; i < rest; i++)
++		d[3 + i + (i >= f1)] = tv_byte(hpay + i);
++	if (f1) {
++		get_page(pg);
++		skb_fill_page_desc(skb, 0, pg, 3, f1);
++	}
++	if (rest > f1) {
++		get_page(pg);
++		skb_fill_page_desc(skb, 1, pg, 4 + f1, rest - f1);
++	}
++	skb->len += rest;
++	skb->data_len = rest;
++	skb->truesize += rest;
++	return skb;
++}
++
++/* one frame: 0 if it came back as the stack expects the segments */
++static int tv_run(struct net_device *dev, struct page *pg, unsigned int pay,
++		  unsigned int hpay, bool detail)
++{
++	unsigned int n = 0, got = 0, bad = 0, nseg = DIV_ROUND_UP(pay, TV_MSS);
++	struct sk_buff *skb, *b;
++
++	hw_restart(dev, true);
++	skb = tv_frame(dev, pg, pay, hpay);
++	if (!skb)
++		return -ENOMEM;
++	skb_queue_purge(&tv_q);
++	local_bh_disable();
++	spin_lock(&glock);
++	tx_put(skb, 0x00c0);
++	spin_unlock(&glock);
++	local_bh_enable();
++	msleep(300);
++	while ((b = skb_dequeue(&tv_q))) {
++		const struct iphdr *iph = (const struct iphdr *)(b->data + ETH_HLEN);
++		const struct tcphdr *th = (const struct tcphdr *)(iph + 1);
++		unsigned int tot = ntohs(iph->tot_len), off = ntohl(th->seq) - TV_SEQ, i, dl;
++		bool last = off + TV_MSS >= pay, ipok, tcpok, dok = true, hok;
++		u8 fl = ((const u8 *)th)[13], want = last ? 0x19 : 0x10;
++
++		if (b->len < TV_HDR || tot < 52 || tot + ETH_HLEN > b->len) {
++			netdev_info(dev, "tso_verify seg %u: %u bytes, unreadable\n", n, b->len);
++			bad++;
++			goto next;
++		}
++		dl = tot - 52;
++		ipok = !ip_fast_csum(iph, 5);
++		tcpok = !csum_tcpudp_magic(iph->saddr, iph->daddr, tot - 20, IPPROTO_TCP,
++					   csum_partial(th, tot - 20, 0));
++		hok = th->source == htons(0x1111) && th->dest == htons(0x2222) &&
++		      th->ack_seq == htonl(0x20000000) && th->window == htons(0x1000) &&
++		      !memcmp(th + 1, "\x01\x01\x08\x0a\x01\x02\x03\x04\x05\x06\x07\x08", 12) &&
++		      th->doff == 8 && iph->ttl == 64 && iph->frag_off == htons(IP_DF);
++		for (i = 0; i < dl && dok; i++)
++			dok = b->data[TV_HDR + i] == tv_byte(off + i);
++		got += dl;
++		if (!ipok || !tcpok || !dok || !hok || fl != want || off != n * TV_MSS ||
++		    dl != min(TV_MSS, pay - off))
++			bad++;
++		if (detail || bad == 1)
++			netdev_info(dev, "tso_verify seg %2u: ip len %4u id %04x csum %s, seq +%5u flags %02x, tcp csum %s, header %s, data %s\n",
++				    n, tot, ntohs(iph->id), ipok ? "ok" : "BAD", off, fl,
++				    tcpok ? "ok" : "BAD", hok ? "ok" : "BAD", dok ? "ok" : "BAD");
++next:
++		n++;
++		kfree_skb(b);
++	}
++	netdev_info(dev, "tso_verify %u bytes (%u in the head): %u frames back for %u segments, %u data bytes, %u wrong: %s\n",
++		    pay, hpay, n, nseg, got, bad,
++		    n == nseg && got == pay && !bad ? "as the stack expects" : "NOT as expected");
++	return n == nseg && got == pay && !bad ? 0 : -EIO;
++}
++
++static int tv_set(const char *val, const struct kernel_param *kp)
++{
++	static const unsigned int pays[] = { 3 * TV_MSS + 101, 25000, 60000 };
++	struct page *pg;
++	int r = -ENETDOWN, i, bad = 0;
++
++	if (!gdev)
++		return r;
++	pg = alloc_pages(GFP_KERNEL | __GFP_COMP, get_order(65536));
++	if (!pg)
++		return -ENOMEM;
++	rtnl_lock();
++	if (netif_running(gdev) && glink) {
++		netdev_info(gdev, "tso_verify: MAC loopback, the network stops for a few seconds\n");
++		netif_device_detach(gdev);
++		gtest = 2;
++		for (i = 0; i < ARRAY_SIZE(pays); i++)
++			bad += !!tv_run(gdev, pg, pays[i], i ? 100 : 0, !i);
++		gtest = 0;
++		skb_queue_purge(&tv_q);
++		hw_restart(gdev, false);
++		netif_device_attach(gdev);
++		r = bad ? -EIO : 0;
++	}
++	rtnl_unlock();
++	put_page(pg);
++	return r;
++}
++
++static const struct kernel_param_ops tv_ops = { .set = tv_set };
++module_param_cb(tso_verify, &tv_ops, NULL, 0200);
++
+ /* tx_csum: the feature without an ethtool binary (serial console) */
+ static int tc_set(const char *val, const struct kernel_param *kp)
+ {
+@@ -1280,6 +1495,38 @@ static int sg_get(char *buf, const struct kernel_param *kp)
+ static const struct kernel_param_ops sg_ops = { .set = sg_set, .get = sg_get };
+ module_param_cb(sg, &sg_ops, NULL, 0644);
+ 
++/* tso: segmentation by the engine without an ethtool binary (needs tx_csum
++ * and sg, the stack drops it otherwise). Read back: the device features.
++ */
++static int tso_set(const char *val, const struct kernel_param *kp)
++{
++	bool on;
++	int r = kstrtobool(val, &on);
++
++	if (r)
++		return r;
++	if (!gdev) {			/* on the command line: gm_init reads it */
++		tso_on = on;
++		return 0;
++	}
++	rtnl_lock();
++	if (on)
++		gdev->wanted_features |= NETIF_F_TSO;
++	else
++		gdev->wanted_features &= ~NETIF_F_TSO;
++	netdev_update_features(gdev);
++	rtnl_unlock();
++	return 0;
++}
++
++static int tso_get(char *buf, const struct kernel_param *kp)
++{
++	return sysfs_emit(buf, "%c\n", gdev && (gdev->features & NETIF_F_TSO) ? 'Y' : 'N');
++}
++
++static const struct kernel_param_ops tso_ops = { .set = tso_set, .get = tso_get };
++module_param_cb(tso, &tso_ops, NULL, 0644);
++
+ /* ---------- open / close ---------- */
+ 
+ static void rx_free(void)
+@@ -1391,6 +1638,7 @@ static int gm_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
+ static const char gm_stat_names[][ETH_GSTRING_LEN] = {
+ 	"rx_csum_ok", "rx_csum_bad", "rx_csum_wrong", "rx_csum_missed",
+ 	"tx_csum_hw", "tx_csum_sw", "tx_meta", "tx_underrun", "tx_csum_fallback",
++	"tx_tso", "tx_tso_drop",
+ };
+ 
+ static int gm_sset_count(struct net_device *dev, int sset)
+@@ -1415,6 +1663,8 @@ static void gm_get_ethtool_stats(struct net_device *dev, struct ethtool_stats *s
+ 	v[6] = tx_meta;
+ 	v[7] = tx_und;
+ 	v[8] = tx_fallback;
++	v[9] = tx_tso;
++	v[10] = tx_tso_drop;
+ }
+ 
+ static const struct ethtool_ops gm_ethtool = {
+@@ -1450,6 +1700,7 @@ static const struct net_device_ops gm_ops = {
+ 	.ndo_set_mac_address	= gm_set_mac,
+ 	.ndo_tx_timeout		= gm_tx_timeout,
+ 	.ndo_set_features	= gm_set_features,
++	.ndo_features_check	= gm_features_check,
+ 	.ndo_eth_ioctl		= gm_ioctl,
+ 	.ndo_validate_addr	= eth_validate_addr,
+ };
+@@ -1513,9 +1764,12 @@ static int __init gm_init(void)
+ 	dev->netdev_ops = &gm_ops;
+ 	dev->ethtool_ops = &gm_ethtool;
+ 	dev->watchdog_timeo = 5 * HZ;
+-	dev->hw_features = NETIF_F_RXCSUM | NETIF_F_IP_CSUM | NETIF_F_SG;
+-	dev->features = NETIF_F_RXCSUM | (eng_ok ? NETIF_F_IP_CSUM | NETIF_F_SG : 0);
++	dev->hw_features = NETIF_F_RXCSUM | NETIF_F_IP_CSUM | NETIF_F_SG | NETIF_F_TSO;
++	dev->features = NETIF_F_RXCSUM | (eng_ok ? NETIF_F_IP_CSUM | NETIF_F_SG : 0) |
++			(eng_ok && tso_on ? NETIF_F_TSO : 0);
++	netif_set_tso_max_size(dev, tso_max);
+ 	netif_napi_add(dev, &gnapi, gm_poll);
++	skb_queue_head_init(&tv_q);
+ 	INIT_DELAYED_WORK(&link_work, link_poll);
+ 	INIT_DELAYED_WORK(&reset_work, reset_task);
+ 
