@@ -18,6 +18,8 @@ start() {
 	/etc/init.d/S30rpcbind start >/dev/null 2>&1	# idempotent; needed by NFS only
 	mkdir -p /var/lock/subsys /var/run/nfs/sm /var/run/nfs/sm.bak
 	touch /var/run/nfs/rmtab
+	# rpc.nfsd mounts the nfsd file system itself, too late for max_block_size: mount it first
+	grep -qs " /proc/fs/nfsd " /proc/mounts || mount -t nfsd nfsd /proc/fs/nfsd 2>/dev/null
 	[ -w /proc/fs/nfsd/max_block_size ] && echo "$MAX_BLOCK" > /proc/fs/nfsd/max_block_size 2>/dev/null
 	printf "Starting NFS statd: "
 	rpc.statd && echo OK || echo FAIL
