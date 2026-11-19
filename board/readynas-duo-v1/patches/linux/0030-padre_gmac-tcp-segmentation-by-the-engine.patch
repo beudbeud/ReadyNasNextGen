@@ -23,8 +23,8 @@ segmented by the stack); the fallback of 0023 turns TSO off with the
 checksum. NETIF_F_TSO only: no TSO_ECN (CWR on later segments), no IPv6.
 tso_max (read at boot, default 64 KiB) caps the frame handed over.
 
-On by default: padre_gmac.tso=0, the same parameter in
-/sys/module/padre_gmac/parameters at run time, or ethtool -K eth0 tso off.
+Off by default: padre_gmac.tso=1, the same parameter in
+/sys/module/padre_gmac/parameters at run time, or ethtool -K eth0 tso on.
 ethtool -S: tx_tso, tx_tso_drop. tso_verify (echo 1 > .../tso_verify, link
 up, the network stops for a few seconds) runs the loopback experiment and
 logs each segment of the first frame.
@@ -36,12 +36,17 @@ for the capture), every TCP checksum correct, IP ids consecutive,
 interleaved: NAS CPU 0.049-0.052 -> 0.035-0.046 CPU s/MiB (TCP),
 0.047-0.052 -> 0.038-0.046 (NFS), 18-25 times fewer frames through the
 driver, throughput bound by the Wi-Fi either way.
+
+Still off by default: data sent through write() (arbitrary buffer shapes)
+was compared byte for byte only once, SSH and SMB not at all; and the
+tx_guard of 0023 turned the engine off once on a trial with TSO on, while
+the PC's Wi-Fi was failing (300-800 ms round trips).
 ---
- drivers/platform/padre/padre_gmac.c | 264 ++++++++++++++++++-
- 1 file changed, 259 insertions(+), 5 deletions(-)
+ drivers/platform/padre/padre_gmac.c | 271 ++++++++++++++++++-
+ 1 file changed, 265 insertions(+), 6 deletions(-)
 
 diff --git a/drivers/platform/padre/padre_gmac.c b/drivers/platform/padre/padre_gmac.c
-index 7d44f1d10d971133c3c2035e1b5f77e5568f79ce..77d0e1e19325dfa66b7642fe724a8e47ca40e214 100644
+index 7d44f1d10d971133c3c2035e1b5f77e5568f79ce..e23cb0c574fdf2e6000a91ec4701be9c3936b9ea 100644
 --- a/drivers/platform/padre/padre_gmac.c
 +++ b/drivers/platform/padre/padre_gmac.c
 @@ -14,7 +14,9 @@
@@ -50,8 +55,8 @@ index 7d44f1d10d971133c3c2035e1b5f77e5568f79ce..77d0e1e19325dfa66b7642fe724a8e47
   * validated on the NAS; the driver goes back to software checksums by
 - * itself when transmission looks wrong.
 + * itself when transmission looks wrong. TCP segmentation by the engine
-+ * (TSO, same command bit 7), on unless padre_gmac.tso=0 or ethtool -K eth0
-+ * tso off.
++ * (TSO, same command bit 7), off unless padre_gmac.tso=1 or ethtool -K eth0
++ * tso on.
   *
   * Copyright (C) 2026 the ReadyNasNextGen authors
   */
@@ -63,7 +68,17 @@ index 7d44f1d10d971133c3c2035e1b5f77e5568f79ce..77d0e1e19325dfa66b7642fe724a8e47
  #include <net/ip.h>
  #include <linux/interrupt.h>
  #include <linux/workqueue.h>
-@@ -222,6 +225,17 @@ static const char *gfault;	/* why the transmit side is being reset */
+@@ -165,7 +168,8 @@ struct m4d {
+  * 0xc0 (checksum 0x40 + TSO 0x80) is its resting state, 0x00 for one frame
+  * that must not be summed. Without the TSO bit (00<->40 only) the engine
+  * missed commands and "40->00" did not turn it off (tx_csum_verify).
+- * GMT0_MSS = 1500 and frames of at most 1514 bytes: TSO never splits.
++ * GMT0_MSS = 1500: the engine splits a longer TCP frame (TSO, used for the
++ * GSO frames that gm_features_check lets through).
+  */
+ #define META_CSUM	0xc0
+ 
+@@ -222,6 +226,17 @@ static const char *gfault;	/* why the transmit side is being reset */
  static int gtest;		/* tx_csum_verify runs: received frames stay here */
  static unsigned long tx_done, tx_und, tx_meta, tx_csum_hw, tx_csum_sw, tx_fallback;
  
@@ -73,7 +88,7 @@ index 7d44f1d10d971133c3c2035e1b5f77e5568f79ce..77d0e1e19325dfa66b7642fe724a8e47
 + * 1500 bytes go to it (gm_features_check), the stack segments the others.
 + * tso_max: largest frame handed over (read at boot).
 + */
-+static bool tso_on = true;
++static bool tso_on;		/* ponytail: on once write()/SSH/SMB are checked */
 +static unsigned int tso_max = 65536;
 +module_param(tso_max, uint, 0444);
 +static unsigned long tx_tso, tx_tso_drop;
@@ -81,7 +96,7 @@ index 7d44f1d10d971133c3c2035e1b5f77e5568f79ce..77d0e1e19325dfa66b7642fe724a8e47
  static void gctrl_set(u32 set, u32 clr)
  {
  	unsigned long f;
-@@ -600,8 +614,17 @@ static struct sk_buff *vt_back;
+@@ -600,8 +615,17 @@ static struct sk_buff *vt_back;
  static u32 vt_ctl;
  static DECLARE_COMPLETION(vt_done);
  
@@ -99,12 +114,15 @@ index 7d44f1d10d971133c3c2035e1b5f77e5568f79ce..77d0e1e19325dfa66b7642fe724a8e47
  	if (vt_back || !ether_addr_equal(skb->data + ETH_ALEN, dev->dev_addr)) {
  		dev_kfree_skb_any(skb);
  		return;
-@@ -819,14 +842,36 @@ static bool tx_sg_ok(const struct sk_buff *skb)
+@@ -819,14 +843,40 @@ static bool tx_sg_ok(const struct sk_buff *skb)
  	return true;
  }
  
 +/* GSO frames the engine segments as the stack wants: TCP over IPv4 without
-+ * options, headers + gso_size = GMT0_MSS, at 1000 Mbit/s like 2.6.17
++ * options, headers + gso_size = GMT0_MSS, at 1000 Mbit/s like 2.6.17; and
++ * buffers the engine takes as they are (gm_xmit would linearize the whole
++ * frame, up to 64 KiB, where the stack's segments copy 1.5 KiB at most:
++ * the 4-byte record marker of an NFS reply)
 + */
 +static netdev_features_t gm_features_check(struct sk_buff *skb, struct net_device *dev,
 +					   netdev_features_t f)
@@ -113,7 +131,8 @@ index 7d44f1d10d971133c3c2035e1b5f77e5568f79ce..77d0e1e19325dfa66b7642fe724a8e47
 +	    (!READ_ONCE(eng_ok) || gspeed != 1000 || skb->protocol != htons(ETH_P_IP) ||
 +	     !(skb_shinfo(skb)->gso_type & SKB_GSO_TCPV4) || ip_hdr(skb)->ihl != 5 ||
 +	     skb_transport_offset(skb) != ETH_HLEN + sizeof(struct iphdr) ||
-+	     sizeof(struct iphdr) + tcp_hdrlen(skb) + skb_shinfo(skb)->gso_size != ETH_DATA_LEN))
++	     sizeof(struct iphdr) + tcp_hdrlen(skb) + skb_shinfo(skb)->gso_size != ETH_DATA_LEN ||
++	     !tx_sg_ok(skb)))
 +		f &= ~NETIF_F_GSO_MASK;
 +	return f;
 +}
@@ -138,7 +157,7 @@ index 7d44f1d10d971133c3c2035e1b5f77e5568f79ce..77d0e1e19325dfa66b7642fe724a8e47
  		if (skb_checksum_help(skb))
  			goto drop;
  		tx_csum_sw++;
-@@ -1227,6 +1272,176 @@ static int vt_set(const char *val, const struct kernel_param *kp)
+@@ -1227,6 +1277,176 @@ static int vt_set(const char *val, const struct kernel_param *kp)
  static const struct kernel_param_ops vt_ops = { .set = vt_set };
  module_param_cb(tx_csum_verify, &vt_ops, NULL, 0200);
  
@@ -315,7 +334,7 @@ index 7d44f1d10d971133c3c2035e1b5f77e5568f79ce..77d0e1e19325dfa66b7642fe724a8e47
  /* tx_csum: the feature without an ethtool binary (serial console) */
  static int tc_set(const char *val, const struct kernel_param *kp)
  {
-@@ -1280,6 +1495,38 @@ static int sg_get(char *buf, const struct kernel_param *kp)
+@@ -1280,6 +1500,38 @@ static int sg_get(char *buf, const struct kernel_param *kp)
  static const struct kernel_param_ops sg_ops = { .set = sg_set, .get = sg_get };
  module_param_cb(sg, &sg_ops, NULL, 0644);
  
@@ -354,7 +373,7 @@ index 7d44f1d10d971133c3c2035e1b5f77e5568f79ce..77d0e1e19325dfa66b7642fe724a8e47
  /* ---------- open / close ---------- */
  
  static void rx_free(void)
-@@ -1391,6 +1638,7 @@ static int gm_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
+@@ -1391,6 +1643,7 @@ static int gm_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
  static const char gm_stat_names[][ETH_GSTRING_LEN] = {
  	"rx_csum_ok", "rx_csum_bad", "rx_csum_wrong", "rx_csum_missed",
  	"tx_csum_hw", "tx_csum_sw", "tx_meta", "tx_underrun", "tx_csum_fallback",
@@ -362,7 +381,7 @@ index 7d44f1d10d971133c3c2035e1b5f77e5568f79ce..77d0e1e19325dfa66b7642fe724a8e47
  };
  
  static int gm_sset_count(struct net_device *dev, int sset)
-@@ -1415,6 +1663,8 @@ static void gm_get_ethtool_stats(struct net_device *dev, struct ethtool_stats *s
+@@ -1415,6 +1668,8 @@ static void gm_get_ethtool_stats(struct net_device *dev, struct ethtool_stats *s
  	v[6] = tx_meta;
  	v[7] = tx_und;
  	v[8] = tx_fallback;
@@ -371,7 +390,7 @@ index 7d44f1d10d971133c3c2035e1b5f77e5568f79ce..77d0e1e19325dfa66b7642fe724a8e47
  }
  
  static const struct ethtool_ops gm_ethtool = {
-@@ -1450,6 +1700,7 @@ static const struct net_device_ops gm_ops = {
+@@ -1450,6 +1705,7 @@ static const struct net_device_ops gm_ops = {
  	.ndo_set_mac_address	= gm_set_mac,
  	.ndo_tx_timeout		= gm_tx_timeout,
  	.ndo_set_features	= gm_set_features,
@@ -379,7 +398,7 @@ index 7d44f1d10d971133c3c2035e1b5f77e5568f79ce..77d0e1e19325dfa66b7642fe724a8e47
  	.ndo_eth_ioctl		= gm_ioctl,
  	.ndo_validate_addr	= eth_validate_addr,
  };
-@@ -1513,9 +1764,12 @@ static int __init gm_init(void)
+@@ -1513,9 +1769,12 @@ static int __init gm_init(void)
  	dev->netdev_ops = &gm_ops;
  	dev->ethtool_ops = &gm_ethtool;
  	dev->watchdog_timeo = 5 * HZ;
