@@ -27,8 +27,8 @@ two SATA disks.
 | LEDs and buttons (`padre_led`, `padre_hwmon`) | ported: `/proc/sys/dev/led/*`, `/proc/sys/dev/button/*` present and both button IRQs registered at boot; LED states and button presses not checked by hand yet |
 | Ethernet NAPI, GRO, receive checksum by the engine (`patches/linux/0022`) | works: 2 GB written over SMB with the engine checked against a software checksum, 0 disagreements; see [Network driver](#network-driver-padre_gmac) |
 | Ethernet transmit checksum by the engine, scatter-gather (`patches/linux/0023`) | works, on by default: loopback experiment as expected, TCP/SSH/SMB transfers byte for byte, no checksum error on the peer; see [Transmit checksum](#transmit-checksum-by-the-engine-patcheslinux0023) |
-| Ethernet TCP segmentation by the engine, TSO (`patches/linux/0030`) | works, **off by default** (`padre_gmac.tso=1`): loopback experiment as expected, segments captured on the PC (checksums, IP ids, flags), raw TCP `sendfile()` and NFS reads byte for byte; NAS CPU per MiB sent −10 to −30 %; to do before turning it on: `write()` paths, SSH, SMB; see [TSO](#tcp-segmentation-by-the-engine-patcheslinux0030) |
-| Ethernet jumbo frames, MTU up to 8980 (`patches/linux/0031`) | implemented, not tested end to end (no jumbo host on the test network, PC on Wi-Fi); MTU 1500 unchanged, switching up and back works; see [Jumbo frames](#jumbo-frames-patcheslinux0031) |
+| Ethernet TCP segmentation by the engine, TSO (`patches/linux/0029`) | works, **off by default** (`padre_gmac.tso=1`): loopback experiment as expected, segments captured on the PC (checksums, IP ids, flags), raw TCP `sendfile()` and NFS reads byte for byte; NAS CPU per MiB sent −10 to −30 %; to do before turning it on: `write()` paths, SSH, SMB; see [TSO](#tcp-segmentation-by-the-engine-patcheslinux0029) |
+| Ethernet jumbo frames, MTU up to 8980 (`patches/linux/0030`) | implemented, not tested end to end (no jumbo host on the test network, PC on Wi-Fi); MTU 1500 unchanged, switching up and back works; see [Jumbo frames](#jumbo-frames-patcheslinux0030) |
 | SMB reads without copy (`patches/linux/0026`, ksmbd `zerocopy_read`) | works, on by default: SMB reads 17–20 MiB/s instead of 5–7 (Wi-Fi), system time ÷ 10; see [SMB](#smb-zero-copy-reads-and-signing) |
 | SMB signing, AES-CMAC for SPARC v7 (`patches/linux/0024`) | works: `cmac-aes-sparc32` passes the kernel self-tests; signed reads 3.4–3.6 MiB/s instead of 2.2–2.3 |
 | USB EHCI (VIA VT6212) | works: AHB arbitration from 2.6.17 restored; the VT6212 never re-reads the horizontal link of the head QH once the CPU has rewritten it, so a permanent dummy QH follows the head and the real QHs are chained after it |
@@ -161,8 +161,8 @@ emulation, then the drivers, then the later work on top of them.
 | `0026-ksmbd-zero-copy-reads-from-the-page-cache` | ksmbd sends SMB reads from the page cache (splice + `MSG_SPLICE_PAGES`, `zerocopy_read`) |
 | `0027-padre_sata-disks-named-before-the-usb-stick` | `padre_sata` at `fs_initcall`, usb-storage waits for the disk probes: disks `sda`/`sdb`, stick after them |
 | `0028-ksmbd-zero-copy-writes-into-the-page-cache` | ksmbd moves the data of an unsigned SMB2 WRITE from the socket into a pipe, then splices it into the file: one copy instead of two (`zerocopy_write`) |
-| `0030-padre_gmac-tcp-segmentation-by-the-engine` | Ethernet TSO by the engine for GSO frames of 1500-byte packets, off by default (`tso`), `tso_verify` loopback experiment |
-| `0031-padre_gmac-jumbo-frames-up-to-mtu-8980` | MTU up to 8980 (receive buffers and MAC_MFL follow the MTU) |
+| `0029-padre_gmac-tcp-segmentation-by-the-engine` | Ethernet TSO by the engine for GSO frames of 1500-byte packets, off by default (`tso`), `tso_verify` loopback experiment |
+| `0030-padre_gmac-jumbo-frames-up-to-mtu-8980` | MTU up to 8980 (receive buffers and MAC_MFL follow the MTU) |
 
 0001 alone does not link (it needs the MMU code of 0002); from 0002 on, every step builds.
 Shelved, not applied: `board/readynas-duo-v1/patches-shelved/linux/padre_nand-read-only-nand-flash-for-backups.patch`
@@ -446,8 +446,8 @@ noted):
 | Interrupts | one line (41) for RX and TX, mask `M4 imask`; no coalescing register known | NAPI: the interrupt masks the engine and schedules the poll |
 | Receive checksum | GMT block (DJ 0x5040 = 4) + `GMAC_CTRL` bit 22: bits 17–22 of the descriptor say IPv4, L4 checked, IP or L4 error | used: `CHECKSUM_UNNECESSARY` for good unfragmented IPv4 TCP/UDP frames (`ethtool -K eth0 rx`) |
 | Transmit checksum, scatter-gather | "meta" descriptor switching the engine's checksum state, any number of fragment descriptors (buffers < 8 bytes aligned on 8) | `patches/linux/0023`, on by default: see [below](#transmit-checksum-by-the-engine-patcheslinux0023) |
-| TSO | meta command bit 7, segment size in GMT+4 (1500 on the NAS) | `patches/linux/0030`, off by default: see [below](#tcp-segmentation-by-the-engine-patcheslinux0030) |
-| Jumbo frames | receive buffers of 8000 / 9024 bytes, MFL = MTU + 36 | `patches/linux/0031`, MTU up to 8980, not tested end to end: see [below](#jumbo-frames-patcheslinux0031) |
+| TSO | meta command bit 7, segment size in GMT+4 (1500 on the NAS) | `patches/linux/0029`, off by default: see [below](#tcp-segmentation-by-the-engine-patcheslinux0029) |
+| Jumbo frames | receive buffers of 8000 / 9024 bytes, MFL = MTU + 36 | `patches/linux/0030`, MTU up to 8980, not tested end to end: see [below](#jumbo-frames-patcheslinux0030) |
 
 **Receive checksum, validated before trusting it.** `padre_gmac.csum_verify=1` (or
 `/sys/module/padre_gmac/parameters/csum_verify`) makes the driver check every TCP/UDP frame in
@@ -516,7 +516,7 @@ for comparison), every step of `tx_csum_verify` is as expected and 40 alternatio
 all right, three runs out of three.
 
 What 0023 does: commands `c0` (TCP left to the engine, frames never above the 1500-byte
-segment size so TSO never splits; 0030 uses that split) and `00` (any other frame), sent only when the state
+segment size so TSO never splits; 0029 uses that split) and `00` (any other frame), sent only when the state
 changes; UDP (summed wrong by the engine), IP options and fragments are summed in software.
 Every change of the feature restarts the MAC and the engine (GMT mode 2, FIFO flush, open
 sequence). The driver turns it off by itself, resets and logs (`transmit checksum by the engine
@@ -545,7 +545,7 @@ The checksum alone does not help (the copy into the socket sums for free); with 
 the copy disappears. Ping (also fragmented), SSH, HTTPS and SMB work; no ping lost during
 transfers.
 
-### TCP segmentation by the engine (`patches/linux/0030`)
+### TCP segmentation by the engine (`patches/linux/0029`)
 
 Off by default for now (see the end of this section). On: `padre_gmac.tso=1` on the command
 line, `echo 1 > /sys/module/padre_gmac/parameters/tso`, or `ethtool -K eth0 tso on`. It needs
@@ -571,7 +571,7 @@ right, sequence numbers right, PSH and FIN on the last segment only, data and ev
 field unchanged. The engine computes the pseudo-header itself: a checksum field of 0 or
 without the length gives the same result.
 
-What 0030 does: `NETIF_F_TSO` (IPv4, no ECN, no IPv6). The segment size is fixed in the
+What 0029 does: `NETIF_F_TSO` (IPv4, no ECN, no IPv6). The segment size is fixed in the
 engine, so `ndo_features_check` hands a GSO frame to it only when IP header + TCP header +
 `gso_size` = 1 500 (a peer with an MSS of 1 460 without timestamps or 1 448 with them; SACK
 options are counted in the MSS by the stack), IPv4 without options, the engine trusted and the
@@ -600,7 +600,7 @@ header or checksum error counted by the PC (`/proc/net/snmp`):
 | frames given to the driver | 362 000–364 600 | 14 700–21 300 |
 | NAS TCP retransmissions | 4–167 / 362 000 | 35–225 / 362 000 |
 
-The Wi-Fi is the limit with TSO (the NAS is no longer 100 % busy), so the gain shows as CPU:
+The network link is the limit with TSO (the NAS is no longer 100 % busy), so the gain shows as CPU:
 10–30 % less per MiB sent, left for the disks and the other services. Moving the PC's Wi-Fi
 dongle from USB 2 to USB 3 did not raise the ceiling (about 19 MiB/s, signal 50 %): the radio
 link limits, not the USB bus. On a wired client the throughput should go up instead (not
@@ -618,7 +618,7 @@ frame sent again counts for up to 45), but not shown. Before turning it on: `wri
 SSH and SMB reads byte for byte on a sane link, and the guard checked with TSO off on a bad
 link.
 
-### Jumbo frames (`patches/linux/0031`)
+### Jumbo frames (`patches/linux/0030`)
 
 `ip link set eth0 mtu N` up to 8 980 (the largest MTU of 2.6.17, receive buffers of 9 024 bytes
 there; 9 000 is refused). The receive buffers and MAC_MFL follow the MTU (MTU + 36, so 1 536 at
@@ -775,7 +775,7 @@ so the scatter-gather and checksum of 0023 apply as for ksmbd. Nothing to change
 Measured on the NAS (2026-11-19, 500 MiB, NAS page cache dropped, NFSv3 1 MiB, file compared
 every time, same PC and Wi-Fi):
 
-| | 0.1.3 | + `CONFIG_PAGE_BLOCK_MAX_ORDER=8`, TSO off | + TSO (0030) |
+| | 0.1.3 | + `CONFIG_PAGE_BLOCK_MAX_ORDER=8`, TSO off | + TSO (0029) |
 |---|---|---|---|
 | NFSv3 read (3 runs) | 9.2–9.8 MiB/s, 93–94 % busy, 0.099–0.107 CPU s/MiB | 16.5–18.0 MiB/s, 70–79 % busy, 0.044–0.052 CPU s/MiB | 16.5–18.0 MiB/s, 60–70 % busy, 0.037–0.046 CPU s/MiB |
 | system time | 36.7–38.5 s | 12.8–14.2 s | 9.5–10.2 s |
@@ -787,7 +787,7 @@ migrate type scanned a whole pageblock with interrupts off (found by the SMB wri
 `get_page_from_freelist`). `CONFIG_PAGE_BLOCK_MAX_ORDER=8` (4 MiB pageblocks,
 `linux-padre-nas.fragment`) takes NFS reads to the level of SMB reads and of a raw
 `sendfile()` of the same file (0.049–0.052 CPU s/MiB): nfsd adds almost nothing on top of the
-TCP send. With TSO the NAS stays below 70 % busy, the Wi-Fi of the PC is the limit.
+TCP send. With TSO the NAS stays below 70 % busy: the network link is the limit.
 
 ## Parallel LP channels (`patches/linux/0025`)
 

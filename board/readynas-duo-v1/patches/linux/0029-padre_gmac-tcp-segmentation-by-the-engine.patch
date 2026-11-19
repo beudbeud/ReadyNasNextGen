@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 30/31] padre_gmac: TCP segmentation by the engine (TSO)
+Subject: [PATCH 29/30] padre_gmac: TCP segmentation by the engine (TSO)
 
 The GMT engine of the GMAC segments TCP by itself (command bit 7, already
 part of the resting command 0xc0 sent since 0023): a TCP frame whose IP

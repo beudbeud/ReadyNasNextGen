@@ -1,5 +1,5 @@
 From: ReadyNAS NG <readynasng@build>
-Subject: [PATCH 31/31] padre_gmac: jumbo frames, MTU up to 8980
+Subject: [PATCH 30/30] padre_gmac: jumbo frames, MTU up to 8980
 
 MTU up to 8980, the largest of the 2.6.17 driver (receive buffers of 8000
 or 9024 bytes there, MTU 7936 or 8980, MFL = MTU + 36). The receive buffer
