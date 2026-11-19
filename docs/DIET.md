@@ -267,7 +267,8 @@ is not active and has it tried once at the next restart:
    in `/tmp`, which is RAM), which writes it to `/update/package.tar` on the stick after
    checking the room left (16 MB margin). Or **download** (`?a=update_url`): only
    `https://github.com/…/releases/download/…` addresses, and the SHA-256 of the package
-   is required (busybox wget checks no certificate). 512 MB at most.
+   is required. Downloaded with curl, which checks the certificate (CA bundle
+   `/etc/ssl/certs/ca-certificates.crt`) and follows redirects only to https. 512 MB at most.
 3. **Check** in the background: the four members exactly, version and size in the manifest,
    SHA-256 of `rootfs.tar.gz` and `vmlinux.bin`, room (free + what the old slot takes ≥
    new slot + kernel + 16 MB). Any refusal leaves the active slot untouched.
@@ -422,6 +423,14 @@ the kernel. So:
   `Cache-Control: no-store`, `application/json`). Each CGI request starts
   `/bin/sh api` (~60 ms of process creation plus reading the script): with the
   tab open, lighttpd took ~45 % of the CPU when the page asked the API every 5 s.
+- **Password cache** (`auth.cache`, 10 min): the administrator password is a
+  SHA-512 crypt, which lighttpd checked again on every request (page, API, every
+  `/cache/*.json`): 0.35 s of CPU each on the Padre, in the single lighttpd process,
+  so a page load queued several of them. Measured on the NAS (2026-11-19, test
+  instance, one keep-alive connection): 0.355 s per authenticated request without
+  the cache, 0.006 s with it. A cached user who sends another password is refused
+  until the entry expires, so a password change restarts lighttpd (first setup,
+  `diet-webpass`).
 - **Page refresh** (`poll()` in `index.html`): only while the tab is visible
   (`visibilitychange`: stopped when hidden, immediate refresh when shown again);
   every **15 s** the status from `/cache/status.json`; every 4th time (1 min)
@@ -532,8 +541,9 @@ Without authentication, drop the `authorization` block. Alert examples:
 ## Packages and applets used
 
 lighttpd (with mbedTLS; only `gen_key` and `cert_write` are kept among
-the mbedTLS programs), ksmbd-tools, nfs-utils, mdadm. The package enables
-`ntpd` and HTTPS wget (Telegram) in busybox. The rest is busybox
+the mbedTLS programs), ksmbd-tools, nfs-utils, mdadm, curl (mbedTLS) with the CA
+certificates for HTTPS (Telegram, system update downloads: certificate checked). The
+package enables `ntpd` in busybox and turns off its HTTPS wget, which checks no certificate. The rest is busybox
 (`sh`, `awk`, `sed`, `hdparm`, `mkpasswd`, `start-stop-daemon`…).
 ## SMART
 
@@ -544,11 +554,13 @@ libatasmart needs libudev (the system uses mdev). SMART is read by
 `smart-lite` (package/smart-lite, one C file, 18 KB on the NAS): SG_IO with ATA
 PASS-THROUGH (16), which libata (`padre_sata`) translates. It only sends
 CHECK POWER MODE, IDENTIFY DEVICE, SMART READ DATA, SMART READ THRESHOLDS
-and SMART RETURN STATUS: never SMART ENABLE/DISABLE, self-tests or
-SET FEATURES.
+and SMART RETURN STATUS, plus SMART EXECUTE OFF-LINE IMMEDIATE with `-t` only
+(self-test): never SMART ENABLE/DISABLE or SET FEATURES.
 
     smart-lite /dev/sda        identity, health, temperature, attribute table
     smart-lite -s /dev/sda     one line: health= realloc= pending= uncorr= hours= cycles= celsius=
+                               selftest= left= short_min= long_min=
+    smart-lite -t short|long|abort /dev/sda   start (or abort) a self-test
     smart-lite -f /dev/sda     also read a disk in standby (may spin it up)
     smart-lite -F id.bin smart.bin thresh.bin [PASSED|FAILED]   decode saved sectors
 
@@ -558,6 +570,22 @@ Exit status: 0 read, 1 error, 2 disk in standby (not read, `power=standby`).
 the disk list and the metrics read that file. The "SMART report" buttons
 call `smart-lite -f` (the user asked for it). If `/usr/sbin/smartctl` exists
 (an image built with C++), it is used instead, with `-n standby`.
+
+**Self-tests** (Storage page, disk list: "Short test", "Long test", "Stop the
+test" while one runs; `POST ?a=smart_test`, docs/API.md). The disk runs the
+test itself, in the background: the data are not written, the disk keeps
+serving requests (slower), and the NAS can be used meanwhile. `smart-lite -t`
+reads SMART first and refuses when the disk has no self-test or one is
+already running; it wakes a disk in standby. The API then refreshes
+`/var/run/smart.sdX` at once (`diet-hwmon` keeps it up to date every 5 min):
+the list shows "self-test running, N % left", then "last self-test aborted" or
+"last self-test failed" (a failure also raises the "Disk to watch" banner;
+not a Telegram alert: `diet-alerts` does not read it yet; status
+0, "done without error", cannot be told apart from "never run" by this field).
+Durations given by the disks of the test NAS (WD7500AADS): short 2 min,
+extended 184 and 208 min. On some disks the spin-down timer (`hdparm -S`)
+may interrupt a long test (not checked here): it then shows as "aborted".
+Every start is a journal line (`SMART self-test short on sda`).
 
 On the WD7500AADS disks of the test NAS, neither CHECK POWER MODE, SMART
 READ DATA nor drivetemp spins up a disk in standby (`hdparm -C` stays
@@ -605,7 +633,8 @@ also checked with the API as CGI: Basic for the interface, Bearer for
   up right after the first boot.
 - Removing an SSH key: by hand (`/root/.ssh/authorized_keys`), the interface
   only adds keys.
-- busybox wget does not check the Telegram certificate.
+- HTTPS checks (Telegram, update downloads) need the right time: a NAS whose clock is
+  far off (hardware clock lost, no NTP yet) refuses the certificates until NTP sets it.
 - WebDAV: files are created by `nas` (not by the account that
   connects); COPY/MOVE only inside the same space (home
   folder or share); a client on the NAS itself (127.0.0.1) cannot

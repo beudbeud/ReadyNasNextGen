@@ -22,7 +22,9 @@ two SATA disks.
 | Built-in initramfs, `/init`, busybox, fork/exec, page faults | works |
 | SATA disks (libata, DMA through the LP coprocessor, on by default) | works: raw read 14.9 MB/s in PIO, 35.5 MB/s in DMA (about 70 MB/s per disk with direct I/O); always `sda` (bay 1) and `sdb` (bay 2), the USB stick after them (`patches/linux/0027`) |
 | Both LP channels at once (`patches/linux/0025`, `padre_sata.lp_parallel`, on by default) | works: reading both disks ×1.75 (15.2 s → 8.7 s for 2 × 512 MB), X-RAID writes +10–16 %; reads compared with PIO, written files and both mirror legs compared byte for byte; see [Parallel LP channels](#parallel-lp-channels-patcheslinux0025) |
-| Ethernet, LEDs, button, fan/temperature (`drivers/platform/padre`) | ported, to be validated |
+| Ethernet (`padre_gmac`) | works: daily use, see the NAPI and checksum rows below and [Network driver](#network-driver-padre_gmac) |
+| Fan and temperature (`padre_hwmon`, `padre-fan`) | works: temperature-controlled fan in daily use; the Duo has no LM75 (`padre_hwmon: LM75 not found` in `dmesg`), the temperature comes from the disks (`drivetemp`) |
+| LEDs and buttons (`padre_led`, `padre_hwmon`) | ported: `/proc/sys/dev/led/*`, `/proc/sys/dev/button/*` present and both button IRQs registered at boot; LED states and button presses not checked by hand yet |
 | Ethernet NAPI, GRO, receive checksum by the engine (`patches/linux/0022`) | works: 2 GB written over SMB with the engine checked against a software checksum, 0 disagreements; see [Network driver](#network-driver-padre_gmac) |
 | Ethernet transmit checksum by the engine, scatter-gather (`patches/linux/0023`) | works, on by default: loopback experiment as expected, TCP/SSH/SMB transfers byte for byte, no checksum error on the peer; see [Transmit checksum](#transmit-checksum-by-the-engine-patcheslinux0023) |
 | SMB reads without copy (`patches/linux/0026`, ksmbd `zerocopy_read`) | works, on by default: SMB reads 17–20 MiB/s instead of 5–7 (Wi-Fi), system time ÷ 10; see [SMB](#smb-zero-copy-reads-and-signing) |
@@ -34,7 +36,7 @@ two SATA disks.
 | Hardware clock (Dallas DS1337, I2C 0x68) | works: `padre_rtc` (`/dev/rtc0`), time read at boot (`RTC_HCTOSYS`), written back after NTP (`S41time`, `hwclock -w`, and `RTC_SYSTOHC`); the 16 registers are shown in `dmesg` at boot |
 | LVM (lvm2 2.03.31) | works: `board/readynas-duo-v1/patches/lvm2/` aligns the `dm_task_get_device_list()` list on 8 bytes (64-bit `dev_t`: SIGBUS from `lvm pvs` on SPARC) |
 | NAND flash, read only (`padre_nand`, `patches-shelved/linux/`, not built; kernel modules: `patches/linux/0021`) | **shelved** (2026-11-18): chip read fine (ID `ec 76`, bad block table, ECC, `mtd0` read twice identical), but reading while the system runs from the USB stick loses the stick, with or without pausing EHCI; see [below](#nand-flash-read-only-backup-shelved) |
-| ksmbd, NFS v3/v4, mdadm | ksmbd and md RAID 1 in daily use (see [SMB](#smb-zero-copy-reads-and-signing)); NFS built, not measured |
+| ksmbd, NFS v3/v4, mdadm | ksmbd and md RAID 1 in daily use (see [SMB](#smb-zero-copy-reads-and-signing)); NFS v3 and v4.2 work, measured: writes ~5 MiB/s, reads ~10 MiB/s, CPU-bound (see [NFS](#nfs-measures)) |
 | [DIET](DIET.md) web dashboard (lighttpd HTTPS) | works on the NAS (system updates, X-RAID write switch); every action tested in simulation (`test-api.sh`) |
 
 ## Build
@@ -156,6 +158,7 @@ emulation, then the drivers, then the later work on top of them.
 | `0025-padre_sata-x-raid-writes-on-parallel-lp-channels` | one LP list per SATA channel at once (`lp_parallel`, on by default, back to one at a time on any LP error) |
 | `0026-ksmbd-zero-copy-reads-from-the-page-cache` | ksmbd sends SMB reads from the page cache (splice + `MSG_SPLICE_PAGES`, `zerocopy_read`) |
 | `0027-padre_sata-disks-named-before-the-usb-stick` | `padre_sata` at `fs_initcall`, usb-storage waits for the disk probes: disks `sda`/`sdb`, stick after them |
+| `0028-ksmbd-zero-copy-writes-into-the-page-cache` | ksmbd moves the data of an unsigned SMB2 WRITE from the socket into a pipe, then splices it into the file: one copy instead of two (`zerocopy_write`) |
 
 0001 alone does not link (it needs the MMU code of 0002); from 0002 on, every step builds.
 Shelved, not applied: `board/readynas-duo-v1/patches-shelved/linux/padre_nand-read-only-nand-flash-for-backups.patch`
@@ -569,6 +572,102 @@ Table-based like `aes-generic`, so the same cache-timing exposure, with half the
 |---|---|---|
 | read, unsigned | 5–7 MiB/s, CPU 100 %, ~60–73 s system time | 17–20 MiB/s, CPU 88–92 %, 5–8 s system time |
 | read, signed | 2.2–2.3 MiB/s | 3.4–3.6 MiB/s |
+
+## SMB: writes
+
+Measured on the NAS on 2026-11-19 (0.1.3), same method as [Kernel tuning](#kernel-tuning):
+500 MiB with `smbclient -m SMB3` from a PC on Wi-Fi (it sends 4 MiB WRITEs), file read back
+and compared by SHA-256 every time, CPU from `/proc/stat`. Where the time goes was found on a
+test kernel (trial slot, never confirmed) with `CONFIG_PROFILING` (`profile=4`, `/proc/profile`
+decoded with `System.map`), ksmbd as a module with ktime counters per phase, and the sparc32
+`profile_pc()` charging the ticks deferred by an interrupts-off section to the caller of
+`arch_local_irq_restore()` instead of to that function (otherwise 20–60 % of the ticks land there).
+
+**Where an unsigned write goes** (copy path, 0.1.3; per 500 MiB, ~45–60 CPU s):
+
+| phase | cost |
+|---|---|
+| `kvmalloc` of the 4 MiB request buffer (receive thread) | 2 ms each, 0.3 s in all; but often an order-9 `kmalloc` after direct compaction (`compact_stall` up to 35, `folio_mc_copy` 3–6 % of the ticks) |
+| socket → buffer (`_copy_to_iter`, receive thread) | 13–20 % of the ticks; the receive thread uses 0.026 CPU s/MiB |
+| signature check | none (signed: `cmac_aes_sparc32_blocks` is 68 % of the ticks, 0.33 CPU s/MiB) |
+| buffer → page cache (`copy_folio_from_iter_atomic`, `kernel_write`) | 17–26 % |
+| `kvfree` | 0.05 s in all |
+| page allocator (`get_page_from_freelist`, interrupts off) | **15 %**, 35–40 % in some runs |
+| network receive (softirq: NAPI, GRO, TCP) | 8–20 % |
+
+**Pageblocks of 4 MiB (`CONFIG_PAGE_BLOCK_MAX_ORDER=8`, `linux-padre-nas.fragment`).** With
+16 KiB pages the pageblock order defaulted to `MAX_PAGE_ORDER` (12): pageblocks of 64 MiB, the
+whole RAM in 4 of them (`/proc/pagetypeinfo`). An unmovable allocation (skb, slab) falling back
+to a movable block scanned its 4096 pages with the zone lock held, interrupts off. With 256-page
+blocks `get_page_from_freelist` leaves the profile (from 15–40 % to under 1 %).
+`MAX_PAGE_ORDER` itself is unchanged. On its own it changes little for the copying path
+(0.088–0.102 CPU s/MiB against 0.091–0.104, within the spread); it is what makes the one-copy
+path below reliable. Big request buffers straight from `vmalloc` were worse (more order-0
+allocations: 0.148 CPU s/MiB, direct reclaim).
+
+**Writes with one copy (`patches/linux/0028`).** For an SMB2 WRITE of 64 KiB or more, alone
+in its PDU, not signed, not encrypted, with the data right after the headers, the receive loop
+reads only the 112 bytes of headers and moves the data from the socket into a pipe
+(`tcp_read_sock` + `skb_splice_bits`: the pipe references the socket buffers, nothing is
+copied; `tcp_splice_read()` itself needs a `sock->file`, which ksmbd sockets lack). The worker
+checks the request as before (session, tree, credits, handle, access, lock range), then
+`iter_file_splice_write()` copies the pipe into the page cache: the only copy. The whole PDU is
+read by the receive loop before the request is handed over, as before, so the stream stays in
+sync whatever the worker decides. Anything else, or a pipe that cannot be had (one per WRITE,
+its slot array 96 KiB for 4 MiB) or fills up, goes through the buffer as before (copied out of
+the pipe if needed; streams and filesystems without `iter_file_splice_write` too). Switch:
+`/sys/module/ksmbd/parameters/zerocopy_write` (default 1).
+
+Checked: files compared by SHA-256 after every run; the copy-out path (test switch), and on a
+first version that left the data in the socket, a refused WRITE, a WRITE cut short and the
+fallback, each followed by more writes on the same connection. That first version (the worker
+reading the socket while the receive loop waited) was dropped: no overlap between receiving
+and writing, and a response could leave before the client had sent all the data (smbclient then
+drops the connection). Signing is not done on the pipe: the signature covers the data in one
+buffer, and signed writes cost 0.33 CPU s/MiB in AES-CMAC anyway.
+
+Before the pageblock change, the one-copy path was bimodal: 0.071–0.086 CPU s/MiB, or
+0.116–0.152 with `get_page_from_freelist` at 40 % of the ticks (the pipe holds the NIC
+receive pages longer, so the driver's page fragments are allocated again instead of reused).
+
+**Results** (3 runs each, files compared byte for byte; the last two columns on the same boot
+of the built kernel, ksmbd built in, switch toggled between runs):
+
+| | 0.1.3 | 4 MiB pageblocks, `zerocopy_write=0` | 4 MiB pageblocks + 0028 |
+|---|---|---|---|
+| write, unsigned | 9.9–11.3 MiB/s, 0.091–0.104 CPU s/MiB | 10.4–11.3 MiB/s, 0.093–0.102 | 12.8–13.5 MiB/s, 0.075–0.082 |
+| write, signed | 2.9–3.0 MiB/s, 0.333–0.345 CPU s/MiB | | 3.0–3.1 MiB/s, 0.329–0.333 (not concerned) |
+
+On the profiling kernel the one-copy path reached 14.2–14.8 MiB/s (0.071–0.075 CPU s/MiB).
+
+Not done: a pipe kept per connection (the slot array is allocated per WRITE); signed writes
+without the buffer (the CMAC would have to walk the pipe); the same for NFS writes.
+
+## NFS: measures
+
+Measured on the NAS on 2026-11-19 (0.1.3): 500 MiB of random data from a PC on Wi-Fi, Linux
+kernel client (Debian trixie container, `--privileged --network host`), `dd bs=1M conv=fsync`
+to write, NAS page cache dropped and client remounted, then `sha256sum` to read (identical
+every time); export `rw,no_subtree_check,all_squash` as the DIET exports (`sync`), 2 nfsd
+threads (`S60nfs`); NAS CPU from `/proc/stat` over each transfer.
+
+| | write | read |
+|---|---|---|
+| v3, 32 KiB blocks (kernel default for this RAM) | 3.7–4.7 MiB/s, 0.22–0.27 CPU s/MiB | 6.6–10.8 MiB/s, ~0.1 CPU s/MiB |
+| v4.2, 32 KiB | 3.8–4.5 MiB/s | 4.9–10.1 MiB/s |
+| v3, 1 MiB blocks (`max_block_size`) | 4.9–5.2 MiB/s, 0.19–0.20 CPU s/MiB | 9.4–9.8 MiB/s |
+| v4.2, 1 MiB | 5.0–9.6 MiB/s (one run at 9.6) | 9.8–10.1 MiB/s |
+| v3 / v4.2, 1 MiB, export `async` | 5.1 / 5.0 MiB/s | 9.8 / 10.1 MiB/s |
+
+- The CPU is the limit (93–100 % busy during every transfer), as for SMB; `async` changes
+  nothing (the client already sends unstable writes and one COMMIT), so the exports stay `sync`.
+- 1 MiB per RPC (`MAX_BLOCK` in `S60nfs`, written to `/proc/fs/nfsd/max_block_size` before
+  the threads start): about 20 % less CPU per MiB written; reads unchanged. Kept.
+- Compared with SMB 3 unsigned (0.1.3, same kind of PC): reads 17–20 MiB/s, writes ~9 MiB/s.
+  NFS is slower on this NAS; its advantage is no signing cost (signed SMB: 3.4–3.6 MiB/s),
+  so for a Linux client NFS is still faster than signed SMB.
+- The low read samples (4.9, 6.6 MiB/s) were taken while other work ran on the NAS
+  (dashboard, a lighttpd test instance): the spread comes from the CPU, not the disks.
 
 ## Parallel LP channels (`patches/linux/0025`)
 
