@@ -2,7 +2,8 @@
 # Web interface password (user $1, admin by default): /etc/lighttpd/htpasswd
 # (SHA-512 crypt, read by mod_authn_file). Without this file the interface
 # only shows its "First setup" page (/cgi-bin/setup, docs/DIET.md); after a
-# change of that state, restart lighttpd. The file is never in the image.
+# change of that state, restart lighttpd (done here: it also drops the
+# password cache, auth.cache). The file is never in the image.
 U=${1:-admin}
 [ -r /etc/diet-lang.sh ] && . /etc/diet-lang.sh || tx() { printf "%s" "$1"; }
 case "$U" in *[!a-zA-Z0-9_-]*|"") echo "$(tx "Invalid user name" "Nom d’utilisateur invalide" "Ungültiger Benutzername")"; exit 1;; esac
@@ -14,3 +15,5 @@ H=$(printf '%s\n' "$P" | mkpasswd -m sha512 -S "$(head -c 12 /dev/urandom | base
 umask 077
 echo "$U:$H" > /etc/lighttpd/htpasswd.new && mv /etc/lighttpd/htpasswd.new /etc/lighttpd/htpasswd
 echo "$(tx "Password saved." "Mot de passe enregistré." "Passwort gespeichert.")"
+# lighttpd caches checked passwords (auth.cache): restart it so the new one is taken
+pidof lighttpd >/dev/null && /etc/init.d/S50lighttpd restart >/dev/null 2>&1
