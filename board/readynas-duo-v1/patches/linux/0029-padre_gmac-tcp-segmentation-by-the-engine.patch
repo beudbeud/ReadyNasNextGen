@@ -55,8 +55,8 @@ index 7d44f1d10d971133c3c2035e1b5f77e5568f79ce..e23cb0c574fdf2e6000a91ec4701be9c
   * validated on the NAS; the driver goes back to software checksums by
 - * itself when transmission looks wrong.
 + * itself when transmission looks wrong. TCP segmentation by the engine
-+ * (TSO, same command bit 7), off unless padre_gmac.tso=1 or ethtool -K eth0
-+ * tso on.
++ * (TSO, same command bit 7), on unless padre_gmac.tso=0 or ethtool -K eth0
++ * tso off.
   *
   * Copyright (C) 2026 the ReadyNasNextGen authors
   */
@@ -88,7 +88,7 @@ index 7d44f1d10d971133c3c2035e1b5f77e5568f79ce..e23cb0c574fdf2e6000a91ec4701be9c
 + * 1500 bytes go to it (gm_features_check), the stack segments the others.
 + * tso_max: largest frame handed over (read at boot).
 + */
-+static bool tso_on;		/* ponytail: on once write()/SSH/SMB are checked */
++static bool tso_on = true;	/* checked byte for byte: sendfile, write, SSH, NFS (docs/DEVELOPMENT.md) */
 +static unsigned int tso_max = 65536;
 +module_param(tso_max, uint, 0444);
 +static unsigned long tx_tso, tx_tso_drop;
