@@ -1,0 +1,608 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 28/28] ksmbd: zero-copy writes into the page cache
+
+An SMB2 WRITE was received into a buffer of up to 4 MiB (kvmalloc, often
+an order-9 kmalloc after direct compaction), copied from the socket into
+it (copy 1), then copied into the page cache by kernel_write (copy 2).
+Measured on the ReadyNAS (tick profile, 500 MiB written): copy 1 is 13-20 %
+of the CPU, copy 2 17-26 %.
+
+The receive loop now reads only the headers of a plain WRITE (the SMB2
+header and the WRITE request up to its data: 112 bytes) and moves the data
+from the socket into a pipe whose buffers reference the socket buffers
+(tcp_read_sock + skb_splice_bits, nothing copied); the worker then splices
+the pipe into the file with ->splice_write (iter_file_splice_write), the
+filesystem's own copy into the page cache being the only one. The whole
+PDU is consumed by the receive loop before the request is handed over, as
+before: the worker checks the request (session, tree, credits, handle,
+access, lock range) exactly as before, and the stream stays in sync
+whatever it decides.
+
+Only for WRITEs of 64 KiB or more, alone in their PDU (no compound),
+unsigned (the signature covers the data in one buffer), not encrypted,
+on TCP, with the data right after the headers. Otherwise, and when the pipe
+cannot be had or fills up, the data goes into a buffer as before (copied
+out of the pipe if it was already there); same for streams and files
+without iter_file_splice_write. A 64 KiB write to a named pipe (IPC$) is
+refused.
+
+Run-time switch: /sys/module/ksmbd/parameters/zerocopy_write (default 1).
+Measured on the NAS (500 MiB from a Wi-Fi PC, files compared byte for
+byte, with 4 MiB pageblocks, see linux-padre-nas.fragment): unsigned
+writes 12.8-13.5 MiB/s, 0.075-0.082 CPU s/MiB, against 10.4-11.3 MiB/s,
+0.093-0.102 CPU s/MiB with the switch off (0.1.3: 9.9-11.3 MiB/s,
+0.091-0.104 CPU s/MiB). Without the smaller pageblocks this path was
+bimodal (up to 0.15 CPU s/MiB, the page allocator at 40 %).
+---
+ fs/smb/server/connection.c    | 133 ++++++++++++++++++++++++++++++++++++++++++++++--
+ fs/smb/server/connection.h    |  10 ++++
+ fs/smb/server/ksmbd_work.c    |   3 ++
+ fs/smb/server/ksmbd_work.h    |   2 +
+ fs/smb/server/server.c        |   2 +
+ fs/smb/server/smb2pdu.c       |  33 ++++++++++--
+ fs/smb/server/transport_tcp.c |  81 +++++++++++++++++++++++++++++
+ fs/smb/server/vfs.c           |  81 +++++++++++++++++++++++++++++
+ fs/smb/server/vfs.h           |   4 ++
+ 9 files changed, 343 insertions(+), 6 deletions(-)
+
+diff --git a/fs/smb/server/connection.c b/fs/smb/server/connection.c
+index e8739b4..ddee470 100644
+--- a/fs/smb/server/connection.c
++++ b/fs/smb/server/connection.c
+@@ -6,6 +6,7 @@
+ 
+ #include <linux/mutex.h>
+ #include <linux/freezer.h>
++#include <linux/pipe_fs_i.h>
+ #include <linux/module.h>
+ 
+ #include "server.h"
+@@ -15,6 +16,7 @@
+ #include "connection.h"
+ #include "transport_tcp.h"
+ #include "transport_rdma.h"
++#include "vfs.h"
+ 
+ static DEFINE_MUTEX(init_lock);
+ 
+@@ -444,6 +446,75 @@ bool ksmbd_conn_alive(struct ksmbd_conn *conn)
+ #define SMB2_TRANSFORM_MIN_SUPPORTED_PDU_SIZE	\
+ 	(sizeof(struct smb2_transform_hdr) + sizeof(struct smb2_hdr))
+ 
++/*
++ * SMB2 WRITEs of KSMBD_ZC_WRITE_MIN bytes or more, alone in their PDU and not
++ * signed: the receive loop reads their headers into request_buf and moves
++ * their data into a pipe whose buffers reference the socket buffers (no
++ * copy); smb2_write() splices it into the file, the only copy of the data.
++ * /sys/module/ksmbd/parameters/zerocopy_write
++ */
++static bool zerocopy_write = true;
++module_param(zerocopy_write, bool, 0644);
++#define KSMBD_ZC_WRITE_MIN	(64 * 1024)
++
++/* a plain WRITE whose data, right after its headers, ends the PDU */
++static bool ksmbd_zc_write_hdr(char *buf, unsigned int pdu_size)
++{
++	struct smb2_write_req *req = smb_get_msg(buf);
++
++	BUILD_BUG_ON(KSMBD_ZC_WRITE_HDR != offsetof(struct smb2_write_req, Buffer));
++
++	return req->hdr.ProtocolId == SMB2_PROTO_NUMBER &&
++	       req->hdr.StructureSize == SMB2_HEADER_STRUCTURE_SIZE &&
++	       req->hdr.Command == SMB2_WRITE && !req->hdr.NextCommand &&
++	       !(req->hdr.Flags & (SMB2_FLAGS_SIGNED | SMB2_FLAGS_RELATED_OPERATIONS)) &&
++	       req->StructureSize == cpu_to_le16(49) &&
++	       le16_to_cpu(req->DataOffset) == KSMBD_ZC_WRITE_HDR &&
++	       le32_to_cpu(req->Length) == pdu_size - KSMBD_ZC_WRITE_HDR &&
++	       req->Channel == SMB2_CHANNEL_NONE && !req->WriteChannelInfoLength;
++}
++
++/*
++ * The data of a zero-copy WRITE from the socket into a pipe, *got bytes.
++ * NULL: no pipe; a pipe with *got < len: it filled up (pieces smaller than
++ * 1 KiB on average); ERR_PTR: the stream is lost.
++ */
++static struct pipe_inode_info *ksmbd_zc_write_recv(struct ksmbd_transport *t,
++						   unsigned int len,
++						   unsigned int *got)
++{
++	struct pipe_inode_info *pipe = alloc_pipe_info();
++	ssize_t n;
++
++	*got = 0;
++	if (!pipe)
++		return NULL;
++	pipe->readers = 1;
++	/*
++	 * One slot per piece of socket buffer (a TCP segment, ~1.4 KiB).
++	 * ponytail: one pipe per WRITE, its slot array allocated each time
++	 * (96 KiB for 4 MiB); the socket pages it holds are no longer charged
++	 * to the socket (at most len / 1 KiB pieces, then the copying path).
++	 * A pipe kept per connection if the allocation ever shows up.
++	 */
++	if (pipe_resize_ring(pipe, roundup_pow_of_two(len / 1024))) {
++		free_pipe_info(pipe);
++		return NULL;
++	}
++	pipe->max_usage = pipe->ring_size;	/* pipe_resize_ring() only lowers it */
++	while (*got < len) {
++		n = t->ops->splice_read(t, pipe, len - *got);
++		if (n <= 0) {
++			free_pipe_info(pipe);
++			return ERR_PTR(n ?: -EIO);
++		}
++		*got += n;
++		if (pipe_full(pipe->head, pipe->tail, pipe->max_usage))
++			break;
++	}
++	return pipe;
++}
++
+ /**
+  * ksmbd_conn_handler_loop() - session thread to listen on new smb requests
+  * @p:		connection instance
+@@ -460,6 +531,7 @@ int ksmbd_conn_handler_loop(void *p)
+ 	__le32 proto;
+ 	char hdr_buf[4] = {0,};
+ 	int size;
++	bool zc;
+ 
+ 	mutex_init(&conn->srv_mutex);
+ 	__module_get(THIS_MODULE);
+@@ -476,6 +548,10 @@ int ksmbd_conn_handler_loop(void *p)
+ 
+ 		kvfree(conn->request_buf);
+ 		conn->request_buf = NULL;
++		if (conn->zc_pipe) {
++			free_pipe_info(conn->zc_pipe);
++			conn->zc_pipe = NULL;
++		}
+ 
+ recheck:
+ 		if (atomic_read(&conn->req_running) + 1 > max_req) {
+@@ -515,24 +591,71 @@ recheck:
+ 
+ 		/* 4 for rfc1002 length field */
+ 		/* 1 for implied bcc[0] */
+-		size = pdu_size + 4 + 1;
++		/* zero-copy write candidate: its headers first */
++		zc = READ_ONCE(zerocopy_write) && t->ops->splice_read &&
++		     ksmbd_conn_good(conn) && pdu_size >= KSMBD_ZC_WRITE_MIN;
++		size = (zc ? KSMBD_ZC_WRITE_HDR : pdu_size) + 4 + 1;
+ 		conn->request_buf = kvmalloc(size, KSMBD_DEFAULT_GFP);
+ 		if (!conn->request_buf)
+ 			break;
+ 
+-		conn->request_buf[pdu_size + 4] = 0;
++		conn->request_buf[size - 1] = 0;
+ 		memcpy(conn->request_buf, hdr_buf, sizeof(hdr_buf));
+ 
+ 		/*
+ 		 * We already read 4 bytes to find out PDU size, now
+ 		 * read in PDU
+ 		 */
+-		size = t->ops->read(t, conn->request_buf + 4, pdu_size, 2);
++		size = t->ops->read(t, conn->request_buf + 4, size - 5, 2);
+ 		if (size < 0) {
+ 			pr_err("sock_read failed: %d\n", size);
+ 			break;
+ 		}
+ 
++		if (zc && size == KSMBD_ZC_WRITE_HDR) {
++			unsigned int len = pdu_size - KSMBD_ZC_WRITE_HDR, got = 0;
++			struct pipe_inode_info *pipe = NULL;
++			char *buf;
++
++			if (ksmbd_zc_write_hdr(conn->request_buf, pdu_size))
++				pipe = ksmbd_zc_write_recv(t, len, &got);
++			if (IS_ERR(pipe)) {
++				pr_err("sock_read failed: %ld\n", PTR_ERR(pipe));
++				break;
++			}
++			if (pipe && got == len) {
++				conn->zc_pipe = pipe;
++				size = pdu_size;
++				goto read_done;
++			}
++
++			/* not one (or the pipe filled up): the whole PDU in a
++			 * buffer, as usual
++			 */
++			buf = kvmalloc(pdu_size + 4 + 1, KSMBD_DEFAULT_GFP);
++			if (!buf) {
++				if (pipe)
++					free_pipe_info(pipe);
++				break;
++			}
++			memcpy(buf, conn->request_buf, 4 + KSMBD_ZC_WRITE_HDR);
++			buf[pdu_size + 4] = 0;
++			kvfree(conn->request_buf);
++			conn->request_buf = buf;
++			buf += 4 + KSMBD_ZC_WRITE_HDR;
++			if (pipe) {
++				ksmbd_zc_pipe_copy(pipe, buf, got);
++				free_pipe_info(pipe);
++			}
++			size = t->ops->read(t, buf + got, len - got, 2);
++			if (size < 0) {
++				pr_err("sock_read failed: %d\n", size);
++				break;
++			}
++			size += KSMBD_ZC_WRITE_HDR + got;
++		}
++read_done:
++
+ 		if (size != pdu_size) {
+ 			pr_err("PDU error. Read: %d, Expected: %d\n",
+ 			       size, pdu_size);
+@@ -574,6 +697,10 @@ out:
+ 	unload_nls(conn->local_nls);
+ 	if (default_conn_ops.terminate_fn)
+ 		default_conn_ops.terminate_fn(conn);
++	if (conn->zc_pipe) {
++		free_pipe_info(conn->zc_pipe);
++		conn->zc_pipe = NULL;
++	}
+ 	t->ops->disconnect(t);
+ 	module_put(THIS_MODULE);
+ 	return 0;
+diff --git a/fs/smb/server/connection.h b/fs/smb/server/connection.h
+index d6c1168..9124676 100644
+--- a/fs/smb/server/connection.h
++++ b/fs/smb/server/connection.h
+@@ -59,6 +59,8 @@ struct ksmbd_conn {
+ 	};
+ 	unsigned int			inet_hash;
+ 	char				*request_buf;
++	/* data of a zero-copy WRITE, after the headers in request_buf */
++	struct pipe_inode_info		*zc_pipe;
+ 	struct ksmbd_transport		*transport;
+ 	struct nls_table		*local_nls;
+ 	struct unicode_map		*um;
+@@ -147,6 +149,9 @@ struct ksmbd_transport_ops {
+ 			  struct smbdirect_buffer_descriptor_v1 *desc,
+ 			  unsigned int desc_len);
+ 	void (*free_transport)(struct ksmbd_transport *kt);
++	/* up to len bytes of the stream into a pipe (zero-copy write) */
++	ssize_t (*splice_read)(struct ksmbd_transport *t,
++			       struct pipe_inode_info *pipe, size_t len);
+ };
+ 
+ struct ksmbd_transport {
+@@ -154,6 +159,11 @@ struct ksmbd_transport {
+ 	const struct ksmbd_transport_ops	*ops;
+ };
+ 
++/* zero-copy write: the SMB2 header and the WRITE request up to its data
++ * (offsetof(struct smb2_write_req, Buffer)), read into request_buf
++ */
++#define KSMBD_ZC_WRITE_HDR	112
++
+ #define KSMBD_TCP_RECV_TIMEOUT	(7 * HZ)
+ #define KSMBD_TCP_SEND_TIMEOUT	(5 * HZ)
+ #define KSMBD_TCP_PEER_SOCKADDR(c)	((struct sockaddr *)&((c)->peer_addr))
+diff --git a/fs/smb/server/ksmbd_work.c b/fs/smb/server/ksmbd_work.c
+index 0898579..2d2ddf4 100644
+--- a/fs/smb/server/ksmbd_work.c
++++ b/fs/smb/server/ksmbd_work.c
+@@ -7,6 +7,7 @@
+ #include <linux/mm.h>
+ #include <linux/slab.h>
+ #include <linux/workqueue.h>
++#include <linux/pipe_fs_i.h>
+ 
+ #include "server.h"
+ #include "connection.h"
+@@ -57,6 +58,8 @@ void ksmbd_free_work_struct(struct ksmbd_work *work)
+ 
+ 	kfree(work->tr_buf);
+ 	kvfree(work->request_buf);
++	if (work->zc_pipe)
++		free_pipe_info(work->zc_pipe);
+ 	kfree(work->iov);
+ 
+ 	if (work->async_id)
+diff --git a/fs/smb/server/ksmbd_work.h b/fs/smb/server/ksmbd_work.h
+index fe4fa39..6f23afa 100644
+--- a/fs/smb/server/ksmbd_work.h
++++ b/fs/smb/server/ksmbd_work.h
+@@ -42,6 +42,8 @@ struct ksmbd_work {
+ 	unsigned int			zc_nr;
+ 	/* data kvecs after the header of a read response (0: one) */
+ 	unsigned int			read_iov_n;
++	/* zero-copy WRITE: its data, request_buf holds the headers only */
++	struct pipe_inode_info		*zc_pipe;
+ 
+ 	struct kvec			*iov;
+ 	int				iov_alloc_cnt;
+diff --git a/fs/smb/server/server.c b/fs/smb/server/server.c
+index ba625b5..dec82ea 100644
+--- a/fs/smb/server/server.c
++++ b/fs/smb/server/server.c
+@@ -323,6 +323,8 @@ static int queue_ksmbd_work(struct ksmbd_conn *conn)
+ 	work->conn = conn;
+ 	work->request_buf = conn->request_buf;
+ 	conn->request_buf = NULL;
++	work->zc_pipe = conn->zc_pipe;
++	conn->zc_pipe = NULL;
+ 
+ 	ksmbd_conn_enqueue_request(work);
+ 	ksmbd_conn_r_count_inc(conn);
+diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c
+index 511d765..c9962a7 100644
+--- a/fs/smb/server/smb2pdu.c
++++ b/fs/smb/server/smb2pdu.c
+@@ -7414,6 +7414,11 @@ int smb2_write(struct ksmbd_work *work)
+ 
+ 	if (test_share_config_flag(work->tcon->share_conf, KSMBD_SHARE_FLAG_PIPE)) {
+ 		ksmbd_debug(SMB, "IPC pipe write request\n");
++		if (work->zc_pipe) {	/* 64 KiB or more to a named pipe */
++			rsp->hdr.Status = STATUS_INVALID_PARAMETER;
++			smb2_set_err_rsp(work);
++			return -EINVAL;
++		}
+ 		return smb2_write_pipe(work);
+ 	}
+ 
+@@ -7497,11 +7502,32 @@ int smb2_write(struct ksmbd_work *work)
+ 			goto out;
+ 		}
+ 
+-		data_buf = (char *)(((char *)&req->hdr.ProtocolId) +
+-				    data_offset);
+-
+ 		ksmbd_debug(SMB, "filename %pD, offset %lld, len %zu\n",
+ 			    fp->filp, offset, length);
++		if (work->zc_pipe) {	/* the data is in a pipe, not after req */
++			err = ksmbd_vfs_splice_write(work, fp, length, &offset,
++						     writethrough, &nbytes);
++			if (err != -EOPNOTSUPP) {
++				if (err < 0)
++					goto out;
++				goto written;
++			}
++			data_buf = kvmalloc(length, KSMBD_DEFAULT_GFP);
++			if (!data_buf) {
++				err = -ENOMEM;
++				goto out;
++			}
++			ksmbd_zc_pipe_copy(work->zc_pipe, data_buf, length);
++			err = ksmbd_vfs_write(work, fp, data_buf, length, &offset,
++					      writethrough, &nbytes);
++			kvfree(data_buf);
++			if (err < 0)
++				goto out;
++			goto written;
++		}
++
++		data_buf = (char *)(((char *)&req->hdr.ProtocolId) +
++				    data_offset);
+ 		err = ksmbd_vfs_write(work, fp, data_buf, length, &offset,
+ 				      writethrough, &nbytes);
+ 		if (err < 0)
+@@ -7518,6 +7544,7 @@ int smb2_write(struct ksmbd_work *work)
+ 		}
+ 	}
+ 
++written:
+ 	rsp->StructureSize = cpu_to_le16(17);
+ 	rsp->DataOffset = 0;
+ 	rsp->Reserved = 0;
+diff --git a/fs/smb/server/transport_tcp.c b/fs/smb/server/transport_tcp.c
+index 51c0395..2e58937 100644
+--- a/fs/smb/server/transport_tcp.c
++++ b/fs/smb/server/transport_tcp.c
+@@ -5,6 +5,8 @@
+  */
+ 
+ #include <linux/freezer.h>
++#include <linux/pipe_fs_i.h>
++#include <net/tcp.h>
+ 
+ #include "smb_common.h"
+ #include "server.h"
+@@ -455,6 +457,84 @@ static bool ksmbd_tcp_page_cache(const struct kvec *v)
+ 	       offset_in_page(v->iov_base) + v->iov_len <= PAGE_SIZE;
+ }
+ 
++static int ksmbd_tcp_splice_actor(read_descriptor_t *desc, struct sk_buff *skb,
++				  unsigned int offset, size_t len)
++{
++	int ret = skb_splice_bits(skb, skb->sk, offset, desc->arg.data,
++				  min(desc->count, len), 0);
++
++	if (ret > 0)
++		desc->count -= ret;
++	return ret;
++}
++
++/**
++ * ksmbd_tcp_splice_read() - move up to @len bytes of the stream into @pipe:
++ * its buffers reference the socket buffers, nothing is copied. Waits for the
++ * data like ksmbd_tcp_read() (receive timeout, 2 retries); returns once
++ * @len bytes are in or the pipe is full.
++ * tcp_splice_read() cannot be used: it needs sock->file, which ksmbd
++ * sockets do not have. Same loop, on tcp_read_sock().
++ *
++ * Return:	bytes moved (> 0), otherwise error (0 never)
++ */
++static ssize_t ksmbd_tcp_splice_read(struct ksmbd_transport *t,
++				     struct pipe_inode_info *pipe, size_t len)
++{
++	struct sock *sk = TCP_TRANS(t)->sock->sk;
++	long timeo = READ_ONCE(sk->sk_rcvtimeo);
++	int retries = 2;
++	ssize_t got = 0;
++	int ret = 0;
++
++	lock_sock(sk);
++	while (got < len && !pipe_full(pipe->head, pipe->tail, pipe->max_usage)) {
++		read_descriptor_t desc = { .arg.data = pipe, .count = len - got };
++
++		if (!ksmbd_conn_alive(t->conn)) {
++			ret = -ESHUTDOWN;
++			break;
++		}
++		ret = tcp_read_sock(sk, &desc, ksmbd_tcp_splice_actor);
++		if (ret > 0) {
++			got += ret;
++			/* let the backlog in */
++			release_sock(sk);
++			lock_sock(sk);
++			continue;
++		}
++		if (ret < 0 && ret != -EAGAIN)
++			break;
++		if (sk->sk_err) {
++			ret = sock_error(sk);
++			break;
++		}
++		if (sock_flag(sk, SOCK_DONE) || (sk->sk_shutdown & RCV_SHUTDOWN) ||
++		    sk->sk_state == TCP_CLOSE) {
++			ret = -ECONNRESET;
++			break;
++		}
++		if (!skb_queue_empty(&sk->sk_receive_queue)) {
++			ret = -EIO;	/* data tcp_read_sock() does not take (urgent) */
++			break;
++		}
++		if (!timeo) {
++			if (retries-- <= 0) {
++				ret = -EAGAIN;
++				break;
++			}
++			timeo = READ_ONCE(sk->sk_rcvtimeo);
++		}
++		sk_wait_data(sk, &timeo, NULL);
++		if (signal_pending(current)) {
++			ret = -ESHUTDOWN;
++			break;
++		}
++	}
++	release_sock(sk);
++	return got ?: (ret ?: -EIO);
++}
++
+ static int ksmbd_tcp_writev(struct ksmbd_transport *t, struct kvec *iov,
+ 			    int nvecs, int size, bool need_invalidate,
+ 			    unsigned int remote_key)
+@@ -767,4 +847,5 @@ static const struct ksmbd_transport_ops ksmbd_tcp_transport_ops = {
+ 	.disconnect	= ksmbd_tcp_disconnect,
+ 	.shutdown	= ksmbd_tcp_shutdown,
+ 	.free_transport = ksmbd_tcp_free_transport,
++	.splice_read	= ksmbd_tcp_splice_read,
+ };
+diff --git a/fs/smb/server/vfs.c b/fs/smb/server/vfs.c
+index 9d2ead7..96382cd 100644
+--- a/fs/smb/server/vfs.c
++++ b/fs/smb/server/vfs.c
+@@ -21,6 +21,7 @@
+ #include <linux/crc32c.h>
+ #include <linux/namei.h>
+ #include <linux/splice.h>
++#include <linux/pipe_fs_i.h>
+ 
+ #include "glob.h"
+ #include "oplock.h"
+@@ -518,6 +519,86 @@ fail:
+ 	return nbytes == -ENOMEM ? nbytes : -EOPNOTSUPP;
+ }
+ 
++/* the first len bytes of a pipe (zero-copy write data) into a buffer */
++void ksmbd_zc_pipe_copy(struct pipe_inode_info *pipe, char *dst, size_t len)
++{
++	unsigned int tail = pipe->tail;
++
++	while (len && !pipe_empty(pipe->head, tail)) {
++		struct pipe_buffer *buf = pipe_buf(pipe, tail++);
++		size_t n = min_t(size_t, buf->len, len);
++
++		memcpy_from_page(dst, buf->page, buf->offset, n);
++		dst += n;
++		len -= n;
++	}
++}
++
++/**
++ * ksmbd_vfs_splice_write() - zero-copy write: the data of the WRITE, in
++ * work->zc_pipe (socket buffers), goes into the file through
++ * ->splice_write, which copies it once into the page cache. Same checks as
++ * ksmbd_vfs_write().
++ *
++ * Return:	-EOPNOTSUPP: use ksmbd_vfs_write() (stream, no
++ *		iter_file_splice_write); otherwise as ksmbd_vfs_write()
++ */
++int ksmbd_vfs_splice_write(struct ksmbd_work *work, struct ksmbd_file *fp,
++			   size_t count, loff_t *pos, bool sync,
++			   ssize_t *written)
++{
++	struct file *filp = fp->filp;
++	loff_t offset = *pos;
++	ssize_t w;
++	int err;
++
++	if (ksmbd_stream_fd(fp) || filp->f_op->splice_write != iter_file_splice_write)
++		return -EOPNOTSUPP;
++
++	if (work->conn->connection_type) {
++		if (!(fp->daccess & (FILE_WRITE_DATA_LE | FILE_APPEND_DATA_LE)) ||
++		    S_ISDIR(file_inode(filp)->i_mode)) {
++			pr_err("no right to write(%pD)\n", filp);
++			return -EACCES;
++		}
++	}
++
++	if (!work->tcon->posix_extensions &&
++	    check_lock_range(filp, *pos, *pos + count - 1, WRITE)) {
++		pr_err("unable to write due to lock\n");
++		return -EAGAIN;
++	}
++
++	err = rw_verify_area(WRITE, filp, pos, count);
++	if (err)
++		return err;
++
++	/* Reserve lease break for parent dir at closing time */
++	fp->reserve_lease_break = true;
++
++	/* Do we need to break any of a levelII oplock? */
++	smb_break_all_levII_oplock(work, fp, 1);
++
++	file_start_write(filp);
++	w = iter_file_splice_write(work->zc_pipe, filp, pos, count, 0);
++	file_end_write(filp);
++	if (w < 0) {
++		ksmbd_debug(VFS, "smb write failed, err = %zd\n", w);
++		return w;
++	}
++	fsnotify_modify(filp);
++	filp->f_pos = *pos;
++	*written = w;
++
++	if (sync) {
++		err = vfs_fsync_range(filp, offset, offset + *written, 0);
++		if (err < 0)
++			pr_err("fsync failed for filename = %pD, err = %d\n",
++			       filp, err);
++	}
++	return err;
++}
++
+ static int ksmbd_vfs_stream_write(struct ksmbd_file *fp, char *buf, loff_t *pos,
+ 				  size_t count)
+ {
+diff --git a/fs/smb/server/vfs.h b/fs/smb/server/vfs.h
+index 15c426d..ae554cf 100644
+--- a/fs/smb/server/vfs.h
++++ b/fs/smb/server/vfs.h
+@@ -82,6 +82,10 @@ ssize_t ksmbd_vfs_splice_read(struct ksmbd_work *work, struct ksmbd_file *fp,
+ 			      unsigned int *nvec);
+ int ksmbd_vfs_read(struct ksmbd_work *work, struct ksmbd_file *fp, size_t count,
+ 		   loff_t *pos, char *rbuf);
++void ksmbd_zc_pipe_copy(struct pipe_inode_info *pipe, char *dst, size_t len);
++int ksmbd_vfs_splice_write(struct ksmbd_work *work, struct ksmbd_file *fp,
++			   size_t count, loff_t *pos, bool sync,
++			   ssize_t *written);
+ int ksmbd_vfs_write(struct ksmbd_work *work, struct ksmbd_file *fp,
+ 		    char *buf, size_t count, loff_t *pos, bool sync,
+ 		    ssize_t *written);

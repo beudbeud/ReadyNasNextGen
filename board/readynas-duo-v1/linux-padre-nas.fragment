@@ -91,6 +91,11 @@ CONFIG_SENSORS_DRIVETEMP=y
 # X-RAID ext3 with 16 KiB blocks (RAIDiator/DIET): mounted by ext4 thanks
 # to the 16 KiB pages (patch linux/0020); LVM of /c through dm
 CONFIG_BLK_DEV_DM=y
+# Pageblocks of 4 MiB (256 pages of 16 KiB) instead of MAX_PAGE_ORDER (64 MiB:
+# the whole RAM was 4 pageblocks): an unmovable allocation falling back to a
+# movable block scanned 4096 pages with interrupts off; SMB writes spent 15-40 %
+# of the CPU in get_page_from_freelist (docs/DEVELOPMENT.md "SMB: writes")
+CONFIG_PAGE_BLOCK_MAX_ORDER=8
 # NAND flash backup (padre_nand, patches-shelved/linux/) shelved: not built, see
 # docs/DEVELOPMENT.md "NAND flash" (reading it while the system runs from the USB
 # stick loses the stick)
