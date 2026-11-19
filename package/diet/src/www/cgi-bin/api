@@ -2,7 +2,7 @@
 # DIET web API (CGI run by lighttpd), ReadyNAS Duo v1 on Linux 6.18.
 #   GET  ?a=status | config | shares | users | nfs | sys | hist | storage | services | update
 #        ?a=log&f=diet|messages|dmesg|storage|update    ?a=smart&d=sda   ?a=md&d=md0
-#   POST ?a=spindown|ksmbd|nfsd|ntp|reboot|poweroff|config|share_add|share_del|share_set
+#   POST ?a=smart_test|spindown|ksmbd|nfsd|ntp|reboot|poweroff|config|share_add|share_del|share_set
 #        |user_set|user_del|nfs_add|nfs_del|sys_set|notify_test
 #        |svc_set|dlna_set|dlna_scan|rsync_pw|rsync_c
 #        |raid_verify|raid_quick|raid_quick_accept|xraid_rw
@@ -230,9 +230,10 @@ status() {
     # bay = ata port number in the physical path of the disk, otherwise the rank
     n=; if cd -P "$b/device" 2>/dev/null; then case $PWD in */ata[0-9]*/*) n=${PWD#*/ata}; n=${n%%/*};; esac; cd /; fi
     case $n in ''|*[!0-9]*) n=$i;; esac
-    SM=null; health=""; realloc=0; pending=0; uncorr=0; hours=0
-    if [ -r "$RUN/smart.$d" ]; then . "$RUN/smart.$d"; int0 realloc pending uncorr hours
-      SM="{\"health\":\"$health\",\"realloc\":$realloc,\"pending\":$pending,\"uncorr\":$uncorr,\"hours\":$hours}"; fi
+    SM=null; health=""; realloc=0; pending=0; uncorr=0; hours=0; selftest=; left=0; short_min=0; long_min=0
+    if [ -r "$RUN/smart.$d" ]; then . "$RUN/smart.$d"; int0 realloc pending uncorr hours left short_min long_min
+      case $selftest in ''|*[!0-9]*) selftest=null;; esac   # smartctl summary: no self-test fields
+      SM="{\"health\":\"$health\",\"realloc\":$realloc,\"pending\":$pending,\"uncorr\":$uncorr,\"hours\":$hours,\"selftest\":$selftest,\"left\":$left,\"short_min\":$short_min,\"long_min\":$long_min}"; fi
     DSK="$DSK{\"dev\":\"$d\",\"bay\":$n,\"model\":\"$M\",\"gb\":$((S / 1953125)),\"temp\":${DT:-null},\"faulty\":$f,\"smart\":$SM},"
   done
   # memory, CPU (and boot time), network, disks: raw counters,
@@ -412,6 +413,28 @@ smb_enc() {
 # not), so "disabled" is not offered: it would change nothing. mandatory makes
 # every client sign (AES-CMAC by the CPU: about 3x slower transfers).
 smbsign_get() { kglobal_get "server signing" auto; [ "$KV" = mandatory ] || KV=auto; SMBSIGN=$KV; }
+# SMART self-test (smart-lite -t, or smartctl -t/-X): POST ?a=smart_test d=sda
+# t=short|long|abort. Runs inside the disk, in the background (data untouched,
+# the disk keeps serving); it wakes a disk in standby. The state comes back in
+# /var/run/smart.<d> (refreshed here, then by diet-hwmon every 5 min).
+smart_test() {
+  d=""; k=""; for kv in $(echo "$BODY" | tr '&' ' '); do case "${kv%%=*}" in d) d=${kv#*=};; t) k=${kv#*=};; esac; done
+  disks | grep -qx "$d" || fail "400 Bad Request" "$(tx "unknown disk" "disque inconnu" "unbekannte Platte")"
+  case "$k" in short|long|abort) ;; *) fail "400 Bad Request" "$(tx "Invalid setting" "Réglage invalide" "Ungültige Einstellung")";; esac
+  if [ -x "$R/usr/sbin/smartctl" ]; then
+    case $k in abort) out=$("$R/usr/sbin/smartctl" -X /dev/$d 2>&1);; *) out=$("$R/usr/sbin/smartctl" -t $k /dev/$d 2>&1);; esac
+  elif [ -x "$R/usr/sbin/smart-lite" ]; then out=$("$R/usr/sbin/smart-lite" -t $k /dev/$d 2>&1)
+  else fail "501 Not Implemented" "$(tx "no SMART tool on this system" "aucun outil SMART sur ce système" "kein SMART-Werkzeug auf diesem System")"; fi \
+    || fail "409 Conflict" "$(printf '%s' "$out" | tail -n 1)"
+  [ -x "$R/usr/sbin/smart-lite" ] && out=$("$R/usr/sbin/smart-lite" -s /dev/$d 2>/dev/null) && echo "$out" > "$RUN/smart.$d"
+  note "SMART self-test $k on $d"
+  case $k in
+    short) ok "$(tx "Short self-test started on $d (a few minutes)" "Auto-test court lancé sur $d (quelques minutes)" "Kurzer Selbsttest auf $d gestartet (einige Minuten)")" ;;
+    long) ok "$(tx "Extended self-test started on $d (several hours; the disk stays usable)" "Auto-test long lancé sur $d (plusieurs heures ; le disque reste utilisable)" "Langer Selbsttest auf $d gestartet (mehrere Stunden; die Platte bleibt nutzbar)")" ;;
+    abort) ok "$(tx "Self-test stopped on $d" "Auto-test arrêté sur $d" "Selbsttest auf $d abgebrochen")" ;;
+  esac
+}
+
 smb_sign() {
   v=""; for kv in $(echo "$BODY" | tr '&' ' '); do [ "${kv%%=*}" = v ] && v=${kv#*=}; done
   case "$v" in auto|mandatory) ;; *) fail "400 Bad Request" "$(tx "Invalid setting" "Réglage invalide" "Ungültige Einstellung")";; esac
@@ -1577,6 +1600,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
   read_body
   case "$V1:$A" in 1:token_*) fail "403 Forbidden" "$(tx "Tokens are managed in the web interface only" "Les jetons se gèrent dans l’interface seulement" "Token werden nur in der Oberfläche verwaltet")";; esac
   case "$A" in
+    smart_test) smart_test ;;
     spindown)
       for d in $(disks); do hdparm -y /dev/$d >/dev/null 2>&1; done; ok "$(tx "Disks spun down" "Disques en veille" "Platten schlafen")" ;;
     ksmbd)

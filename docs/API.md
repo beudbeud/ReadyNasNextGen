@@ -76,7 +76,7 @@ cache (`status`, `all`, `storage`, …) stay cheap otherwise.
 
 | Action | Answer |
 |---|---|
-| `status` | host, version, model, IP, uptime, load, board temperature, fan, services, disks (temperature, SMART summary), memory, `/c` usage, raw counters (CPU, network, disk), md arrays, `busy` (operations a restart would cut short) |
+| `status` | host, version, model, IP, uptime, load, board temperature, fan, services, disks (temperature, SMART summary with the self-test state: `selftest` = last status nibble, 0 done or never run, 1 aborted, 2 interrupted, 3–8 failed, 15 running; `left` %, `short_min`/`long_min`; `null` without smart-lite), memory, `/c` usage, raw counters (CPU, network, disk), md arrays, `busy` (operations a restart would cut short) |
 | `all` | `{"status":…, "storage":…, "hist":"…"}` (what the page loads first) |
 | `storage` | X-RAID / md state from `nas-raid status --json`: mode, reasons, verify and quick check, superblock; plus `layout` (below) |
 | `config` | spin-down and fan curve |
@@ -120,6 +120,7 @@ bays, for the page and for scripts; it is computed from the `xraid` object
 | Action | Body |
 |---|---|
 | `spindown`, `ksmbd`, `nfsd`, `ntp`, `notify_test`, `dlna_scan` | none |
+| `smart_test` | `d=sda`, `t=short\|long\|abort`: starts (or aborts) a SMART self-test inside the disk; 409 with the disk's reason if refused (test already running, no self-test support) |
 | `reboot`, `poweroff` | none; `force=1&confirm=FORCE` to override a 409 (below) |
 | `config` | any of `SPINDOWN_MIN FAN_PWM_MIN FAN_PWM_MAX TEMP_LOW TEMP_HIGH DISK_HIGH DISK_CRIT PERIOD` |
 | `share_add`, `share_del` | `name` |

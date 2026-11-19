@@ -194,6 +194,7 @@ dialog h3{margin:0 0 8px;font-size:16px}
       <div class="card"><h2>Disks</h2>
         <div id="dkl"></div>
         <p class="small">A SMART report wakes the disk.</p>
+        <p class="small">A self-test runs inside the disk, in the background: the data are not touched and the disk stays usable (a little slower). Its result shows here when it ends.</p>
         <pre id="smo" hidden></pre>
         <form class="cfg hw" id="cfgd" style="margin-top:12px">
           <label>Spin down after (minutes)<small>0 = never</small></label><input name="SPINDOWN_MIN" type="number" min="0" max="330">
@@ -444,6 +445,16 @@ const I18N = {
   "Technical details": ["Détails techniques", "Technische Details"],
   "SMART report": ["Rapport SMART", "SMART-Bericht"],
   "A SMART report wakes the disk.": ["Un rapport SMART réveille le disque.", "Ein SMART-Bericht weckt die Platte."],
+  "A self-test runs inside the disk, in the background: the data are not touched and the disk stays usable (a little slower). Its result shows here when it ends.": ["Un auto-test tourne dans le disque, en arrière-plan : les données ne sont pas touchées et le disque reste utilisable (un peu plus lent). Son résultat s’affiche ici à la fin.", "Ein Selbsttest läuft in der Platte im Hintergrund: die Daten bleiben unberührt und die Platte nutzbar (etwas langsamer). Das Ergebnis erscheint hier am Ende."],
+  "Short test": ["Test court", "Kurztest"],
+  "Long test": ["Test long", "Langtest"],
+  "Stop the test": ["Arrêter le test", "Test abbrechen"],
+  "self-test running, {0} % left": ["auto-test en cours, {0} % restant", "Selbsttest läuft, {0} % übrig"],
+  "last self-test aborted": ["dernier auto-test interrompu", "letzter Selbsttest abgebrochen"],
+  "last self-test failed": ["dernier auto-test en échec", "letzter Selbsttest fehlgeschlagen"],
+  "Start a short self-test on bay {0} (about {1} min)?": ["Lancer un auto-test court sur la baie {0} (environ {1} min) ?", "Kurzen Selbsttest in Schacht {0} starten (etwa {1} min)?"],
+  "Start an extended self-test on bay {0}? It reads the whole disk inside the drive: about {1} min, the disk stays usable but slower. Keep the NAS on meanwhile.": ["Lancer un auto-test long sur la baie {0} ? Le disque se relit entièrement lui-même : environ {1} min, il reste utilisable mais plus lent. Laisser le NAS allumé pendant ce temps.", "Langen Selbsttest in Schacht {0} starten? Die Platte liest sich selbst vollständig: etwa {1} min, sie bleibt nutzbar, aber langsamer. Den NAS solange eingeschaltet lassen."],
+  "Stop the self-test running on bay {0}?": ["Arrêter l’auto-test en cours sur la baie {0} ?", "Den laufenden Selbsttest in Schacht {0} abbrechen?"],
   "SMB service": ["Service SMB", "SMB-Dienst"],
   "NFS service": ["Service NFS", "NFS-Dienst"],
   "SMB service": ["Service SMB", "SMB-Dienst"],
@@ -846,6 +857,7 @@ function mdLabel(m){ return m.name; }
 function age(h){ return h>=8766 ? t('{0} years powered on', (h/8766).toLocaleString(LANG, {maximumFractionDigits:1})) : t('{0} h powered on', h); }
 function smartProblems(sm){ const p=[]; if(!sm) return p;
   if(sm.health && sm.health!=='PASSED') p.push('SMART '+sm.health);
+  if(sm.selftest>=3 && sm.selftest<=8) p.push(t('last self-test failed'));
   if(sm.realloc>0) p.push(t('{0} reallocated sectors', sm.realloc)); if(sm.pending>0) p.push(t('{0} pending sectors', sm.pending)); if(sm.uncorr>0) p.push(t('{0} unreadable sectors', sm.uncorr));
   return p; }
 function spark(vals, color){
@@ -895,12 +907,17 @@ function render(s){
     }
     const led = d.faulty ? 'bad' : 'on';   // the state is also written: "failed", SMART text
     const sp = smartProblems(d.smart); if(sp.length) smartAl.push(t('bay {0}', i)+' ('+sp.join(', ')+')');
-    const smt = !d.smart ? '' : sp.length ? sp.join(', ') : 'SMART OK · '+age(d.smart.hours);
+    const run = d.smart && d.smart.selftest===15;
+    const st = !d.smart ? '' : run ? t('self-test running, {0} % left', d.smart.left) : d.smart.selftest===1||d.smart.selftest===2 ? t('last self-test aborted') : '';
+    const smt = (!d.smart ? '' : sp.length ? sp.join(', ') : 'SMART OK · '+age(d.smart.hours)) + (st ? ' · '+st : '');
     const sm = !d.smart ? '' : sp.length ? `<span style="color:#ff8a8a">${esc(smt)}</span>` : `<span>${esc(smt)}</span>`;
     const info = `${d.gb} ${t('GB')} · ${d.temp!=null ? d.temp+' °C' : '–'}${d.faulty ? ' · '+t('failed') : ''}`;
     front.push(`<div class="bay"><span><span class="led ${led}" aria-hidden="true"></span><b>${t('Bay {0}', i)}</b> · ${esc(d.dev)}</span><span class="m" title="${esc(d.model)}">${esc(d.model)}</span><span>${info}</span>${sm}</div>`);
     rows.push(`<div class="dk"><span><b>${t('Bay {0}', i)}</b> · ${esc(d.dev)} · ${esc(d.model)}<br><span class="small">${info}${smt ? ' · <span style="color:var(--'+(sp.length?'bad':'ok')+')">'+esc(smt)+'</span>' : ''}</span></span>
-      <button class="b" data-smart="${esc(d.dev)}" data-bay="${i}">${t('SMART report')}</button></div>`);
+      <span><button class="b" data-smart="${esc(d.dev)}" data-bay="${i}">${t('SMART report')}</button>
+      ${!d.smart || d.smart.selftest==null ? '' : run ? `<button class="b" data-stest="abort" data-dev="${esc(d.dev)}" data-bay="${i}">${t('Stop the test')}</button>`
+        : `<button class="b" data-stest="short" data-dev="${esc(d.dev)}" data-bay="${i}" data-min="${d.smart.short_min||2}">${t('Short test')}</button>
+      <button class="b" data-stest="long" data-dev="${esc(d.dev)}" data-bay="${i}" data-min="${d.smart.long_min||''}">${t('Long test')}</button>`}</span></div>`);
   }
   setHtml($('#bays'), front.join(''));
   setHtml($('#dkl'), rows.join(''));
@@ -1580,6 +1597,13 @@ async function loadLog(){
 }
 $('#logf').onchange = loadLog; $('#logr').onclick = loadLog;
 $('#dkl').onclick = async ev=>{
+  const k = ev.target.dataset.stest;
+  if(k){ const b = ev.target.dataset, q = k==='short' ? t('Start a short self-test on bay {0} (about {1} min)?', b.bay, b.min)
+      : k==='long' ? t('Start an extended self-test on bay {0}? It reads the whole disk inside the drive: about {1} min, the disk stays usable but slower. Keep the NAS on meanwhile.', b.bay, b.min||'?')
+      : t('Stop the self-test running on bay {0}?', b.bay);
+    if(!confirm(q)) return;
+    try{ toast((await post('smart_test', 'd='+encodeURIComponent(b.dev)+'&t='+k)).msg); }catch(e){ toastErr(t('Error: {0}', e.message)); }
+    setTimeout(poll, 1500); return; }
   const d = ev.target.dataset.smart; if(!d) return;
   const o = $('#smo'); o.hidden = false;
   o.textContent = t('reading SMART of bay {0}…', ev.target.dataset.bay);

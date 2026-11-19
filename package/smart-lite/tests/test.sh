@@ -33,6 +33,10 @@ sm = bytearray(b"\x10\x00"); th = bytearray(b"\x10\x00")
 for i, f, v, w, raw, t in attrs:
     sm += struct.pack("<BHBB", i, f, v, w) + raw.to_bytes(6, "little") + b"\0"
     th += bytes([i, t]) + bytes(10)
+# self-test: running, 30 % left (363), self-test supported (367 bit 4),
+# 2 min short (372), extended in the word at 375 (373 = 0xff): 90 min
+sm = sm.ljust(511, b"\0")
+sm[363] = 0xf3; sm[367] = 0x1b; sm[372] = 2; sm[373] = 0xff; sm[375] = 90
 open(d + "/smart.bin", "wb").write(sector(bytes(sm)))
 open(d + "/thr.bin", "wb").write(sector(bytes(th)))
 # failing disk: attribute 5 at its threshold (pre-fail)
@@ -48,9 +52,10 @@ OUT=$($S "$T/id.bin" "$T/smart.bin" "$T/thr.bin" PASSED)
 check "identity" 'echo "$OUT" | grep -q "^Model:    WDC WD7500AADS-00M2B0$" && echo "$OUT" | grep -q "^Capacity: 750 GB$" && echo "$OUT" | grep -q "^Firmware: 01.00A01$"'
 check "health and temperature" 'echo "$OUT" | grep -q "result: PASSED" && echo "$OUT" | grep -q "^Temperature: 33 C$"'
 check "attribute rows" 'echo "$OUT" | grep -q "^  5 Reallocated_Sector_Ct   0x0033   200   200   140   Pre-fail -           3$" && echo "$OUT" | grep -q "^194 Temperature_Celsius .* 33$"'
+check "self-test state and durations" 'echo "$OUT" | grep -q "^Last self-test: in progress, 30 % left$" && echo "$OUT" | grep -q "^Self-test duration: short 2 min, extended 90 min$"'
 check "checksum ok" '! echo "$OUT" | grep -q checksum'
 OUT=$($S -s "$T/id.bin" "$T/smart.bin" "$T/thr.bin" PASSED)
-check "shell line" '[ "$OUT" = "health=PASSED realloc=3 pending=2 uncorr=1 hours=2551 cycles=369 celsius=33" ]'
+check "shell line" '[ "$OUT" = "health=PASSED realloc=3 pending=2 uncorr=1 hours=2551 cycles=369 celsius=33 selftest=15 left=30 short_min=2 long_min=90" ]'
 OUT=$($S -s "$T/id.bin" "$T/bad.bin" "$T/thr.bin")
 check "no RETURN STATUS: health from thresholds" 'case "$OUT" in health=FAILED*) true;; *) false;; esac'
 OUT=$($S "$T/id.bin" "$T/bad.bin" "$T/thr.bin")
@@ -59,4 +64,8 @@ OUT=$($S "$T/id.bin" "$T/corrupt.bin" "$T/thr.bin")
 check "bad checksum flagged" 'echo "$OUT" | grep -q "checksum mismatch"'
 OUT=$($S "$T/id.bin" "$T/smart.bin" 2>&1) && fails=$((fails + 1))
 check "usage on missing sector" 'echo "$OUT" | grep -q usage'
+OUT=$("$T/smart-lite" -t bogus /dev/null 2>&1) && fails=$((fails + 1))
+check "self-test: unknown kind refused" 'echo "$OUT" | grep -q "smart-lite -t short|long|abort"'
+OUT=$("$T/smart-lite" -t short /dev/null 2>&1) && fails=$((fails + 1))
+check "self-test: a non-ATA device is refused" 'echo "$OUT" | grep -q "SMART READ DATA failed"'
 [ $fails -eq 0 ] && echo "all smart-lite tests passed" || { echo "$fails failure(s)"; exit 1; }

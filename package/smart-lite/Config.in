@@ -1,9 +1,10 @@
 config BR2_PACKAGE_SMART_LITE
-	bool "smart-lite (read-only ATA SMART reader)"
+	bool "smart-lite (ATA SMART reader and self-test)"
 	help
 	  Small C tool reading SMART of libata disks through SG_IO and
 	  ATA PASS-THROUGH (16): identity, attributes with thresholds,
-	  overall health, temperature. Read-only commands only; a disk
-	  in standby is left asleep unless -f. Replaces smartctl
+	  overall health, temperature, self-test state; -t starts or
+	  aborts a SMART self-test. Otherwise read-only commands only; a
+	  disk in standby is left asleep unless -f. Replaces smartctl
 	  (smartmontools needs C++, absent from the toolchain) for DIET.
 	  Installed in /usr/sbin.

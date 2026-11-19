@@ -3,14 +3,21 @@
  * PASS-THROUGH (16)), without C++ (smartmontools) nor udev (libatasmart).
  *
  *   smart-lite [-f] [-s] /dev/sdX    read a disk
+ *   smart-lite -t short|long|abort /dev/sdX
+ *                                    start (or abort) a SMART self-test
  *   smart-lite -F [-s] identify.bin smart.bin thresh.bin [PASSED|FAILED]
  *                                    decode saved sectors (tests on a PC)
  *
  * Commands sent: CHECK POWER MODE, IDENTIFY DEVICE, SMART READ DATA,
- * SMART READ THRESHOLDS, SMART RETURN STATUS. Nothing that changes the disk.
+ * SMART READ THRESHOLDS, SMART RETURN STATUS; with -t only, SMART EXECUTE
+ * OFF-LINE IMMEDIATE (self-test in the background on the disk: data untouched,
+ * the disk keeps serving requests). Nothing else changes the disk.
  * A disk in standby is left asleep (prints STANDBY, exit 2) unless -f.
  * -s prints one shell line (health= realloc= pending= uncorr= hours= celsius=
- * cycles=), the format of /var/run/smart.sdX read by DIET.
+ * cycles= selftest= left= short_min= long_min=), the format of
+ * /var/run/smart.sdX read by DIET. selftest = last self-test status nibble
+ * (0 done without error or never run, 1 aborted by host, 2 interrupted by a
+ * reset, 3-8 failed, 15 running), left = percent still to do while running.
  * Exit: 0 read, 1 error, 2 disk in standby (not read).
  */
 #include <fcntl.h>
@@ -133,6 +140,27 @@ static unsigned long long raw48(const u8 *a)
 	return v;
 }
 
+static const char *selftest_name(int st)
+{
+	static const char *n[16] = {
+		"completed without error (or never run)", "aborted by the host",
+		"interrupted by a reset", "fatal error", "failed (unknown element)",
+		"failed (electrical element)", "failed (servo/seek element)",
+		"failed (read element)", "failed (handling damage)",
+		0, 0, 0, 0, 0, 0, "in progress"};
+	return n[st] ? n[st] : "reserved status";
+}
+
+/* SMART READ DATA: self-test execution status (byte 363), polling times in
+ * minutes (372 short, 373 extended, 0xff there: word 375) */
+static void selftest(const u8 *smart, int *st, int *left, int *smin, int *lmin)
+{
+	*st = smart[363] >> 4;
+	*left = *st == 15 ? (smart[363] & 0x0f) * 10 : 0;
+	*smin = smart[372];
+	*lmin = smart[373] == 0xff ? smart[375] | smart[376] << 8 : smart[373];
+}
+
 static void report(const char *dev, const u8 *id, const u8 *smart,
 		   const u8 *thr, const char *health, int shell)
 {
@@ -163,12 +191,15 @@ static void report(const char *dev, const u8 *id, const u8 *smart,
 	if (!health)
 		health = failing ? "FAILED" : "PASSED";
 
+	int st, left, smin, lmin;
+	selftest(smart, &st, &left, &smin, &lmin);
+
 	if (shell) {
 		printf("health=%s realloc=%lld pending=%lld uncorr=%lld hours=%lld cycles=%lld",
 		       health, realloc, pending, uncorr, hours, cycles);
 		if (temp >= 0)
 			printf(" celsius=%d", temp);
-		printf("\n");
+		printf(" selftest=%d left=%d short_min=%d long_min=%d\n", st, left, smin, lmin);
 		return;
 	}
 
@@ -190,6 +221,10 @@ static void report(const char *dev, const u8 *id, const u8 *smart,
 	printf("SMART overall-health self-assessment test result: %s\n", health);
 	if (temp >= 0)
 		printf("Temperature: %d C\n", temp);
+	printf("Last self-test: %s", selftest_name(st));
+	if (st == 15)
+		printf(", %d %% left", left);
+	printf("\nSelf-test duration: short %d min, extended %d min\n", smin, lmin);
 	if (!checksum_ok(smart))
 		printf("Warning: SMART data checksum mismatch\n");
 	printf("\nID# ATTRIBUTE_NAME          FLAG   VALUE WORST THRESH TYPE     WHEN_FAILED RAW_VALUE\n");
@@ -225,11 +260,17 @@ static int load(const char *path, u8 *buf)
 
 int main(int argc, char **argv)
 {
-	int force = 0, shell = 0, files = 0, c;
+	int force = 0, shell = 0, files = 0, test = -1, c;
 	u8 id[512], smart[512], thr[512], r[6];
 
-	while ((c = getopt(argc, argv, "fsF")) != -1)
+	while ((c = getopt(argc, argv, "fsFt:")) != -1)
 		switch (c) {
+		case 't':       /* SMART EXECUTE OFF-LINE IMMEDIATE subcommand */
+			test = !strcmp(optarg, "short") ? 1 : !strcmp(optarg, "long") ? 2 :
+			       !strcmp(optarg, "abort") ? 0x7f : -2;
+			if (test == -2)
+				goto usage;
+			break;
 		case 'f': force = 1; break;
 		case 's': shell = 1; break;
 		case 'F': files = 1; break;
@@ -250,6 +291,26 @@ int main(int argc, char **argv)
 	if (fd < 0) {
 		perror(argv[0]);
 		return 1;
+	}
+	if (test >= 0) {        /* wakes the disk if it sleeps: asked for */
+		if (ata_cmd(fd, 0xb0, 0xd0, 0, smart, r) < 0) {
+			fprintf(stderr, "%s: SMART READ DATA failed (SMART disabled or not an ATA disk)\n", argv[0]);
+			return 1;
+		}
+		if (test != 0x7f && !(smart[367] & 0x10)) {   /* off-line capability bit 4 */
+			fprintf(stderr, "%s: this disk has no SMART self-test\n", argv[0]);
+			return 1;
+		}
+		if (test != 0x7f && smart[363] >> 4 == 15) {
+			fprintf(stderr, "%s: a self-test is already running\n", argv[0]);
+			return 1;
+		}
+		if (ata_cmd(fd, 0xb0, 0xd4, test, NULL, r) < 0) {
+			fprintf(stderr, "%s: SMART EXECUTE OFF-LINE IMMEDIATE failed\n", argv[0]);
+			return 1;
+		}
+		close(fd);
+		return 0;
 	}
 	/* CHECK POWER MODE: count 0x00/0x01 = standby; anything else spins */
 	if (!force && ata_cmd(fd, 0xe5, 0, 0, NULL, r) == 0 && r[1] <= 0x01) {
@@ -272,6 +333,7 @@ int main(int argc, char **argv)
 	return 0;
 usage:
 	fprintf(stderr, "usage: smart-lite [-f] [-s] /dev/sdX\n"
+		"       smart-lite -t short|long|abort /dev/sdX\n"
 		"       smart-lite -F [-s] identify.bin smart.bin thresh.bin [PASSED|FAILED]\n");
 	return 1;
 }

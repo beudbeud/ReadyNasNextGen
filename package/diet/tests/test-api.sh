@@ -84,8 +84,10 @@ stub hdparm
 stub hostname 'echo readynas'
 stub mdadm 'echo "/dev/md0: simulated"; echo "  State : clean"'
 stub dmesg 'echo "[    1.0] sd 0:0:0:0: [sda] 3907029168 512-byte logical blocks"'
-# wget: Telegram, or the minidlnad status page (file counts)
-stub wget 'case "$*" in *127.0.0.1:8200*) echo "<tr><td>Audio files</td><td>12</td></tr><tr><td>Video files</td><td>3</td></tr><tr><td>Image files</td><td>40</td></tr>";; *) echo "{\"ok\":true}";; esac'
+# wget: the minidlnad status page (file counts, plain HTTP on 127.0.0.1)
+stub wget 'case "$*" in *127.0.0.1:8200*) echo "<tr><td>Audio files</td><td>12</td></tr><tr><td>Video files</td><td>3</td></tr><tr><td>Image files</td><td>40</td></tr>";; esac'
+# curl: HTTPS (Telegram); refuses to run without certificate checking
+stub curl 'case "$*" in *--cacert\ /etc/ssl/certs/ca-certificates.crt*) ;; *) echo "no --cacert" >&2; exit 60;; esac; case "$*" in *--insecure*|*\ -k\ *) exit 60;; esac; echo "{\"ok\":true}"'
 stub start-stop-daemon
 stub lighttpd '[ ! -e "$DIET_ROOT/lighttpd.ko" ]'
 stub chown
@@ -380,7 +382,7 @@ check "sys_set: diet-notify.conf mode 600" '[ "$(stat -c %a "$R"/etc/diet-notify
 api GET a=sys
 check "sys: reads back network, DNS, Telegram" "json 'j[\"net\"]==\"static\" and j[\"ip\"]==\"10.0.0.5\" and j[\"gw\"]==\"10.0.0.1\" and j[\"dns\"]==\"10.0.0.53 10.0.0.54\" and j[\"tgset\"]==1 and j[\"tgchat\"]==\"42\"'"
 api POST a=notify_test ''
-check "notify_test: sent (simulated wget)" '[ "$ST" = 200 ] && grep -q "wget .*api.telegram.org/bot123456:ABC-test/sendMessage" "$R"/cmd.log'
+check "notify_test: sent (simulated curl, certificate checked)" '[ "$ST" = 200 ] && grep -q "curl .*--cacert /etc/ssl/certs/ca-certificates.crt.*api.telegram.org/bot123456:ABC-test/sendMessage" "$R"/cmd.log'
 api POST a=sys_set "host=nas-test&lang=en&tz=UTC0&net=dhcp&tgchat="
 check "sys_set: DHCP and Telegram disabled" 'grep -q "iface eth0 inet dhcp" "$R"/etc/network/interfaces && [ ! -e "$R"/etc/diet-notify.conf ]'
 api POST a=sys_set 'host=Bad_Name'
@@ -934,6 +936,8 @@ mkdir -p "$R"/usr/sbin; cat > "$R"/usr/sbin/smart-lite <<'SLEOF'
 echo "smart-lite $*" >> "${0%/usr/sbin/smart-lite}"/cmd.log
 case "$*" in
 -s*/dev/sdb) echo power=standby; exit 2;;
+-t*/dev/sdb) echo "/dev/sdb: a self-test is already running" >&2; exit 1;;
+-t*) ;;
 -s*) echo 'health=PASSED realloc=0 pending=2 uncorr=2 hours=2551 cycles=369 celsius=33';;
 *) echo "Device:   $2"; echo 'SMART overall-health self-assessment test result: PASSED';;
 esac
@@ -943,6 +947,24 @@ api GET 'a=smart&d=sda'
 check "smart with smart-lite: full report, forced (-f: the user asked for it)" 'case "$OUT" in *"Device:   /dev/sda"*"result: PASSED"*) true;; *) false;; esac && grep -q "^smart-lite -f /dev/sda$" "$R"/cmd.log'
 api GET 'a=smart&d=..%2Fetc'
 check "smart: unknown disk refused" '[ "$ST" = 400 ]'
+# SMART self-test from the interface (POST ?a=smart_test d= t=short|long|abort)
+api POST a=smart_test 'd=sda&t=short'
+check "smart_test: short test started, summary refreshed, logged" '[ "$ST" = 200 ] && grep -q "^smart-lite -t short /dev/sda$" "$R"/cmd.log && grep -q "^smart-lite -s /dev/sda$" "$R"/cmd.log && grep -q "SMART self-test short on sda" "$R"/var/log/diet.log'
+api POST a=smart_test 'd=sda&t=long'
+check "smart_test: extended test" '[ "$ST" = 200 ] && grep -q "^smart-lite -t long /dev/sda$" "$R"/cmd.log'
+api POST a=smart_test 'd=sda&t=erase'
+check "smart_test: unknown kind refused" '[ "$ST" = 400 ] && ! grep -q "smart-lite -t erase" "$R"/cmd.log'
+api POST a=smart_test 'd=..%2Fetc&t=short'
+check "smart_test: unknown disk refused" '[ "$ST" = 400 ]'
+api POST a=smart_test 'd=sdb&t=short'
+check "smart_test: refusal of the disk passed on (409)" '[ "$ST" = 409 ] && case "$OUT" in *"already running"*) true;; *) false;; esac'
+api POST a=smart_test 'd=sda&t=short' '' ''
+check "smart_test: POST without X-Diet refused" '[ "$ST" = 403 ]'
+cp "$R"/var/run/smart.sda "$R"/smart.sda.keep
+echo 'health=PASSED realloc=0 pending=0 uncorr=0 hours=10 cycles=5 celsius=30 selftest=15 left=40 short_min=2 long_min=95' > "$R"/var/run/smart.sda
+api GET a=status
+check "status: self-test state of the disk" "json 'any(d[\"smart\"] and d[\"smart\"][\"selftest\"]==15 and d[\"smart\"][\"left\"]==40 and d[\"smart\"][\"long_min\"]==95 for d in j[\"disks\"])'"
+mv "$R"/smart.sda.keep "$R"/var/run/smart.sda
 
 # ---------- system update (nas-update: two slots on a simulated USB stick) ----------
 # The stick is a folder (DIET_STICK, no mount), the jobs run in the foreground
@@ -1064,7 +1086,7 @@ api GET a=update
 check "update: refused while the running system is not the active one" "json 'j[\"job\"][\"state\"]==\"failed\" and \"not the active slot\" in j[\"job\"][\"msg\"]' && [ \"\$(cat $K/rootfs-b/sbin/init)\" = new-init ]"
 running rootfs-b; rm -f "$K/boot/slot.try"
 # download (GitHub release URL + SHA-256)
-stub wget 'case "$*" in *github.com*) cat "$DIET_ROOT/images/readynasng-update-2.0.tar";; *127.0.0.1:8200*) echo "<tr><td>Audio files</td><td>12</td></tr><tr><td>Video files</td><td>3</td></tr><tr><td>Image files</td><td>40</td></tr>";; *) echo "{\"ok\":true}";; esac'
+stub curl 'case "$*" in *--cacert\ /etc/ssl/certs/ca-certificates.crt*) ;; *) exit 60;; esac; case "$*" in *github.com*) cat "$DIET_ROOT/images/readynasng-update-2.0.tar";; *) echo "{\"ok\":true}";; esac'
 U=https://github.com/example/ReadyNasNextGen/releases/download/v2.0/readynasng-update-2.0.tar
 S2=$(cut -d' ' -f1 "$P2.sha256")
 api POST a=update_url "url=$(enc http://example.com/x.tar)&sha=$S2"
@@ -1090,7 +1112,7 @@ echo 'health=PASSED realloc=0 pending=0 uncorr=0 hours=7' > "$R"/var/run/smart.s
 PATH="$R/bin:$PATH" DIET_ONCE=1 $SH "$SRC"/usr/sbin/diet-hwmon
 sleep 1
 check "diet-hwmon: history written" 'grep -q " 45 1800 120$" "$R"/var/run/hwmon.hist'
-check "diet-hwmon: alert logged and sent" 'grep -q "RAID degraded" "$R"/var/run/alert.last && grep -q "ALERT" "$R"/var/log/diet.log && grep -q "wget .*sendMessage" "$R"/cmd.log'
+check "diet-hwmon: alert logged and sent" 'grep -q "RAID degraded" "$R"/var/run/alert.last && grep -q "ALERT" "$R"/var/log/diet.log && grep -q "curl .*sendMessage" "$R"/cmd.log'
 check "diet-hwmon: SMART by smart-lite -s, disk in standby left alone (previous reading kept)" 'grep -qx "health=PASSED realloc=0 pending=2 uncorr=2 hours=2551 cycles=369 celsius=33" "$R"/var/run/smart.sda && [ "$(cat "$R"/var/run/smart.sdb)" = "health=PASSED realloc=0 pending=0 uncorr=0 hours=7" ] && grep -q "^smart-lite -s /dev/sdb$" "$R"/cmd.log && ! grep -q "^smart-lite -f /dev/sdb" "$R"/cmd.log'
 check "diet-hwmon: SMART problems in the alert" 'grep -q "sda : 2 pending sectors, 2 unreadable sectors" "$R"/var/run/alert.last'
 

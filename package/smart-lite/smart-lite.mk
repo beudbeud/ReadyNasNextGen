@@ -1,6 +1,6 @@
 ################################################################################
 #
-# smart-lite: read-only ATA SMART reader (SG_IO, ATA PASS-THROUGH 16), plain C
+# smart-lite: ATA SMART reader and self-test starter (SG_IO, ATA PASS-THROUGH 16), plain C
 #
 ################################################################################
 
