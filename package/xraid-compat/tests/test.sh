@@ -283,7 +283,7 @@ check "flexraid: a volume still in LVM1 (created, RAIDiator not rebooted since) 
 J=$("$R/bin/xraid-info.real" flexraid --json "$T"/flexraid/*.img)
 check "flexraid --json: valid, levels, RAIDiator's byte order, members" "js '[a[\"level\"] for a in j[\"arrays\"]]==[\"raid1\"]*3+[\"raid0\"] and all(a[\"byte_order\"]==\"raidiator\" and a[\"usable\"]==1 and [m[\"state\"] for m in a[\"members\"]]==[\"in_sync\"]*2 for a in j[\"arrays\"])'"
 # nas-raid: VGs c and d (plus a snapshot LV) seen by the simulated lvm
-stub lvm 'case "$1" in lvs) printf "  c c\n  c snap\n  d d\n";; esac'
+stub lvm 'case "$1" in lvs) printf "  c c owi-a-----\n  c snap swi-a-s---\n  d d -wi-a-----\n";; pvs) printf "  /dev/mapper/fr-md2 c\n  /dev/mapper/fr-md3 d\n";; esac'
 DISKS="$T/flexraid/sda.img $T/flexraid/sdb.img"; h=$(md5sum "$T"/flexraid/*.img)
 : > "$T/cmd.log"; : > "$T/xi.log"; nr mount 2>/dev/null >/dev/null
 check "Flex-RAID mount: mode flexraid-ro, 4 arrays mapped" "[ \"\$(mode_of)\" = flexraid-ro ] && [ \$(grep -c '^dmsetup create fr-md[0-3] --readonly --table' '$T/cmd.log') = 4 ]"
@@ -299,6 +299,29 @@ check "Flex-RAID: the disk images were never written" "[ \"\$(md5sum '$T'/flexra
 DISKS="$T/flexraid-degraded/sda.img"; : > "$T/cmd.log"; nr mount 2>/dev/null >/dev/null
 check "Flex-RAID one disk: RAID 0 array not mapped, mode flexraid-ro (degraded missing_member)" "grep -qx 'flexraid-ro degraded missing_member' '$R/var/run/nas-raid.mode' && ! grep -q 'fr-md3' '$T/cmd.log'"
 nr unmount 2>/dev/null >/dev/null
+# FLEXRAID_RW=yes: the RAID 0 volume d (md3) writable, the RAID 1 volume c read-only
+cp "$R/etc/nas-raid.conf" "$T/nrconf.bak"; echo FLEXRAID_RW=yes >> "$R/etc/nas-raid.conf"
+DISKS="$T/flexraid/sda.img $T/flexraid/sdb.img"; h=$(md5sum "$T"/flexraid/*.img); : > "$T/cmd.log"; : > "$R/proc/mounts"
+nr mount 2>/dev/null >/dev/null
+check "FLEXRAID_RW=yes: only the RAID 0 array (md3) mapped writable" "grep -q '^dmsetup create fr-md3 --table' '$T/cmd.log' && grep -q '^dmsetup create fr-md2 --readonly' '$T/cmd.log' && [ \$(grep -c '^dmsetup create fr-md[0-3] --readonly' '$T/cmd.log') = 3 ]"
+check "FLEXRAID_RW=yes: VG d out of read_only_volume_list, c in it; d mounted rw (errors=remount-ro), c ro" "grep -q 'read_only_volume_list = \[ \"c\" \] } c d' '$T/cmd.log' && grep -q 'mount -t ext4 -o errors=remount-ro,noatime /dev/mapper/d-d /d' '$T/cmd.log' && grep -q 'mount -t ext4 -o ro,noatime /dev/mapper/c-c /c' '$T/cmd.log'"
+check "FLEXRAID_RW=yes: mode flexraid-rw, nothing written on the disks (no md, no superblock)" "[ \"\$(mode_of)\" = flexraid-rw ] && ! grep -q '^mdadm\\|^xraid-sb\\|^dd' '$T/cmd.log' && [ \"\$(md5sum '$T'/flexraid/*.img)\" = \"$h\" ]"
+printf '/dev/mapper/c-c /c ext4 ro 0 0\n/dev/mapper/d-d /d ext4 rw 0 0\n' > "$R/proc/mounts"
+nr status --json > "$T/frw"
+check "status --json: flexraid_rw yes, /d read-write" "python3 -c \"import json; j=json.load(open('$T/frw')); assert j['flexraid_rw']=='yes' and j['flexraid_rw_mounts']=='/d' and j['mode']=='flexraid-rw'\""
+nr unmount 2>/dev/null >/dev/null; : > "$R/proc/mounts"
+# a snapshot in VG d: read-only, reason snapshot
+stub lvm 'case "$1" in lvs) printf "  c c -wi-a-----\n  d d owi-a-----\n  d d_2026_11_26_12_00 swi-a-s---\n";; pvs) printf "  /dev/mapper/fr-md2 c\n  /dev/mapper/fr-md3 d\n";; esac'
+: > "$T/cmd.log"; nr mount 2>/dev/null >/dev/null
+check "FLEXRAID_RW=yes, snapshot in VG d: d read-only, reason snapshot" "grep -q 'flexraid-ro.*snapshot' '$R/var/run/nas-raid.mode' && grep -q 'mount -t ext4 -o ro,noatime /dev/mapper/d-d /d' '$T/cmd.log' && ! grep -q errors=remount-ro '$T/cmd.log'"
+nr unmount 2>/dev/null >/dev/null
+# one disk: the RAID 0 array is not usable, nothing writable
+stub lvm 'case "$1" in lvs) printf "  c c -wi-a-----\n";; pvs) printf "  /dev/mapper/fr-md2 c\n";; esac'
+DISKS="$T/flexraid-degraded/sda.img"; : > "$T/cmd.log"; nr mount 2>/dev/null >/dev/null
+check "FLEXRAID_RW=yes, one disk: no writable array, c read-only" "grep -q '^flexraid-ro' '$R/var/run/nas-raid.mode' && ! grep -q '^dmsetup create fr-md[0-9]* --table' '$T/cmd.log'"
+nr unmount 2>/dev/null >/dev/null
+cp "$T/nrconf.bak" "$R/etc/nas-raid.conf"
+stub lvm 'case "$1" in lvs) printf "  c c owi-a-----\n  c snap swi-a-s---\n  d d -wi-a-----\n";; pvs) printf "  /dev/mapper/fr-md2 c\n  /dev/mapper/fr-md3 d\n";; esac'
 # disks reinstalled by RAIDiator in md mode keep the X-RAID superblock of an earlier
 # install at their end: Flex-RAID must win, even with XRAID_RW=yes (set above)
 DISKS="$T/flexraid-oldxraid/sda.img $T/flexraid-oldxraid/sdb.img"; h=$(md5sum "$T"/flexraid-oldxraid/*.img); : > "$T/cmd.log"

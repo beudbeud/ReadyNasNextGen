@@ -344,6 +344,8 @@ def flexraid(folder, scen, n):
                         write(f, start, b"HM\x02\x00")
                     else:                           # LVM2 label in sector 1
                         write(f, start + 1, b"LABELONE")
+                if raid0 and role == 0:     # LVM2 label at the array's sector 1 (chunk 0)
+                    write(f, start + 1, b"LABELONE")
                 if raid0:   # md RAID 0, one zone: chunk k on role k % 2, at (k // 2) chunks
                     for k in range(FR_CHUNKS):
                         if k % 2 == role:

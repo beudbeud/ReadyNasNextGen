@@ -406,7 +406,7 @@ after each one, read the four copies back with `dd` as above and compare with
    `faulty`. Boot RAIDiator with the disk put back: it must take the base as
    reference and rebuild the mirror.
 
-## 10. RAIDiator md volumes (X-RAID off, "Flex-RAID"): read-only
+## 10. RAIDiator md volumes (X-RAID off, "Flex-RAID")
 
 With X-RAID switched off in RAIDiator, the volumes are ordinary md arrays
 (RAID 1, RAID 0, several volumes on the same disks) whose md 0.90 superblocks
@@ -428,18 +428,37 @@ md 0.90 superblocks in their partitions:
    naming) on `/x`; ext4 read-only (`noload` if a journal is left to replay).
    Snapshots and other LVs are not mounted.
 
-Mode: `flexraid-ro` with the reasons of the arrays (`degraded`,
-`stale_member`, `unclean`, `missing_member`…), or `none flexraid_failed` if
-nothing could be mounted (everything undone). Nothing is ever written: no md,
-no md or LVM metadata, dm and ext4 read-only; writing is not offered (no
-switch). `nas-raid status --json` adds `flexraid` (the arrays, from
-`xraid-info flexraid --json`) and `flexraid_mounts`; the DIET card shows the
-mounted volumes and one line per array.
+Mode: `flexraid-ro` (or `flexraid-rw`, below) with the reasons of the
+arrays (`degraded`, `stale_member`, `unclean` (RAID 1 only: RAIDiator leaves
+the clean bit at 0 on every RAID 0), `missing_member`…), or `none
+flexraid_failed` if nothing could be mounted (everything undone). `nas-raid
+status --json` adds `flexraid` (the arrays, from `xraid-info flexraid
+--json`), `flexraid_mounts`, `flexraid_rw_mounts` and `flexraid_rw`; the DIET
+card shows the mounted volumes (read-only or read and write) and one line per
+array.
 
-Limits: only `/c` can hold shares (SMB, NFS, DLNA): other volumes are
-readable over SSH (rsync, scp) only. md's multi-zone RAID 0 (members of
-different sizes) and RAID 5 are refused. Checked on disk images only (§8),
-not yet on a real Flex-RAID NAS.
+**Writing, RAID 0 only** (`FLEXRAID_RW=yes` in `/etc/nas-raid.conf`, or the
+DIET switch "Allow writing on the Flex-RAID RAID 0 volumes": warning, tick box
+and the word `WRITE`, `POST ?a=flexraid_rw`, then `nas-raid remount`). A volume
+becomes writable only if its VG lies, with at least one PV, only on RAID 0
+arrays that are complete, up to date and without any reason, hold LVM2, and
+the VG has no snapshot (reason `snapshot` otherwise: writing the origin
+without its snapshot active would corrupt the snapshot). Its array is mapped
+without `--readonly`, the VG is left out of `read_only_volume_list` (LVM
+metadata stays read-only: nothing is resized) and ext4 is mounted
+`errors=remount-ro` (a failing member turns the volume read-only). Nothing is
+written outside the file system: no md superblock (a RAID 0 has nothing to
+keep in sync), so RAIDiator finds its arrays as they were. Mode `flexraid-rw`
+as soon as one volume is writable. RAID 1 volumes stay read-only: marking
+their superblocks in use, needed for a crash to be resynchronised by
+RAIDiator, requires RAIDiator's superblock checksum, not understood yet.
+
+Limits: only `/c` can hold shares (SMB, NFS, DLNA): other volumes are reachable
+over SSH (rsync, scp) only. md's multi-zone RAID 0 (members of different sizes)
+and RAID 5 are refused. Reading checked against arrays made by RAIDiator's own
+kernel and tools (tools/raidiator-bench: on-nas.sh, nas-check.py); the mount
+by nas-raid on the NAS under 6.18 and RAID 0 writing are tested with simulated
+dm/LVM/mount only so far.
 
 ## Files
 

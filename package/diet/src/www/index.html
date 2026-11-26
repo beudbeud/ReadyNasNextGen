@@ -387,8 +387,8 @@ dialog h3{margin:0 0 8px;font-size:16px}
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite" title="Click to close"></div>
 <dialog id="xrwd"><form method="dialog">
-<h3>Allow writing on the X-RAID</h3>
-<p class="small" style="color:var(--bad)">Writing goes through the kernel ext4 driver on the ext3 file system with 16 KB blocks created by RAIDiator, every write going to both disks. This path has not been tested for long yet: a backup of /c is strongly recommended. The volume is unmounted and mounted again; SMB, NFS, DLNA, rsync and WebDAV are stopped meanwhile. The safeguards of nas-raid may keep it read-only.</p>
+<h3 id="xrwt">Allow writing on the X-RAID</h3>
+<p class="small" id="xrwp" style="color:var(--bad)">Writing goes through the kernel ext4 driver on the ext3 file system with 16 KB blocks created by RAIDiator, every write going to both disks. This path has not been tested for long yet: a backup of /c is strongly recommended. The volume is unmounted and mounted again; SMB, NFS, DLNA, rsync and WebDAV are stopped meanwhile. The safeguards of nas-raid may keep it read-only.</p>
 <p><label><input type="checkbox" id="xrwc"> I have a backup of /c or I accept the risk.</label></p>
 <p class="small"><span id="xrwl"></span><br><input class="inp" id="xrwi" aria-labelledby="xrwl" autocomplete="off" spellcheck="false" style="width:100%"></p>
 <div class="btns"><span class="sp"></span><button class="b" value="cancel">Cancel</button><button class="b danger" type="button" id="xrwgo" disabled>Enable</button></div>
@@ -649,6 +649,12 @@ const I18N = {
   "X-RAID, read and write": ["X-RAID, lecture et écriture", "X-RAID, Lesen und Schreiben"],
   "X-RAID, read-only": ["X-RAID, lecture seule", "X-RAID, nur Lesen"],
   "Flex-RAID (md), read-only": ["Flex-RAID (md), lecture seule", "Flex-RAID (md), nur Lesen"],
+  "Flex-RAID (md), RAID 0 volumes writable": ["Flex-RAID (md), volumes RAID 0 en écriture", "Flex-RAID (md), RAID-0-Volumes beschreibbar"],
+  "read and write": ["lecture et écriture", "Lesen und Schreiben"],
+  "a volume has a snapshot: it stays read-only": ["un volume a un instantané : il reste en lecture seule", "ein Volume hat einen Snapshot: es bleibt schreibgeschützt"],
+  "Allow writing on the Flex-RAID RAID 0 volumes": ["Autoriser l’écriture sur les volumes RAID 0 Flex-RAID", "Schreiben auf die Flex-RAID-RAID-0-Volumes erlauben"],
+  "Only RAID 0 volumes, complete and without a snapshot, become writable; RAID 1 volumes stay read-only. Writing goes through the kernel ext4 driver on the ext3 file system with 16 KB blocks created by RAIDiator; nothing is written outside it, so RAIDiator finds its arrays as they were. A RAID 0 has no redundancy: a backup is strongly recommended. The volumes are unmounted and mounted again; SMB, NFS, DLNA, rsync and WebDAV are stopped meanwhile.": ["Seuls les volumes RAID 0 complets et sans instantané passent en écriture ; les volumes RAID 1 restent en lecture seule. L’écriture passe par le pilote ext4 du noyau sur le système de fichiers ext3 à blocs de 16 Ko créé par RAIDiator ; rien n’est écrit en dehors, RAIDiator retrouve donc ses grappes telles quelles. Un RAID 0 n’a aucune redondance : une sauvegarde est fortement recommandée. Les volumes sont démontés puis remontés ; SMB, NFS, DLNA, rsync et WebDAV sont arrêtés pendant ce temps.", "Nur vollständige RAID-0-Volumes ohne Snapshot werden beschreibbar; RAID-1-Volumes bleiben schreibgeschützt. Geschrieben wird über den ext4-Treiber des Kernels auf das von RAIDiator angelegte ext3-Dateisystem mit 16-KB-Blöcken; außerhalb davon wird nichts geschrieben, RAIDiator findet seine Verbünde also unverändert vor. Ein RAID 0 hat keine Redundanz: eine Sicherung wird dringend empfohlen. Die Volumes werden aus- und wieder eingehängt; SMB, NFS, DLNA, rsync und WebDAV werden währenddessen angehalten."],
+  "Put the Flex-RAID volumes back to read-only? They are unmounted and mounted again (SMB, NFS, DLNA, rsync and WebDAV stopped meanwhile).": ["Remettre les volumes Flex-RAID en lecture seule ? Ils sont démontés puis remontés (SMB, NFS, DLNA, rsync et WebDAV arrêtés pendant ce temps).", "Die Flex-RAID-Volumes wieder schreibschützen? Sie werden aus- und wieder eingehängt (SMB, NFS, DLNA, rsync und WebDAV währenddessen angehalten)."],
   "Volumes": ["Volumes", "Volumes"],
   "readable": ["lisible", "lesbar"],
   "RAIDiator md volumes found, none could be mounted": ["Volumes md de RAIDiator trouvés, aucun n’a pu être monté", "md-Volumes von RAIDiator gefunden, keines konnte eingehängt werden"],
@@ -1032,14 +1038,14 @@ const XR = {version:'unknown superblock version (0.1.0 expected)', level:'level 
 const NR = {rw_disabled:'writing disabled (switch “Allow writing on the X-RAID”)', unclean_shutdown_linux:'unclean shutdown under Linux: check the mirror',
   unclean_shutdown_verified:'unclean RAIDiator shutdown, mirror checked since', migration_in_progress:'migration to md in progress',
   no_sb_writer:'superblock writer (xraid-sb) missing: read-only only', sb_write_failed:'the superblock could not be marked “in use”',
-  flexraid_failed:'RAIDiator md volumes found, none could be mounted'};
+  flexraid_failed:'RAIDiator md volumes found, none could be mounted', snapshot:'a volume has a snapshot: it stays read-only'};
 // reasons of an md array of RAIDiator with X-RAID off (xraid-info flexraid)
 const FRR = {degraded:'a member is missing or not in sync', stale_member:'a member is out of date', unclean:'not cleanly stopped by RAIDiator',
   missing_member:'a member is missing: not readable', sizes_differ:'members of different sizes: not readable',
   no_member_in_sync:'no member in sync: not readable', level:'RAID level not supported', layout:'layout not supported',
   version:'md superblock version not supported', inconsistent:'the superblocks of the members disagree', same_minor:'two arrays with the same md number', size:'inconsistent size',
   lvm1:'volume still in the old LVM1 format: start RAIDiator once to convert it'};
-const XRM = {'xraid-rw':'X-RAID, read and write', 'xraid-ro':'X-RAID, read-only', 'flexraid-ro':'Flex-RAID (md), read-only', 'none':'no volume'};
+const XRM = {'xraid-rw':'X-RAID, read and write', 'xraid-ro':'X-RAID, read-only', 'flexraid-ro':'Flex-RAID (md), read-only', 'flexraid-rw':'Flex-RAID (md), RAID 0 volumes writable', 'none':'no volume'};
 // Storage health, on the dashboard and the storage page: degraded (a member failed
 // or missing, an md array not complete) > rebuilding (N %) > read-only > OK.
 // Member counts from storage.layout (X-RAID), otherwise from the disks of the status.
@@ -1069,12 +1075,14 @@ async function loadStk(d){
   health();
   if(!stk || stk.mode==='absent'){ $('#xr').innerHTML=''; $('#xrb').innerHTML=''; $('#xrz').hidden = true; $('#xrtc').innerHTML=''; return; }
   const x = stk.xraid || {}, v = stk.verify || {}, lay = stk.layout;
-  const ok = stk.mode==='xraid-rw';
+  const ok = stk.mode==='xraid-rw' || stk.mode==='flexraid-rw';
   let h = `<div class="row"><span>${t('Mode')}</span><b style="color:var(--${ok?'ok':'warn'})">${esc(t(XRM[stk.mode]||stk.mode))}</b></div>`;
   // Flex-RAID (RAIDiator md volumes, X-RAID off): mounted volumes, then one line per array and its reasons
-  const fr = stk.mode==='flexraid-ro';
+  const fr = stk.mode==='flexraid-ro' || stk.mode==='flexraid-rw';
   if(fr){
-    h += `<div class="row"><span>${t('Volumes')}</span><span>${esc(stk.flexraid_mounts||'')}</span></div>`;
+    const rw = (stk.flexraid_rw_mounts||'').split(' ');
+    h += `<div class="row"><span>${t('Volumes')}</span><span>${(stk.flexraid_mounts||'').split(' ').filter(Boolean).map(m=>esc(m)+' · '+t(rw.includes(m) ? 'read and write' : 'read-only')).join(', ')}</span></div>`;
+    (stk.reasons||'').split(' ').filter(r=>r==='snapshot').forEach(r=>{ h += `<div>· ${esc(t(NR[r]))}</div>`; });
     ((stk.flexraid||{}).arrays||[]).forEach(a=>{
       const why = (a.reasons||[]).map(r=>t(FRR[r]||r)).join(', ');
       h += `<div class="row"><span>md${a.minor} · RAID ${esc(a.level.replace(/^raid/, ''))}</span><span style="color:var(--${!a.usable?'bad':why?'warn':'ok'})">${esc(why || t('readable'))}</span></div>`;
@@ -1124,6 +1132,7 @@ async function loadStk(d){
     z += `<div class="row"><label><input type="checkbox" id="xrw" ${stk.xraid_rw==='yes'?'checked':''}${nosb?' disabled':''}> ${t('Allow writing on the X-RAID')}</label></div>`;
     if(nosb) z += `<div style="color:var(--warn)">${t('superblock writer (xraid-sb) missing: read-only only')}</div>`;
   }
+  if(fr) z += `<div class="row"><label><input type="checkbox" id="xrw" ${stk.flexraid_rw==='yes'?'checked':''}> ${t('Allow writing on the Flex-RAID RAID 0 volumes')}</label></div>`;
   if(q.accept===1 && !busy) z += `<div class="btns" style="margin-top:8px"><button class="b danger" data-x="qaccept">${t('Accept the quick check…')}</button></div>`;
   if(v.state==='differences' || q.state==='differences'){
     h += `<div style="color:var(--bad);margin-top:6px">${t('The disks differ: see the sensitive zone below.')}</div>`;
@@ -1149,9 +1158,11 @@ async function loadStk(d){
 }
 // X-RAID writing switch: enabling = warning, tick box AND typed word; disabling = simple confirm
 const XRW_WORD = 'WRITE';
+// the same switch for the Flex-RAID RAID 0 volumes (flexraid_rw): only the texts change
+const isFr = ()=> !!(stk && /^flexraid-/.test(stk.mode));
 async function xrwPost(body){
   toast(t('Remounting the /c volume…'));
-  try{ toast((await post('xraid_rw', body)).msg); }catch(e){ toastErr(t('Error: {0}', e.message)); }
+  try{ toast((await post(isFr() ? 'flexraid_rw' : 'xraid_rw', body)).msg); }catch(e){ toastErr(t('Error: {0}', e.message)); }
   loadStk();
 }
 function xrwCheck(){ $('#xrwgo').disabled = !($('#xrwc').checked && $('#xrwi').value.trim() === XRW_WORD); }
@@ -1159,10 +1170,13 @@ $('#xrzc').onchange = ev=>{
   if(ev.target.id !== 'xrw') return;
   if(ev.target.checked){
     ev.target.checked = false;   // checked again by loadStk once nas-raid has answered
+    const d = $('#xrwd'); d._x = d._x || [$('#xrwt').textContent, $('#xrwp').textContent];
+    $('#xrwt').textContent = isFr() ? t('Allow writing on the Flex-RAID RAID 0 volumes') : d._x[0];
+    $('#xrwp').textContent = isFr() ? t('Only RAID 0 volumes, complete and without a snapshot, become writable; RAID 1 volumes stay read-only. Writing goes through the kernel ext4 driver on the ext3 file system with 16 KB blocks created by RAIDiator; nothing is written outside it, so RAIDiator finds its arrays as they were. A RAID 0 has no redundancy: a backup is strongly recommended. The volumes are unmounted and mounted again; SMB, NFS, DLNA, rsync and WebDAV are stopped meanwhile.') : d._x[1];
     $('#xrwc').checked = false; $('#xrwi').value = ''; $('#xrwl').textContent = t('Type “{0}” to confirm (this word stays in English, in capitals):', XRW_WORD);
     xrwCheck(); $('#xrwd').showModal();
   } else {
-    if(!confirm(t('Put the X-RAID back to read-only? The volume is unmounted and mounted again (SMB, NFS, DLNA, rsync and WebDAV stopped meanwhile).'))){ ev.target.checked = true; return; }
+    if(!confirm(isFr() ? t('Put the Flex-RAID volumes back to read-only? They are unmounted and mounted again (SMB, NFS, DLNA, rsync and WebDAV stopped meanwhile).') : t('Put the X-RAID back to read-only? The volume is unmounted and mounted again (SMB, NFS, DLNA, rsync and WebDAV stopped meanwhile).'))){ ev.target.checked = true; return; }
     xrwPost('on=0');
   }
 };

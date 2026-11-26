@@ -51,6 +51,7 @@ XRAID_VG=c				# LVM group created by RAIDiator, LV "c"
 XRAID_LV=c
 EXT4_OPTS=noatime			# options of the kernel mount of /c
 XRAID_RW=no				# "yes": X-RAID writable if all safeguards pass
+FLEXRAID_RW=no				# "yes": RAIDiator RAID 0 volumes writable (docs/XRAID.md §10)
 SAMPLES=256				# 64 KiB blocks compared per section before a rw mount (0 = none)
 QUICK_SAMPLES=512			# random 64 KiB blocks per section in quick-verify (~70 ms each on the NAS)
 [ -r "$R/etc/nas-raid.conf" ] && . "$R/etc/nas-raid.conf"
@@ -261,14 +262,20 @@ sb_dirty() {
 	x xraid-sb dirty "$XR_BASE" "$XR_MIRROR"
 }
 
-# ---------- RAIDiator md volumes (X-RAID off, "Flex-RAID"): read-only ----------
-# RAIDiator stores its md 0.90 superblocks little-endian (docs/XRAID.md §10):
-# the big-endian kernel does not take them, and converting them would make
-# them unreadable for RAIDiator, so md assembles nothing. xraid-info flexraid
-# reads them and gives a read-only dm table per usable array (fr-md<minor>);
-# LVM is activated read-only on top, VG c is mounted on /c and any other
-# one-letter VG x on /x (RAIDiator: one VG and LV per volume), read-only.
-# Nothing is written: no md, LVM metadata read-only, dm and ext4 read-only.
+# ---------- RAIDiator md volumes (X-RAID off, "Flex-RAID") ----------
+# RAIDiator stores its md 0.90 superblocks in a mixed byte order (docs/XRAID.md
+# §10, docs/XRAID-FORMAT.md §6): the big-endian kernel does not take them, and
+# rewriting them would make them unreadable for RAIDiator, so md assembles
+# nothing. xraid-info flexraid reads them and gives a dm table per usable array
+# (fr-md<minor>); LVM is activated on top, VG c is mounted on /c and any other
+# one-letter VG x on /x (RAIDiator: one VG and LV per volume).
+# Read-only by default. With FLEXRAID_RW=yes, a volume is writable only if its
+# VG lies on RAID 0 arrays that are complete and up to date (no reason at all),
+# hold LVM2 and carry no snapshot: a RAID 0 has nothing to keep in sync, so
+# nothing is written outside the file system (no md superblock, LVM metadata
+# read-only) and RAIDiator finds its arrays as they were. RAID 1 stays
+# read-only (marking its superblocks in use needs RAIDiator's checksum, not
+# understood yet).
 LVM_FR="devices { filter = [ \"a|^/dev/mapper/fr-md|\", \"r|.*|\" ] use_devicesfile = 0 } global { metadata_read_only = 1 }"
 FR_STATE=$RUN/flexraid.state	# what flexraid_unmount undoes
 
@@ -278,43 +285,67 @@ flexraid_mount() {	# 1 = no RAIDiator md array at all
 	output=$(xraid-info flexraid "$@") || { log "xraid-info flexraid failed"; return 1; }
 	eval "$output"
 	[ "$FR_NR_ARRAYS" -gt 0 ] || return 1
-	dms=; why=; i=0
+	dms=; why=; rwmd=; i=0
 	while [ $i -lt "$FR_NR_ARRAYS" ]; do
-		eval "set -- \$FR_A$i; t=\$FR_A${i}_TABLE; r=\$FR_A${i}_REASONS"	# minor level usable sectors
+		eval "set -- \$FR_A$i; t=\$FR_A${i}_TABLE; r=\$FR_A${i}_REASONS; c=\$FR_A${i}_CONTENT"	# minor level usable sectors
 		for w in $r; do case " $why " in *" $w "*) ;; *) why="$why${why:+ }$w";; esac; done
-		[ "$3" = 1 ] && x dmsetup create "fr-md$1" --readonly --table "$t" && dms="$dms${dms:+ }fr-md$1"
+		ro=--readonly
+		if [ "$FLEXRAID_RW" = yes ] && [ "$2" = raid0 ] && [ "$3" = 1 ] && [ -z "$r" ] && [ "$c" = lvm2 ]; then
+			ro=; rwmd="$rwmd fr-md$1"
+		fi
+		[ "$3" = 1 ] && x dmsetup create "fr-md$1" $ro --table "$t" && dms="$dms${dms:+ }fr-md$1"
 		i=$((i + 1))
 	done
-	log "Flex-RAID: arrays mapped read-only: ${dms:-none}${why:+ ($why)}"
-	# volumes: "VG LV" pairs (a query, nothing activated yet)
-	lvs=$(lvm lvs --noheadings -o vg_name,lv_name --config "$LVM_FR" 2>/dev/null)
-	vgs=; l=
-	for v in $(printf '%s\n' "$lvs" | awk 'NF == 2 { print $1 }' | sort -u); do
+	log "Flex-RAID: arrays mapped: ${dms:-none}${rwmd:+ (writable:$rwmd)}${why:+ ($why)}"
+	# volumes: "VG LV attributes" (a query, nothing activated yet), PVs of each VG
+	lvs=$(lvm lvs --noheadings -o vg_name,lv_name,lv_attr --config "$LVM_FR" 2>/dev/null)
+	pvs=$(lvm pvs --noheadings -o pv_name,vg_name --config "$LVM_FR" 2>/dev/null)
+	vgs=; rovgs=; rwvgs=; l=
+	for v in $(printf '%s\n' "$lvs" | awk 'NF >= 2 { print $1 }' | sort -u); do
 		case "$v" in *[!A-Za-z0-9_.+-]*) continue;; esac
-		vgs="$vgs${vgs:+ }$v"; l="$l${l:+, }\"$v\""
+		vgs="$vgs${vgs:+ }$v"
+		# writable only with at least one PV, and every PV on a writable array
+		w=; n=0
+		for pv in $(printf '%s\n' "$pvs" | awk -v v="$v" '$2 == v { print $1 }'); do
+			case " $rwmd " in *" ${pv##*/} "*) n=$((n + 1)) ;; *) n=-1000 ;; esac
+		done
+		[ "$n" -gt 0 ] && w=1
+		# a snapshot (lv_attr s) or an origin (o) in the VG: read-only
+		if printf '%s\n' "$lvs" | awk -v v="$v" '$1 == v && $3 ~ /^[so]/ { f = 1 } END { exit !f }'; then
+			[ -n "$w" ] && why="${why:+$why }snapshot"; w=
+		fi
+		if [ -n "$w" ]; then rwvgs="$rwvgs${rwvgs:+ }$v"; else rovgs="$rovgs${rovgs:+ }$v"; l="$l${l:+, }\"$v\""; fi
 	done
 	if [ -n "$vgs" ]; then
 		x lvm vgchange -ay --config "$LVM_FR activation { read_only_volume_list = [ $l ] }" $vgs || vgs=
 	fi
-	mnts=
+	mnts=; rwm=
 	set -f; set -- $lvs; set +f
-	while [ $# -ge 2 ]; do
-		v=$1; lv=$2; shift 2
+	while [ $# -ge 3 ]; do
+		v=$1; lv=$2; shift 3
 		case "$v" in [c-z]) ;; *) continue;; esac	# RAIDiator volume letters; never /usr...
 		[ "$lv" = "$v" ] || continue			# snapshots and other LVs: not mounted
 		case " $vgs " in *" $v "*) ;; *) continue;; esac
 		m=/$v; [ "$v" = c ] && m=$DATA
 		[ -n "$DRY_RUN" ] || mkdir -p "$m" 2>/dev/null
+		case " $rwvgs " in
+		*" $v "*)	# writable: a journal left by RAIDiator is replayed; errors make it read-only
+			if x mount -t ext4 -o "errors=remount-ro,$EXT4_OPTS" "/dev/mapper/$v-$lv" "$m"; then
+				mnts="$mnts${mnts:+ }$m"; rwm="$rwm${rwm:+ }$m"; continue
+			fi
+			log "Flex-RAID: $m not mountable read-write, trying read-only" ;;
+		esac
 		# a journal left to replay (RAIDiator cut off) cannot be replayed read-only: noload
 		if x mount -t ext4 -o "ro,$EXT4_OPTS" "/dev/mapper/$v-$lv" "$m" ||
 		   x mount -t ext4 -o "ro,noload,$EXT4_OPTS" "/dev/mapper/$v-$lv" "$m"; then
 			mnts="$mnts${mnts:+ }$m"
 		fi
 	done
-	write "$FR_STATE" "FR_DMS='$dms' FR_VGS='$vgs' FR_MNTS='$mnts'"
+	write "$FR_STATE" "FR_DMS='$dms' FR_VGS='$vgs' FR_MNTS='$mnts' FR_RW='$rwm'"
 	if [ -n "$mnts" ]; then
-		log "Flex-RAID: mounted read-only: $mnts"
-		write "$RUN/nas-raid.mode" "flexraid-ro $why"
+		log "Flex-RAID: mounted: $mnts${rwm:+ (read-write: $rwm)}"
+		if [ -n "$rwm" ]; then write "$RUN/nas-raid.mode" "flexraid-rw $why"
+		else write "$RUN/nas-raid.mode" "flexraid-ro $why"; fi
 	else
 		log "Flex-RAID: no volume could be mounted, everything undone"
 		flexraid_unmount
@@ -324,8 +355,9 @@ flexraid_mount() {	# 1 = no RAIDiator md array at all
 }
 
 flexraid_unmount() {
-	FR_DMS=; FR_VGS=; FR_MNTS=
+	FR_DMS=; FR_VGS=; FR_MNTS=; FR_RW=
 	[ -r "$FR_STATE" ] && . "$FR_STATE"
+	[ -n "$FR_RW" ] && [ -z "$DRY_RUN" ] && sync
 	for m in $FR_MNTS; do mounted "$m" && x_ umount "$m"; done
 	[ -n "$FR_VGS" ] && x_ lvm vgchange -an --config "$LVM_FR" $FR_VGS
 	for d in $FR_DMS; do x_ dmsetup remove "$d"; done
@@ -397,8 +429,13 @@ do_unmount() {
 # the volume stays mounted as it was. Then the usual mount, with all safeguards.
 do_remount() {
 	current_mode
-	case "$CURRENT_MODE" in xraid-*) ;; *) die "remount: only for an X-RAID volume (mode $CURRENT_MODE)";; esac
-	if mounted "$DATA"; then x umount "$DATA" || die "$DATA is busy (open files): not remounted"; fi
+	case "$CURRENT_MODE" in
+	xraid-*) if mounted "$DATA"; then x umount "$DATA" || die "$DATA is busy (open files): not remounted"; fi ;;
+	flexraid-*)	# every volume unmounted first: one busy, nothing torn down
+		FR_MNTS=; [ -r "$FR_STATE" ] && . "$FR_STATE"
+		for m in $FR_MNTS; do if mounted "$m"; then x umount "$m" || die "$m is busy (open files): not remounted"; fi; done ;;
+	*) die "remount: only for an X-RAID or Flex-RAID volume (mode $CURRENT_MODE)" ;;
+	esac
 	do_unmount
 	do_mount
 }
@@ -573,13 +610,14 @@ status() {
 	[ "$q" = confirm ] && [ -e "$QUICK_OK" ] && qok=1 || qok=0
 	[ -e "$DIRTY" ] && dirty=1 || dirty=0
 	command -v xraid-sb >/dev/null 2>&1 && sbw=yes || sbw=no
-	FR_DMS=; FR_MNTS=; [ -r "$FR_STATE" ] && . "$FR_STATE"
+	FR_DMS=; FR_MNTS=; FR_RW=; [ -r "$FR_STATE" ] && . "$FR_STATE"
 	if [ -n "$JSON" ]; then
 		case $XRAID_RW in yes) xrw=yes;; *) xrw=no;; esac
 		printf '{"mode":"%s","reasons":"%s","xraid_rw":"%s","sb_writer":"%s","dirty":%d,"verify":{"state":"%s","date":%s,"progress":%s,"zones":%s},' \
 			"$m" "$reasons" "$xrw" "$sbw" "$dirty" "$v" "${vd:-0}" "${prog:-null}" "$zones"
 		printf '"quick":{"state":"%s","date":%s,"progress":%s,"accept":%d,"result":%s},' "$q" "${qd:-0}" "${qprog:-null}" "$qok" "$qres"
-		printf '"flexraid_mounts":"%s","flexraid":%s,"xraid":%s}\n' "$FR_MNTS" "$fr" "$xr"
+		case $FLEXRAID_RW in yes) frw=yes;; *) frw=no;; esac
+		printf '"flexraid_rw":"%s","flexraid_mounts":"%s","flexraid_rw_mounts":"%s","flexraid":%s,"xraid":%s}\n' "$frw" "$FR_MNTS" "$FR_RW" "$fr" "$xr"
 	else
 		echo "mode: $m${reasons:+ ($reasons)}"
 		echo "unfinished write mark: $dirty; superblock writer: $sbw"
@@ -587,7 +625,7 @@ status() {
 		echo "quick check: $q $( [ "$qd" != 0 ] && date -d "@$qd" '+%F %T' 2>/dev/null)${qprog:+ ($qprog %)}"
 		SMP=0; analyse
 		echo "X-RAID: $XR_MODE${XR_REASONS:+ ($XR_REASONS)} base=${XR_BASE:--} mirror=${XR_MIRROR:--} clean=${XR_CLEAN:-?}"
-		if [ -r "$FR_STATE" ]; then echo "Flex-RAID (read-only): mounted ${FR_MNTS:-none}, arrays ${FR_DMS:-none}"; fi
+		if [ -r "$FR_STATE" ]; then echo "Flex-RAID: mounted ${FR_MNTS:-none}, read-write ${FR_RW:-none}, arrays ${FR_DMS:-none}"; fi
 	fi
 }
 

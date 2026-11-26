@@ -646,6 +646,17 @@ check "xraid_rw off: no heavy confirmation, XRAID_RW=no, remounted read-only (rw
 echo flexraid-ro > "$R"/var/run/nas-raid.mode
 api POST a=xraid_rw 'on=1&confirm=WRITE&yes=1'
 check "xraid_rw: refused on Flex-RAID volumes (409)" '[ "$ST" = 409 ] && grep -qx "XRAID_RW=no" "$R"/etc/nas-raid.conf'
+# the same switch for the Flex-RAID RAID 0 volumes (FLEXRAID_RW)
+api POST a=flexraid_rw 'on=1'
+check "flexraid_rw on: refused without the typed word" '[ "$ST" = 400 ] && ! grep -q FLEXRAID_RW "$R"/etc/nas-raid.conf'
+: > "$R"/cmd.log
+api POST a=flexraid_rw 'on=1&confirm=WRITE&yes=1'
+check "flexraid_rw on (Flex-RAID mode): FLEXRAID_RW=yes written once, XRAID_RW kept, services stopped and started" '[ "$ST" = 200 ] && [ "$(grep -c "^FLEXRAID_RW=" "$R"/etc/nas-raid.conf)" = 1 ] && grep -qx "FLEXRAID_RW=yes" "$R"/etc/nas-raid.conf && grep -qx "XRAID_RW=no" "$R"/etc/nas-raid.conf && grep -q "S70ksmbd stop" "$R"/cmd.log && grep -q "S70ksmbd start" "$R"/cmd.log'
+echo 'xraid-ro rw_disabled' > "$R"/var/run/nas-raid.mode
+api POST a=flexraid_rw 'on=0'
+check "flexraid_rw: refused on an X-RAID volume (409)" '[ "$ST" = 409 ] && grep -qx "FLEXRAID_RW=yes" "$R"/etc/nas-raid.conf'
+api POST a=flexraid_rw 'on=2'
+check "flexraid_rw: invalid value refused" '[ "$ST" = 400 ]'
 api POST a=xraid_rw 'on=2'
 check "xraid_rw: invalid value refused" '[ "$ST" = 400 ]'
 echo 'xraid-rw' > "$R"/var/run/nas-raid.mode; rm -f "$R"/etc/nas-raid.conf "$R"/etc/nas-raid.conf.bak "$R"/var/lib/nas-raid/xraid-dirty

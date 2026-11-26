@@ -1530,7 +1530,10 @@ static int flexraid(int argc, char **argv)
 		}
 		if (stale)
 			add_word(why, sizeof(why), "stale_member");
-		if (!(r->state & 1))
+		/* clean bit: only meaningful for a mirror (something to resync); the
+		 * RAIDiator kernel leaves it at 0 on every RAID 0, even after a clean
+		 * stop (seen on the NAS, tools/raidiator-bench/on-nas.sh "single") */
+		if (!(r->state & 1) && r->level == 1)
 			add_word(why, sizeof(why), "unclean");
 		if (json) {
 			char *w, *s;

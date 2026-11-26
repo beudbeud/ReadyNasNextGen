@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """Checks, without root, the fake disks made on the NAS by on-nas.sh.
 
-  nas-check.py XRAID_INFO DIR [SCENARIO...]
+  nas-check.py [--keep] XRAID_INFO DIR [SCENARIO...]
 
 For each scenario folder of DIR (files dDISKpPART.img): rebuilds the disks
 (MBR, partitions of type 0xfd in PART order), runs `xraid-info flexraid` on
 them, reads every usable array through the dm table it printed (linear or
 striped, as dm would), follows the LVM2 metadata to each LV of the expected
 volumes and reads the files on-nas.sh wrote there with debugfs. Prints one
-ok/FAIL line per expectation; exit code = number of failures.
+ok/FAIL line per expectation; exit code = number of failures. The rebuilt
+disks and LVs (as large as the scenarios) are deleted at the end, kept with
+--keep.
 """
 import json
 import os
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -236,14 +239,21 @@ def scenario(xi, sdir, name, work):
 
 
 def main():
-    if len(sys.argv) < 3:
+    args = sys.argv[1:]
+    keep = "--keep" in args
+    args = [a for a in args if a != "--keep"]
+    if len(args) < 2:
         sys.exit(__doc__)
-    xi, top = sys.argv[1], sys.argv[2]
-    names = sys.argv[3:] or [n for n in EXPECT if os.path.isdir(os.path.join(top, n))]
+    xi, top = args[0], args[1]
+    names = args[2:] or [n for n in EXPECT if os.path.isdir(os.path.join(top, n))]
     work = tempfile.mkdtemp(prefix="nas-check.", dir=os.environ.get("TMPDIR"))
-    for n in names:
-        scenario(xi, os.path.join(top, n), n, work)
-    print(f"{FAILS} failure(s); rebuilt disks and LVs in {work}")
+    try:
+        for n in names:
+            scenario(xi, os.path.join(top, n), n, work)
+    finally:
+        if not keep:
+            shutil.rmtree(work, ignore_errors=True)
+    print(f"{FAILS} failure(s)" + (f"; rebuilt disks and LVs in {work}" if keep else ""))
     sys.exit(min(FAILS, 100))
 
 

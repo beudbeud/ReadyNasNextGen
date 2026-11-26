@@ -5,7 +5,7 @@
 #   POST ?a=smart_test|spindown|ksmbd|nfsd|ntp|reboot|poweroff|config|share_add|share_del|share_set
 #        |user_set|user_del|nfs_add|nfs_del|sys_set|notify_test
 #        |svc_set|dlna_set|dlna_scan|rsync_pw|rsync_c
-#        |raid_verify|raid_quick|raid_quick_accept|xraid_rw
+#        |raid_verify|raid_quick|raid_quick_accept|xraid_rw|flexraid_rw
 #        |update_upload (body: the package) |update_url|update_switch|update_cancel
 #        |ssh_set|smb_enc|smb_sign|metrics_set|token_add|token_del
 #        (X-Diet: 1 header required)
@@ -1258,7 +1258,12 @@ guard() {
 # mode obtained (rw or ro with its reasons) is in nas-raid.mode.
 NRCONF=$ETC/nas-raid.conf
 XRSVC="S51webdav S61rsyncd S60minidlnad S60nfs S70ksmbd"
-xraid_rw() {
+# The same switch for RAIDiator's Flex-RAID volumes: FLEXRAID_RW (RAID 0 only,
+# nas-raid decides which volume is writable, docs/XRAID.md §10).
+xraid_rw() { storage_rw XRAID_RW xraid X-RAID; }
+flexraid_rw() { storage_rw FLEXRAID_RW flexraid Flex-RAID; }
+storage_rw() {	# storage_rw VARIABLE MODE_PREFIX NAME
+  var=$1; kind=$2; name=$3
   set -f
   on=""; confirm=""; yes=""
   for kv in $(echo "$BODY" | tr '&' ' '); do
@@ -1272,15 +1277,15 @@ xraid_rw() {
   fi
   command -v nas-raid >/dev/null 2>&1 || fail "404 Not Found" "nas-raid ?"
   m=; read -r m _ 2>/dev/null < "$RUN/nas-raid.mode"
-  case "$m" in xraid-rw|xraid-ro) ;; *) fail "409 Conflict" "$(tx "Only for an X-RAID volume" "Seulement pour un volume X-RAID" "Nur für ein X-RAID-Volume")";; esac
-  # new configuration: every line kept except XRAID_RW, written once
+  case "$m" in "$kind"-rw|"$kind"-ro) ;; *) fail "409 Conflict" "$(tx "Only for an $name volume" "Seulement pour un volume $name" "Nur für ein $name-Volume")";; esac
+  # new configuration: every line kept except the variable, written once
   {
-    if [ -r "$NRCONF" ]; then while IFS= read -r l; do case $l in XRAID_RW=*) ;; *) printf '%s\n' "$l";; esac; done < "$NRCONF"; fi
-    echo "XRAID_RW=$val"
+    if [ -r "$NRCONF" ]; then while IFS= read -r l; do case $l in "$var"=*) ;; *) printf '%s\n' "$l";; esac; done < "$NRCONF"; fi
+    echo "$var=$val"
   } > "$NRCONF.tmp" || fail "500 Internal Server Error" "$(tx "Cannot write" "Écriture impossible" "Schreiben nicht möglich")"
   [ -f "$NRCONF" ] && cp "$NRCONF" "$NRCONF.bak"
   mv "$NRCONF.tmp" "$NRCONF"
-  note "Storage: XRAID_RW=$val from the interface, remounting /c"
+  note "Storage: $var=$val from the interface, remounting"
   for s in $XRSVC; do "$INITD/$s" stop </dev/null >/dev/null 2>&1; done
   if OUTR=$(nas-raid remount 2>&1); then rc=0; else rc=1; fi
   if [ $rc != 0 ]; then
@@ -1292,13 +1297,13 @@ xraid_rw() {
   for s in S70ksmbd S60nfs S60minidlnad S61rsyncd S51webdav; do "$INITD/$s" start </dev/null >/dev/null 2>&1; done
   invalidate
   if [ $rc != 0 ]; then
-    note "Storage: remount refused or failed, XRAID_RW unchanged"
+    note "Storage: remount refused or failed, $var unchanged"
     fail "409 Conflict" "$(tx "Volume not remounted (open files on /c?), setting unchanged" "Volume non remonté (fichiers ouverts sur /c ?), réglage inchangé" "Volume nicht neu eingehängt (offene Dateien auf /c?), Einstellung unverändert") : $(printf '%s' "$OUTR" | grep 'ERROR' | tail -n 1 | cut -c1-200)"
   fi
   m=; r=; read -r m r 2>/dev/null < "$RUN/nas-raid.mode"
-  if [ "$on" = 0 ]; then ok "$(tx "X-RAID remounted read-only" "X-RAID remonté en lecture seule" "X-RAID schreibgeschützt neu eingehängt")"
-  elif [ "$m" = xraid-rw ]; then ok "$(tx "Writing on the X-RAID enabled" "Écriture sur le X-RAID activée" "Schreiben auf das X-RAID eingeschaltet")"
-  else ok "$(tx "XRAID_RW=yes saved, but the safeguards keep it read-only" "XRAID_RW=yes enregistré, mais les garde-fous gardent la lecture seule" "XRAID_RW=yes gespeichert, aber die Schutzregeln lassen nur Lesen zu") ($m${r:+ : $r})"
+  if [ "$on" = 0 ]; then ok "$(tx "$name remounted read-only" "$name remonté en lecture seule" "$name schreibgeschützt neu eingehängt")"
+  elif [ "$m" = "$kind"-rw ]; then ok "$(tx "Writing on the $name enabled" "Écriture sur le $name activée" "Schreiben auf das $name eingeschaltet")"
+  else ok "$(tx "$var=yes saved, but the safeguards keep it read-only" "$var=yes enregistré, mais les garde-fous gardent la lecture seule" "$var=yes gespeichert, aber die Schutzregeln lassen nur Lesen zu") ($m${r:+ : $r})"
   fi
 }
 
@@ -1667,6 +1672,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
     raid_plan|raid_run)	# md wizards (migrate, create...): disabled for now, docs/XRAID-MIGRATION.md
       fail "409 Conflict" "$(tx "md support is disabled for now: X-RAID only" "md désactivé pour l’instant : X-RAID seulement" "md vorerst deaktiviert: nur X-RAID")" ;;
     xraid_rw) xraid_rw ;;
+    flexraid_rw) flexraid_rw ;;
     update_url|update_switch|update_cancel)	# system update (nas-update, docs/DIET.md)
       [ "$A" = update_switch ] && guard
       url=""; sha=""

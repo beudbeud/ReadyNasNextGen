@@ -49,3 +49,43 @@ devices it creates, md0-md9 and dm devices named `rb-*`. Everything goes to
 
 The list of layouts RAIDiator can produce on a Duo, and where each one comes
 from (linuxrc, Frontview disassembled under QEMU), is in docs/XRAID-FORMAT.md §6.
+
+## On the NAS's own kernel (on-nas.sh, nas-check.py)
+
+The QEMU bench cannot check what only RAIDiator's kernel does: its md.c writes
+the md 0.90 superblocks in a mixed byte order (docs/XRAID-FORMAT.md §6), which
+the PC's kernel does not reproduce. `on-nas.sh` runs on the Duo itself, booted
+on RAIDiator or the old DIET (both use RAIDiator's 2.6.17 kernel), with
+RAIDiator's own `mdconfig`, `raidhotadd`/`raidsetfaulty`/`raidhotremove`, LVM
+2.02.07, `mke2fs` and `tune2fs` (copied from the sysroot with their libraries,
+run through their `ld-linux.so.2`, nothing installed). Fake disks: one file
+per member partition (`dDISKpPART.img`) on a USB key, never the NAS's disks.
+
+Safety: loops 0-7 and md5/md6 only (refused if in use); LVM filtered to
+md5/md6 and **always called with a VG name** (unnamed, RAIDiator's LVM acts on
+every VG it sees, the NAS's own `c` included); test VGs must start with `rb`;
+everything is undone at the end, even after a failure (a temporary
+`/etc/mtab` link, needed by e2fsprogs 1.40 on DIET, included).
+
+    # on the NAS (root), TOOLS = the bundle, WORK = an empty folder on the key
+    sh on-nas.sh TOOLS WORK [base failed rebuild spare single snapshot delete]
+    # back on the PC, no root: rebuilds the disks, reads them with xraid-info,
+    # follows LVM and reads the files the NAS wrote, with debugfs
+    python3 nas-check.py path/to/xraid-info WORK
+
+| Scenario | Made on the NAS | What xraid-info must see |
+|---|---|---|
+| `base` | md5 RAID 1 (rbc) and md6 RAID 0 (rbd), chunk 16 KiB, 2 disks | both usable, RAIDiator byte order, files read back |
+| `failed` | a RAID 1 member removed (`mdconfig -a remove`), then the volume written again | that member stale, read from the other one, the later file read back |
+| `rebuild` | a member failed, removed, a blank one hot-added, array stopped during the recovery | the new member not in sync (spare), read from the other one |
+| `spare` | a third member hot-added to a complete RAID 1 | a spare, not degraded |
+| `single` | RAID 1 and RAID 0 of one member | both usable |
+| `snapshot` | a RAIDiator snapshot (`v_YYYY_MM_DD_HH_MM`, chunk 256K), then the origin written again | the origin read with its current files |
+| `delete` | `mdconfig -a delete` of a stopped array | reported: its superblocks stay (Frontview also clears the MBR slot) |
+
+Seen there and not reproducible on the PC: the RAID 0 chunk stored
+big-endian (a PC's md reads 4096K and assembles a RAIDiator RAID 0 wrongly),
+the SPARC word order of the event count, the clean bit left at 0 on every
+RAID 0, and that `mdconfig -a add` needs a whole disk (it repartitions it
+first: a loop device has no geometry), so replacements are done with
+`raidhotadd` as RAIDiator does for spares.
