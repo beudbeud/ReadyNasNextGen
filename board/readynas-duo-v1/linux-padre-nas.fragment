@@ -33,7 +33,11 @@ CONFIG_BLK_DEV_SD=y
 CONFIG_MD=y
 CONFIG_BLK_DEV_MD=y
 CONFIG_MD_RAID1=y
-CONFIG_MD_AUTODETECT=y
+# every md array is assembled by nas-raid (mdadm --build); the kernel never
+# assembles one itself (its RAID 5 would resync, i.e. write, a RAIDiator array)
+# CONFIG_MD_AUTODETECT is not set
+# RAIDiator's RAID 5 (4-bay NV+, Flex-RAID): dm-raid without metadata, read-only
+CONFIG_DM_RAID=y
 CONFIG_EXT4_FS=y
 CONFIG_EXT4_USE_FOR_EXT2=y
 CONFIG_SMB_SERVER=y

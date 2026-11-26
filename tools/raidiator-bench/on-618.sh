@@ -8,14 +8,17 @@
 # must not have changed), then a crash of ours replayed (mark left, role 1
 # altered: md must resync it from role 0). PHASE=fail, a separate run after
 # RAIDiator checked the first one: rbc's role 1 failed by mdadm while
-# writing, the stop records it on role 0 (flexraid-sb fail). The 6.18 kernel
+# writing, the stop records it on role 0 (flexraid-sb fail). PHASE=r5: on-nas.sh
+# r5key's RAID 5 of 4 members (KEY5-8, RAIDiator's) read through dm-raid, read
+# only, whole then with KEY8 unreadable (degraded: read through the parity),
+# nothing on the key written (R5_SHA = its r5-random.sha256). The 6.18 kernel
 # has no loop driver: the members are partitions of a USB key (type 0xfd,
 # sized as the members), each fake disk a dm device made of the key's
 # partition 1 (the fake disks' MBR) and two member partitions. RAIDiator's
 # kernel then finds the same partitions (on-nas.sh check618: autorun, as at
 # its boot).
 #
-#   [PHASE=write|fail] sh on-618.sh BIN_DIR KEY WORK_DIR
+#   [PHASE=write|fail|r5] [R5_SHA=FILE] sh on-618.sh BIN_DIR KEY WORK_DIR
 #
 # BIN_DIR: nas-raid, xraid-info and flexraid-sb (SPARC build) of this version.
 # KEY: the test USB key (e.g. /dev/sdd): KEY1 the fake disks' MBR, KEY5 KEY6
@@ -25,7 +28,8 @@
 # rbd: never the NAS's disks nor its X-RAID or VG "c".
 set -eu
 B=$1; KEY=$2; W=$3; PHASE=${PHASE:-write}
-case $PHASE in write|fail) ;; *) echo "PHASE: write or fail"; exit 1;; esac
+case $PHASE in write|fail|r5) ;; *) echo "PHASE: write, fail or r5"; exit 1;; esac
+if [ "$PHASE" = r5 ]; then [ -r "${R5_SHA:-}" ] || { echo "R5_SHA: on-nas.sh r5key's r5-random.sha256"; exit 1; }; fi
 LOG=$W/618.log
 OK=0; KO=0
 say() { echo "$*"; echo "$*" >> "$LOG"; }
@@ -128,6 +132,35 @@ check "remounted read-only: the files written are there, same sha256" \
 $NR unmount >> "$LOG" 2>&1
 fi
 
+if [ "$PHASE" = r5 ]; then
+# D. RAID 5 (4 members, made by RAIDiator): dm-raid over read-only legs, nothing written
+D0=$(for n in 5 6 7 8; do datasum $KEY$n; done)
+$NR mount >> "$LOG" 2>&1 || true
+read -r mode reasons < "$W/run/nas-raid.mode" || mode=?
+check "RAID 5 mount: mode flexraid-ro, no reason (got: $mode${reasons:+ $reasons})" sh -c "[ '$mode' = flexraid-ro ] && [ -z '$reasons' ]"
+check "fr-md5 = dm-raid raid5 with nosync over 4 legs" sh -c "dmsetup table fr-md5 | grep -q ' raid raid5_.. 2 32 nosync 4 - [^ ]* - [^ ]* - [^ ]* - [^ ]*\$'"
+check "the 4 legs and fr-md5 read-only" sh -c "for d in frl-md5-0 frl-md5-1 frl-md5-2 frl-md5-3 fr-md5; do dmsetup info \$d | grep -q 'READ-ONLY' || exit 1; done"
+cat /proc/mdstat >> "$LOG"; dmsetup status fr-md5 >> "$LOG" 2>&1 || true
+check "rbc (RAID 5, made by RAIDiator) read: hello.txt" grep -q '^volume rbc' "$W/mnt/rbc/hello.txt"
+check "rbc: r5-random.bin, same sha256 as written by RAIDiator" sh -c "[ \"\$(sha256sum < '$W/mnt/rbc/r5-random.bin' | cut -d' ' -f1)\" = \"\$(cat '$R5_SHA')\" ]"
+check "rbc read-only" sh -c "! touch '$W/mnt/rbc/.w' 2>/dev/null"
+$NR unmount >> "$LOG" 2>&1
+rwmount
+check "FLEXRAID_RW=yes: RAID 5 stays read-only (got: $mode${reasons:+ $reasons})" sh -c "[ '$mode' = flexraid-ro ] && ! touch '$W/mnt/rbc/.w' 2>/dev/null"
+$NR unmount >> "$LOG" 2>&1; rm -f "$W/nas-raid.conf"
+check "unmounted: no fr-md or frl-md device left" sh -c "! dmsetup ls | grep -q '^fr-md\|^frl-md'"
+# KEY8 unreadable (dm error target in disk 1's p2): one member missing, read through the parity
+dmsetup remove rb618-disk1
+printf '0 2048 linear %s 0\n2048 %s linear %s 0\n%s %s error\n' "${KEY}1" $s1 "${KEY}7" $((2048 + s1)) $s2 | dmsetup create rb618-disk1
+$NR mount >> "$LOG" 2>&1 || true
+read -r mode reasons < "$W/run/nas-raid.mode" || mode=?
+check "one member unreadable: mounted degraded (got: $mode${reasons:+ $reasons})" sh -c "[ '$mode' = flexraid-ro ] && [ '$reasons' = degraded ] && dmsetup table fr-md5 | grep -q ' - -\$'"
+check "degraded: r5-random.bin, same sha256 (rebuilt from the parity)" sh -c "[ \"\$(sha256sum < '$W/mnt/rbc/r5-random.bin' | cut -d' ' -f1)\" = \"\$(cat '$R5_SHA')\" ]"
+$NR unmount >> "$LOG" 2>&1
+check "md superblocks of the 4 members unchanged" test "$(sbsum)" = "$SB0"
+check "data areas of the 4 members unchanged" test "$(for n in 5 6 7 8; do datasum $KEY$n; done)" = "$D0"
+fi
+
 if [ "$PHASE" = fail ]; then
 # C. rbc's role 1 fails while writing: recorded on role 0 at the stop
 rwmount
@@ -146,5 +179,6 @@ $NR unmount >> "$LOG" 2>&1
 fi
 cleanup; trap - EXIT
 sync
-say "$OK ok, $KO failed (log: $LOG; keep $W/*.sha256); next: boot DIET/RAIDiator, PHASE=$PHASE CHECK_DIR=<folder with the .sha256 of the write phase> sh on-nas.sh TOOLS WORK check618"
+if [ "$PHASE" = r5 ]; then say "$OK ok, $KO failed (log: $LOG); nothing written on the key"
+else say "$OK ok, $KO failed (log: $LOG; keep $W/*.sha256); next: boot DIET/RAIDiator, PHASE=$PHASE CHECK_DIR=<folder with the .sha256 of the write phase> sh on-nas.sh TOOLS WORK check618"; fi
 [ "$KO" = 0 ]

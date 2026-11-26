@@ -9,7 +9,8 @@
 #
 # TOOLS_DIR: RAIDiator's mdconfig, lvm, mke2fs, tune2fs and their libraries.
 # WORK_DIR: an empty folder on the USB key. Scenarios: base failed rebuild
-# spare single snapshot delete (all by default).
+# spare single snapshot delete (all by default); check618 and r5key (KEY=)
+# work on the key's partitions, on request only.
 # Uses /dev/loop0-7, md5 and md6, VGs rb*: never the NAS's disks nor its VG
 # "c" (the LVM filter only sees md5 and md6).
 set -eu
@@ -226,6 +227,31 @@ sc_check618() {
 	fi
 	run umount /tmp/rbmnt
 	stop_all; NEXT=0
+}
+# r5key: a RAID 5 of 4 members, as a 4-bay NV+ makes its data volume, on the
+# test key's partitions KEY5-KEY8 (KEY=/dev/sdX required: the key, never the
+# NAS's disks), md5 by RAIDiator's mdconfig (chunk 16 KiB, its parity layout),
+# VG rbc with a 4 MiB random file; its sha256 in WORK/r5key/r5-random.sha256
+# for on-618.sh PHASE=r5 (read under 6.18, whole then degraded)
+sc_r5key() {
+	K=${KEY:?KEY: the test USB key, e.g. /dev/sda}
+	case "$K" in /dev/sd[a-z]) ;; *) echo "KEY $K refused"; return 1 ;; esac
+	for n in 5 6 7 8; do [ -b "$K$n" ] || { echo "$K$n missing"; return 1; }; done
+	if grep -q "^$K" /proc/mounts; then echo "a partition of $K is mounted: refused"; return 1; fi
+	grep '^Personalities' /proc/mdstat >> "$LOG"
+	mdc -a new -m /dev/md5 -l 5 -c 16 -r "${K}5,${K}6,${K}7,${K}8,"
+	wait_sync
+	cat /proc/mdstat >> "$LOG"
+	volume rbc /dev/md5 32M
+	mkdir -p /tmp/rbmnt
+	run mount -t ext3 /dev/rbc/rbc /tmp/rbmnt
+	dd if=/dev/urandom of=/tmp/rbmnt/r5-random.bin bs=1048576 count=4 2> /dev/null
+	sha256sum < /tmp/rbmnt/r5-random.bin | cut -d' ' -f1 > "$1/r5-random.sha256"
+	run umount /tmp/rbmnt
+	vg_off
+	mdc -a stop -m /dev/md5
+	for n in 5 6 7 8; do echo "== $K$n" >> "$LOG"; mdc -a super -d "$K$n" || true; done
+	say "ok   md5 RAID 5 on ${K}5-8, rbc written (sha256 in $1/r5-random.sha256)"
 }
 # delete: what mdconfig -a delete leaves on the members of a stopped array
 sc_delete() {

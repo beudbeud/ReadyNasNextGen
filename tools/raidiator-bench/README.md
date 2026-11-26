@@ -123,3 +123,19 @@ e2fsck 1.40 clean on both file systems written by 6.18's ext4, the files
 identical); fail phase 6/6 under 6.18 (role 1 failed through md's sysfs:
 mdadm --fail answers "No such device" on a --build array; recorded on role 0),
 11/11 under RAIDiator ("kicking non-fresh sda7", md5 [2/1] [U_]).
+
+RAID 5 (a 4-bay NV+'s data volume): RAIDiator makes it on the key's four
+partitions, then 6.18 reads it through dm-raid, whole and with one member
+unreadable, without writing anything:
+
+    KEY=/dev/sdX sh on-nas.sh TOOLS WORK r5key       # under DIET/RAIDiator: md5 RAID 5 on KEY5-8, rbc, a random file
+    PHASE=r5 R5_SHA=WORK/r5key/r5-random.sha256 sh on-618.sh BIN /dev/sdY WORK2   # under 6.18
+
+Seen on the NAS: RAIDiator's mdconfig makes a left-asymmetric RAID 5
+(`algorithm 0`, chunk 16 KiB, 393024 KiB on 4 members of 128 MiB and more).
+Under 6.18 (dm-raid in the kernel), 12/12: `raid5_la` over the 4 read-only
+legs, `nosync`, md "raid level 5 active with 4 out of 4 devices, algorithm 0";
+hello.txt and the random file read back with RAIDiator's sha256, still
+read-only with FLEXRAID_RW=yes; with KEY8 unreadable (dm error target) "3 out
+of 4 devices", mounted `degraded`, the file rebuilt from the parity with the
+same sha256; md superblocks and data areas of the 4 members unchanged.

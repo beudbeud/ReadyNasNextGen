@@ -23,7 +23,7 @@ cc -O2 -Wall -Werror -o "$T/flexraid-sb.real" "$SRC/flexraid-sb.c" || exit 1
 # ext3 images (fs, fsdirty) need e2fsprogs (mke2fs, debugfs, dumpe2fs): skipped without them
 PATH=$PATH:/usr/sbin:/sbin
 if python3 "$HERE/make-images.py" "$T" tools; then E2FS="fs fsdirty"; else E2FS=; echo "skip ext3 (quick check) tests: e2fsprogs missing"; fi
-for s in clean big dirty degraded sync different reinstall counters torn sbw flexraid flexraid-3 flexraid-be flexraid-degraded flexraid-stale flexraid-oldxraid flexraid-lvm1 flexraid-x86 $E2FS; do
+for s in clean big dirty degraded sync different reinstall counters torn sbw flexraid flexraid-3 flexraid-r5 flexraid-r5-degraded flexraid-be flexraid-degraded flexraid-stale flexraid-oldxraid flexraid-lvm1 flexraid-x86 $E2FS; do
 	python3 "$HERE/make-images.py" "$T/$s" "$s" > /dev/null || exit 1
 done
 
@@ -343,6 +343,40 @@ check "status --json: valid, mode flexraid-ro, arrays listed, xraid stays the la
 nr unmount 2>/dev/null >/dev/null
 check "Flex-RAID unmount: /c and /d unmounted, VGs off, arrays removed" "grep -q '^umount /c' '$T/cmd.log' && grep -q '^umount /d' '$T/cmd.log' && grep -q 'vgchange -an .* c d' '$T/cmd.log' && [ \$(grep -c '^dmsetup remove fr-md' '$T/cmd.log') = 4 ] && [ \"\$(cat '$R/var/run/nas-raid.mode')\" = 'none stopped' ] && [ ! -e '$R/var/run/flexraid.state' ]"
 check "Flex-RAID: the disk images were never written" "[ \"\$(md5sum '$T'/flexraid/*.img)\" = \"$h\" ]"
+# RAID 5 (a 4-bay RAIDiator's data volume on 3 disks or more): dm-raid over read-only legs, no metadata, nosync
+check "flexraid RAID 5: 3 disks, left-asymmetric (RAIDiator's), (3 - 1) x the member size, dm-raid table on the legs, nosync" "[ \"\$(frv flexraid-r5 A2)\" = '2 raid5 1 2096896' ] && [ \"\$(frv flexraid-r5 A2_TABLE)\" = '0 2096896 raid raid5_la 2 32 nosync 3 - /dev/mapper/frl-md2-0 - /dev/mapper/frl-md2-1 - /dev/mapper/frl-md2-2' ] && [ \"\$(frv flexraid-r5 A2_LEGS)\" = '0:$T/flexraid-r5/sda.img:5144608:1048448 1:$T/flexraid-r5/sdb.img:5144608:1048448 2:$T/flexraid-r5/sdc.img:5144608:1048448' ] && [ -z \"\$(frv flexraid-r5 A2_REASONS)\" ] && [ \"\$(frv flexraid-r5 A2_CONTENT)\" = lvm2 ]"
+r5read() {	# r5read TABLE LEGS SECTOR LENGTH: bytes at SECTOR of the dm-raid device (raid5_* layouts, as md maps them)
+	python3 - "$@" <<'EOF'
+import sys
+t, legs, s, n = sys.argv[1].split(), sys.argv[2].split(), int(sys.argv[3]), int(sys.argv[4])
+alg, cs, nd = t[3], int(t[5]), int(t[7])
+leg = {int(l.split(":")[0]): l.split(":")[1:3] for l in legs}
+c, r = divmod(s, cs)
+st, dd = divmod(c, nd - 1)
+pd = (nd - 1 - st % nd) if alg in ("raid5_la", "raid5_ls") else st % nd
+dk = (pd + 1 + dd) % nd if alg in ("raid5_ls", "raid5_rs") else dd + (dd >= pd)
+assert t[9 + 2 * dk] == "/dev/mapper/frl-md2-%d" % dk
+path, start = leg[dk]
+with open(path, "rb") as f:
+    f.seek((int(start) + st * cs + r) * 512)
+    sys.stdout.write(f.read(n).decode("latin-1"))
+EOF
+}
+t5=$(frv flexraid-r5 A2_TABLE); l5=$(frv flexraid-r5 A2_LEGS); ok=1
+for k in 0 1 2 3 4 5 6 7; do [ "$(r5read "$t5" "$l5" $((k * 32)) 9)" = "$(printf 'CHUNK%04d' $k)" ] || ok=; done
+check "flexraid RAID 5: the table and legs give the 8 logical chunks in order (parity rotating as md's left-asymmetric)" "[ -n '$ok' ]"
+check "flexraid RAID 5, one disk missing: read degraded, its slot '- -', no leg for it" "[ \"\$(frv flexraid-r5-degraded A2)\" = '2 raid5 1 2096896' ] && [ \"\$(frv flexraid-r5-degraded A2_REASONS)\" = degraded ] && [ \"\$(frv flexraid-r5-degraded A2_TABLE)\" = '0 2096896 raid raid5_la 2 32 nosync 3 - /dev/mapper/frl-md2-0 - /dev/mapper/frl-md2-1 - -' ] && ! frv flexraid-r5-degraded A2_LEGS | grep -q sdc"
+check "flexraid RAID 5, two disks missing: not readable" "[ \"\$('$R/bin/xraid-info.real' flexraid '$T/flexraid-r5/sda.img' | sed -n \"s/^FR_A2='\(.*\)'/\1/p\")\" = '2 raid5 0 0' ] && '$R/bin/xraid-info.real' flexraid '$T/flexraid-r5/sda.img' | grep -qx \"FR_A2_REASONS='missing_member'\""
+stub lvm 'case "$1" in lvs) printf "  c c -wi-a-----\n  d d -wi-a-----\n";; pvs) printf "  /dev/mapper/fr-md2 c\n  /dev/mapper/fr-md3 d\n";; esac'
+DISKS="$T/flexraid-r5/sda.img $T/flexraid-r5/sdb.img $T/flexraid-r5/sdc.img"; h=$(md5sum "$T"/flexraid-r5/*.img)
+cp "$R/etc/nas-raid.conf" "$T/nrconf.r5" 2>/dev/null; echo FLEXRAID_RW=yes > "$R/etc/nas-raid.conf"
+: > "$T/cmd.log"; : > "$R/proc/mounts"; nr mount 2>/dev/null >/dev/null
+check "Flex-RAID RAID 5 mount: read-only legs first, then fr-md2 read-only on them, never md nor flexraid-sb" "[ \"\$(grep -n '^dmsetup create frl-md2-\|^dmsetup create fr-md2 ' '$T/cmd.log' | cut -d: -f2- | cut -d' ' -f3-5 | tr '\\n' '|')\" = 'frl-md2-0 --readonly --table|frl-md2-1 --readonly --table|frl-md2-2 --readonly --table|fr-md2 --readonly --table|' ] && grep -q '^dmsetup create frl-md2-2 --readonly --table 0 1048448 linear $T/flexraid-r5/sdc.img 5144608\$' '$T/cmd.log' && grep -q '^dmsetup create fr-md2 --readonly --table 0 2096896 raid raid5_la ' '$T/cmd.log' && ! grep -q '^mdadm\|^flexraid-sb' '$T/cmd.log'"
+check "Flex-RAID RAID 5 with FLEXRAID_RW=yes: c (RAID 5) read-only, d (3-disk RAID 0) writable" "grep -q 'mount -t ext4 -o ro,noatime /dev/mapper/c-c /c' '$T/cmd.log' && grep -q 'errors=remount-ro,noatime /dev/mapper/d-d /d' '$T/cmd.log'"
+: > "$T/cmd.log"; nr unmount 2>/dev/null >/dev/null
+check "Flex-RAID RAID 5 unmount: fr-md2 removed before its legs, images never written" "[ \"\$(grep -n '^dmsetup remove fr-md2\$\|^dmsetup remove frl-md2-' '$T/cmd.log' | cut -d: -f2- | tr '\\n' '|')\" = 'dmsetup remove fr-md2|dmsetup remove frl-md2-0|dmsetup remove frl-md2-1|dmsetup remove frl-md2-2|' ] && [ \"\$(md5sum '$T'/flexraid-r5/*.img)\" = \"$h\" ]"
+if [ -e "$T/nrconf.r5" ]; then mv "$T/nrconf.r5" "$R/etc/nas-raid.conf"; else rm -f "$R/etc/nas-raid.conf"; fi
+: > "$R/proc/mounts"
 : > "$R/proc/mounts"
 DISKS="$T/flexraid-degraded/sda.img"; : > "$T/cmd.log"; nr mount 2>/dev/null >/dev/null
 check "Flex-RAID one disk: RAID 0 array not mapped, mode flexraid-ro (degraded missing_member)" "grep -qx 'flexraid-ro degraded missing_member' '$R/var/run/nas-raid.mode' && ! grep -q 'fr-md3' '$T/cmd.log'"

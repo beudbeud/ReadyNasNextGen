@@ -34,7 +34,7 @@ touching the original firmware.
   readable by RAIDiator (its superblock is kept up to date). Planned: switching to a
   standard Linux RAID1 (md), disabled for now. Disks of a RAIDiator with X-RAID
   switched off ("Flex-RAID": RAID 1 and/or RAID 0 volumes) are mounted read-only, or
-  read-write behind a switch.
+  read-write behind a switch; a RAID 5 (NV+, 3 disks or more) is read-only.
 - **Temperature-controlled fan**: the NAS stays quiet when idle.
 - **Hardware clock** read at boot, then kept accurate over the network (NTP).
 - The **original firmware stays intact**: without the USB stick, the NAS starts RAIDiator
@@ -193,14 +193,17 @@ it is described, with its precautions, in [docs/XRAID.md](docs/XRAID.md). Migrat
 standard Linux RAID1 is disabled for now ([docs/XRAID-MIGRATION.md](docs/XRAID-MIGRATION.md)).
 
 **Flex-RAID** (RAIDiator with X-RAID switched off: md volumes in RAID 1 or RAID 0, possibly
-several on the same disks): mounted **read-only**, volume `c` on `/c` and any other volume
+several on the same disks, RAID 5 on a 4-bay NV+ with 3 disks or more): mounted
+**read-only**, volume `c` on `/c` and any other volume
 `x` on `/x`. They can be made writable (a switch in the Storage card; nothing is written
-outside the file system; a RAID 1 is resynchronised after a power cut under 6.18, a failed
-disk recorded as RAIDiator does). Only `/c` can hold
+outside the file system; a RAID 1, of 2 disks or more, is resynchronised after a power cut
+under 6.18, a failed disk recorded as RAIDiator does; a RAID 5 always stays read-only, also
+with one disk missing, read through the parity). Only `/c` can hold
 shares, the other volumes are reachable over SSH. Checked on the NAS: arrays made by
 RAIDiator's own kernel and tools read under 6.18; a RAID 1 and a RAID 0 written under 6.18
-then read back and checked clean by RAIDiator, and a RAID 1 disk failed under 6.18 left out
-by RAIDiator
+then read back and checked clean by RAIDiator, a RAID 1 disk failed under 6.18 left out
+by RAIDiator, and a 4-member RAID 5 made by RAIDiator read under 6.18, whole and with one
+member missing
 ([docs/XRAID.md §10](docs/XRAID.md#10-raidiator-md-volumes-x-raid-off-flex-raid)).
 
 ## Current limitations

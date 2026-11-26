@@ -1327,7 +1327,7 @@ struct mdm {
 	const char *path;
 	int part, le, role, grp, fd, raidiator;
 	u64 start, data, events;	/* partition start, sectors before the superblock */
-	unsigned uuid[4], version, level, size, raid_disks, minor, chunk, state, dstate;
+	unsigned uuid[4], version, level, size, raid_disks, minor, chunk, layout, state, dstate;
 };
 
 static unsigned mw(const unsigned char *b, int le, int i) { return le ? le32(b + 4 * i) : be32(b + 4 * i); }
@@ -1368,6 +1368,7 @@ static int md_read(int fd, const char *path, const struct part *p, struct mdm *m
 		m->events = (u64)mw(b, 1, 40) << 32 | mw(b, 1, 39);
 	else				/* SPARC word order, native or swapped by RAIDiator */
 		m->events = (u64)mw(b, le, 39) << 32 | mw(b, le, 40);
+	m->layout = mw(b, le && !m->raidiator, 64);
 	m->chunk = mw(b, le && !m->raidiator, 65);
 	m->role = (int)mw(b, le, 992 + 3);	/* this_disk: raid_disk, state */
 	m->dstate = mw(b, le, 992 + 4);
@@ -1442,7 +1443,7 @@ static int flexraid(int argc, char **argv)
 	for (a = 0; a < na; a++) {
 		const struct mdm *r = NULL, *best = NULL, *first = NULL, *by_role[MAXM];
 		const char *content = "";
-		char why[160] = "", table[512] = "", lvl[16];
+		char why[160] = "", table[512] = "", lvl[16], legs[2048] = "";
 		int k;
 		u64 ev = 0, sectors = 0;
 		int usable = 0, insync = 0, stale = 0, dup = 0;
@@ -1454,7 +1455,8 @@ static int flexraid(int argc, char **argv)
 				continue;
 			else if (M[i].events != ev)
 				stale = 1;
-			else if (M[i].level != r->level || M[i].raid_disks != r->raid_disks || M[i].chunk != r->chunk)
+			else if (M[i].level != r->level || M[i].raid_disks != r->raid_disks || M[i].chunk != r->chunk
+			         || M[i].layout != r->layout)
 				add_word(why, sizeof(why), "inconsistent");
 		for (i = 0; i < nm; i++)	/* two arrays claiming the same md minor */
 			if (M[i].grp >= 0 && M[i].grp < a && M[i].minor == r->minor)
@@ -1522,6 +1524,52 @@ static int flexraid(int argc, char **argv)
 				if (l >= (int)sizeof(table))
 					usable = 0, *table = 0, add_word(why, sizeof(why), "layout");
 			}
+		} else if (r->level == 5) {
+			/* dm-raid without metadata devices (nothing on the disks is
+			 * read or written but the data), over read-only legs
+			 * frl-md<m>-<role> (nas-raid creates them from FR_A<a>_LEGS);
+			 * nosync: md never resyncs. One member missing or stale: "-",
+			 * read degraded (parity). md's layouts 0-3 = dm-raid's names. */
+			static const char *alg[] = { "raid5_la", "raid5_ra", "raid5_ls", "raid5_rs" };
+			unsigned cs = r->chunk / 512, n = r->raid_disks, k, miss = 0;
+			u64 dev = cs ? ((u64)r->size * 2) & ~(u64)(cs - 1) : 0;	/* md rounds to the chunk */
+			int ok = n >= 3 && n <= MAXM && cs >= 8 && !(cs & (cs - 1)) && !(r->chunk & 511) && r->layout < 4;
+			if (!ok)
+				add_word(why, sizeof(why), "layout");
+			for (k = 0; ok && k < n; k++) {
+				by_role[k] = NULL;
+				for (i = 0; i < nm; i++)
+					if (M[i].grp == a && M[i].role == (int)k && !strcmp(md_state(&M[i], ev), "in_sync"))
+						by_role[k] = &M[i];
+				if (!by_role[k])
+					miss++;
+				else if (!dev || by_role[k]->data < dev) {
+					add_word(why, sizeof(why), "size");
+					ok = 0;
+				}
+			}
+			if (ok && miss > 1) {
+				add_word(why, sizeof(why), "missing_member");
+				ok = 0;
+			}
+			if (ok) {
+				int l, g = 0;
+				if (miss)
+					add_word(why, sizeof(why), "degraded");
+				usable = 1;
+				first = by_role[0];	/* chunk 0 (NULL: role 0 missing) */
+				sectors = dev * (n - 1);
+				l = snprintf(table, sizeof(table), "0 %llu raid %s 2 %u nosync %u", sectors, alg[r->layout], cs, n);
+				for (k = 0; k < n && l < (int)sizeof(table); k++)
+					if (by_role[k]) {
+						l += snprintf(table + l, sizeof(table) - l, " - /dev/mapper/frl-md%u-%u", r->minor, k);
+						g += snprintf(legs + g, sizeof(legs) - g, "%s%u:%s:%llu:%llu", g ? " " : "", k,
+						              by_role[k]->path, by_role[k]->start, dev);
+					} else
+						l += snprintf(table + l, sizeof(table) - l, " - -");
+				if (l >= (int)sizeof(table) || g >= (int)sizeof(legs))
+					usable = 0, *table = 0, *legs = 0, add_word(why, sizeof(why), "layout");
+			}
 		} else
 			add_word(why, sizeof(why), "level");
 		if (usable) {
@@ -1534,7 +1582,7 @@ static int flexraid(int argc, char **argv)
 		/* clean bit: only meaningful for a mirror (something to resync); the
 		 * RAIDiator kernel leaves it at 0 on every RAID 0, even after a clean
 		 * stop (seen on the NAS, tools/raidiator-bench/on-nas.sh "single") */
-		if (!(r->state & 1) && r->level == 1)
+		if (!(r->state & 1) && (r->level == 1 || r->level == 5))
 			add_word(why, sizeof(why), "unclean");
 		if (json) {
 			char *w, *s;
@@ -1553,6 +1601,7 @@ static int flexraid(int argc, char **argv)
 		} else {
 			printf("FR_A%d='%u %s %d %llu'\n", a, r->minor, lvl, usable, usable ? sectors : 0);
 			printf("FR_A%d_TABLE='%s'\n", a, table);
+			printf("FR_A%d_LEGS='%s'\n", a, legs);
 			printf("FR_A%d_REASONS='%s'\n", a, why);
 			printf("FR_A%d_CONTENT='%s'\n", a, content);
 			/* members for the superblock writer (flexraid-sb) and the RAID 1

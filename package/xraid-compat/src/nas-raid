@@ -298,6 +298,8 @@ sb_dirty() {
 # VG lies on arrays that are complete and up to date (no reason at all), hold
 # LVM2 and carry no snapshot. Nothing is written outside the file system (no md
 # superblock, LVM metadata read-only): RAIDiator finds its arrays as they were.
+# A RAID 5 is always read-only: dm-raid without metadata over read-only legs
+# (FR_A<a>_LEGS from xraid-info), nosync, removed after it at the unmount.
 # A RAID 0 has nothing to keep in sync. A RAID 1 is a mirror without metadata
 # ("mdadm --build", role 0 first) of its members' data areas (legs frl-md<m>-0,
 # -1..., outside the LVM filter), fr-md<m> on top. RAIDiator never marks a
@@ -349,9 +351,9 @@ flexraid_mount() {	# 1 = no RAIDiator md array at all
 	output=$(xraid-info flexraid "$@") || { log "xraid-info flexraid failed"; return 1; }
 	eval "$output"
 	[ "$FR_NR_ARRAYS" -gt 0 ] || return 1
-	dms=; why=; rwmd=; FR_R1=; i=0
+	dms=; why=; rwmd=; FR_R1=; frlegs=; i=0
 	while [ $i -lt "$FR_NR_ARRAYS" ]; do
-		eval "set -- \$FR_A$i; t=\$FR_A${i}_TABLE; r=\$FR_A${i}_REASONS; c=\$FR_A${i}_CONTENT; mem=\$FR_A${i}_MEMBERS"	# minor level usable sectors
+		eval "set -- \$FR_A$i; t=\$FR_A${i}_TABLE; r=\$FR_A${i}_REASONS; c=\$FR_A${i}_CONTENT; mem=\$FR_A${i}_MEMBERS; l5=\$FR_A${i}_LEGS"	# minor level usable sectors
 		for w in $r; do case " $why " in *" $w "*) ;; *) why="$why${why:+ }$w";; esac; done
 		ro=--readonly
 		if [ "$FLEXRAID_RW" = yes ] && [ "$3" = 1 ] && [ -z "$r" ] && [ "$c" = lvm2 ]; then
@@ -361,6 +363,12 @@ flexraid_mount() {	# 1 = no RAIDiator md array at all
 					t="0 $4 linear /dev/md$((100 + $1)) 0"; ro=; rwmd="$rwmd fr-md$1"
 				fi ;;
 			esac
+		fi
+		if [ "$3" = 1 ] && [ -n "$l5" ]; then	# RAID 5: read-only legs under dm-raid (role:path:start:sectors)
+			for g in $l5; do
+				k=${g%%:*}; g=${g#*:}; p=${g%%:*}; g=${g#*:}
+				x dmsetup create "frl-md$1-$k" --readonly --table "0 ${g#*:} linear $p ${g%%:*}" && frlegs="$frlegs${frlegs:+ }frl-md$1-$k"
+			done
 		fi
 		[ "$3" = 1 ] && x dmsetup create "fr-md$1" $ro --table "$t" && dms="$dms${dms:+ }fr-md$1"
 		i=$((i + 1))
@@ -415,7 +423,7 @@ flexraid_mount() {	# 1 = no RAIDiator md array at all
 			mnts="$mnts${mnts:+ }$m"
 		fi
 	done
-	write "$FR_STATE" "FR_DMS='$dms' FR_VGS='$vgs' FR_MNTS='$mnts' FR_RW='$rwm' FR_R1='$FR_R1'"
+	write "$FR_STATE" "FR_DMS='$dms' FR_VGS='$vgs' FR_MNTS='$mnts' FR_RW='$rwm' FR_R1='$FR_R1' FR_LEGS='$frlegs'"
 	if [ -n "$mnts" ]; then
 		log "Flex-RAID: mounted: $mnts${rwm:+ (read-write: $rwm)}"
 		if [ -n "$rwm" ]; then write "$RUN/nas-raid.mode" "flexraid-rw $why"
@@ -429,13 +437,13 @@ flexraid_mount() {	# 1 = no RAIDiator md array at all
 }
 
 flexraid_unmount() {
-	FR_DMS=; FR_VGS=; FR_MNTS=; FR_RW=; FR_R1=
+	FR_DMS=; FR_VGS=; FR_MNTS=; FR_RW=; FR_R1=; FR_LEGS=
 	[ -r "$FR_STATE" ] && . "$FR_STATE"
 	[ -n "$FR_RW" ] && [ -z "$DRY_RUN" ] && sync
 	stopped=1
 	for m in $FR_MNTS; do mounted "$m" && { x umount "$m" || { log "(failure ignored: umount $m)"; stopped=; }; }; done
 	[ -n "$FR_VGS" ] && x_ lvm vgchange -an --config "$LVM_FR" $FR_VGS
-	for d in $FR_DMS; do x_ dmsetup remove "$d"; done
+	for d in $FR_DMS $FR_LEGS; do x_ dmsetup remove "$d"; done	# RAID 5 legs after the arrays on them
 	# read-write mirrors: health read before the stop, then the crash mark
 	# removed (every leg healthy) or the failed legs recorded on the survivors
 	for e in $FR_R1; do

@@ -410,7 +410,8 @@ after each one, read the four copies back with `dd` as above and compare with
 ## 10. RAIDiator md volumes (X-RAID off, "Flex-RAID")
 
 With X-RAID switched off in RAIDiator, the volumes are ordinary md arrays
-(RAID 1, RAID 0, several volumes on the same disks) whose md 0.90 superblocks
+(RAID 1, RAID 0, RAID 5 on a 4-bay NV+ with 3 disks or more, several volumes
+on the same disks) whose md 0.90 superblocks
 RAIDiator stores little-endian (docs/XRAID-FORMAT.md §6). `nas-raid mount` looks
 for them **first**, before X-RAID: RAIDiator's md install erases only the start
 of the disks, so disks used in X-RAID before can keep an X-RAID superblock at
@@ -423,15 +424,26 @@ md 0.90 superblocks in their partitions:
 2. Each usable array becomes a **read-only** dm device `fr-md<N>` (N = md
    number): RAID 1 = `linear` on one in-sync member (the RAID 1 volumes stay
    readable with one disk); RAID 0 = `striped` over all its members in role
-   order (refused if one is missing or out of date: `missing_member`).
+   order (refused if one is missing or out of date: `missing_member`);
+   RAID 5 = `raid` (dm-raid, `raid5_la/ra/ls/rs` from md's layout in the
+   superblock; RAIDiator's mdconfig makes left-asymmetric, `algorithm 0`, seen
+   on the NAS) over read-only legs `frl-md<N>-<role>` (one
+   dm-linear per member's data area, listed in `FR_A<a>_LEGS`), **without
+   metadata devices** (nothing on the disks is read or written but the data)
+   and `nosync`, size (members - 1) x md's per-member size; one member missing
+   or out of date: its slot `- -`, read degraded through the parity
+   (`degraded`), two: `missing_member`. The kernel has `CONFIG_DM_RAID` for it
+   and no `CONFIG_MD_AUTODETECT`: it never assembles an array itself (a RAID 5
+   assembled by the kernel would resync, i.e. write, RAIDiator's disks).
+   RAID 5 stays read-only, even with `FLEXRAID_RW=yes`.
 3. LVM on top, metadata read-only, every VG in `read_only_volume_list`; VG
    `c` is mounted on `/c`, any other one-letter VG `x` (LV `x`, RAIDiator's
    naming) on `/x`; ext4 read-only (`noload` if a journal is left to replay).
    Snapshots and other LVs are not mounted.
 
 Mode: `flexraid-ro` (or `flexraid-rw`, below) with the reasons of the
-arrays (`degraded`, `stale_member`, `unclean` (RAID 1 only: RAIDiator leaves
-the clean bit at 0 on every RAID 0), `missing_member`…), or `none
+arrays (`degraded`, `stale_member`, `unclean` (RAID 1 and 5 only: RAIDiator
+leaves the clean bit at 0 on every RAID 0), `missing_member`…), or `none
 flexraid_failed` if nothing could be mounted (everything undone). `nas-raid
 status --json` adds `flexraid` (the arrays, from `xraid-info flexraid
 --json`), `flexraid_mounts`, `flexraid_rw_mounts` and `flexraid_rw`; the DIET
@@ -472,8 +484,8 @@ is writable.
   survivors and xraid-info reads the failed members as stale (read-only from
   then on). flexraid-sb reads and checks every survivor before writing any;
   a call stopped halfway (one survivor written, the next not) is completed by
-  the next one. The failed roles are written in the mark first: if flexraid-sb cannot record it, the mark keeps
-  it and the volume stays read-only (reason `failure_unrecorded`, never a
+  the next one. The failed roles are written in the mark first: if
+  flexraid-sb cannot record them, the mark keeps them and the volume stays read-only (reason `failure_unrecorded`, never a
   resync over the newer leg) until the mark is deleted by hand. Read-write
   also needs flexraid-sb to accept every member (`--dry-run`; reason
   `sb_not_writable`) and the mark to be written (`mark_write_failed`). A
@@ -486,7 +498,9 @@ is writable.
 
 Limits: only `/c` can hold shares (SMB, NFS, DLNA): other volumes are reachable
 over SSH (rsync, scp) only. md's multi-zone RAID 0 (members of different sizes)
-and RAID 5 are refused.
+are refused; RAID 5 is read-only (writing it means the write hole: a cut
+mid-stripe leaves a parity that no longer matches, to resync from metadata
+we do not have).
 
 Checked on the NAS (tools/raidiator-bench): arrays made by RAIDiator's own
 kernel and tools (RAID 1, RAID 0, failed, rebuilding, spare, single disk,
@@ -504,6 +518,11 @@ the file written after the failure (11/11). A RAID 1 of 3 disks or more
 (more SATA disks than the Duo's 2 bays: nas-raid never takes USB disks) is
 covered by the PC tests only (make-images.py flexraid-3): RAIDiator's words
 for it are those seen with 2 disks, generalised, not checked on its kernel.
+RAID 5: made by RAIDiator's mdconfig on 4 members (on-nas.sh r5key:
+left-asymmetric, chunk 16 KiB), read under 6.18 through dm-raid (on-618.sh
+PHASE=r5, 12/12): the files with RAIDiator's sha256, read-only even with
+FLEXRAID_RW=yes, then one member unreadable: mounted degraded, the file rebuilt
+from the parity identical; superblocks and data of the members unchanged.
 
 ## Files
 
