@@ -474,7 +474,7 @@ index 5ebca5c7af1ead154956fb61fd68deb24e5c2108..50ddb65a5815e21e0062b41fe0d11baf
 +#ifdef CONFIG_SPARC_PADRE
 +/* Padre: I/O (bus < 1 GB) is seen through a fixed MMU window, there is
 + * nothing to map.
-+ * ponytail: no dynamic mapping beyond it, add one if DDR ever needs
++ * no dynamic mapping beyond it, add one if DDR ever needs
 + * ioremap().
 + */
 +void __iomem *ioremap(phys_addr_t offset, size_t size)

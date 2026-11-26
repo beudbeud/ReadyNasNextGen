@@ -284,7 +284,7 @@ index 0000000000000000000000000000000000000000..da7939cc9c34ef68d6e2a7f1d521dea6
 +	spin_lock_irqsave(&hw_lock, flags);
 +	if (led >= 0 && led < NASIO)
 +		asio_set(led, st);
-+	else if (led == BKLED_IDX)	/* ponytail: GPIO 5 only; never GPIO 2 (power off) */
++	else if (led == BKLED_IDX)	/* GPIO 5 only; never GPIO 2 (power off) */
 +		bkled_set(st);
 +	spin_unlock_irqrestore(&hw_lock, flags);
 +}

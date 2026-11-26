@@ -855,7 +855,7 @@ index 0000000000000000000000000000000000000000..adddbf5c9e831299d12658422503cdc1
 +	rc = ata_host_start(host);
 +	if (rc)
 +		return rc;
-+	/* ponytail: IRQ 32+n not requested (everything is polled); padre_sata_irq
++	/* IRQ 32+n not requested (everything is polled); padre_sata_irq
 +	 * stays ready in case non-data commands should one day use the IRQ
 +	 */
 +	(void)padre_sata_irq;

@@ -1300,7 +1300,7 @@ index 0000000000000000000000000000000000000000..99e9c47fca0a30d242cbe31ae21fb84c
 + * Uncached area (last 16 MB of DDR, threshold set in head_32.S):
 + * first 8 MB (2048 pages) for page directories and page tables,
 + * last 8 MB for coherent DMA (arch_dma_alloc below).
-+ * ponytail: first-fit bitmap allocators; enough for EHCI and a few pools,
++ * first-fit bitmap allocators; enough for EHCI and a few pools,
 + * revisit if a driver makes large allocations.
 + */
 +#define PADRE_NOCACHE_SIZE	(16UL << 20)

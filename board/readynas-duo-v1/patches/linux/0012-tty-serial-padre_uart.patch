@@ -135,7 +135,7 @@ index 0000000000000000000000000000000000000000..49b81aee738d40480f9b6957fde40184
 +
 +static void padre_stop_tx(struct uart_port *p) { }
 +
-+/* ponytail: blocking transmit (9600 baud ~ 1 ms per byte) as in 2.6.17;
++/* blocking transmit (9600 baud ~ 1 ms per byte) as in 2.6.17;
 + * switch to the TI interrupt if the console gets in the way.
 + */
 +static void padre_start_tx(struct uart_port *p)

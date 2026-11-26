@@ -115,7 +115,7 @@ index e8739b4..ddee470 100644
 +	pipe->readers = 1;
 +	/*
 +	 * One slot per piece of socket buffer (a TCP segment, ~1.4 KiB).
-+	 * ponytail: one pipe per WRITE, its slot array allocated each time
++	 * one pipe per WRITE, its slot array allocated each time
 +	 * (96 KiB for 4 MiB); the socket pages it holds are no longer charged
 +	 * to the socket (at most len / 1 KiB pieces, then the copying path).
 +	 * A pipe kept per connection if the allocation ever shows up.

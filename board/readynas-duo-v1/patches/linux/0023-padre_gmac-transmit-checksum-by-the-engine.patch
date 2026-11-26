@@ -378,11 +378,11 @@ index ffe66784e1a451935cba792b4cb3b117604f8045..5beb6069978024b4dbade420883aea48
 +			goto drop;
 +		tx_csum_sw++;
  	}
-+	/* ponytail: rare odd fragments are copied, no bounce buffers */
++	/* rare odd fragments are copied, no bounce buffers */
 +	if (skb_shinfo(skb)->nr_frags && !tx_sg_ok(skb) && skb_linearize(skb))
 +		goto drop;
 +	/* Every frame that is not left to the engine goes out with the engine
-+	 * off (2.6.17 skipped this for frames that are not IPv4; ponytail: one
++	 * off (2.6.17 skipped this for frames that are not IPv4; one
 +	 * more command for ARP, nothing to guess for IPv6).
 +	 */
 +	if (eng)

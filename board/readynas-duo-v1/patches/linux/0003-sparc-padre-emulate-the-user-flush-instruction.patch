@@ -62,7 +62,7 @@ index 99e9c47fca0a30d242cbe31ae21fb84c356becc8..910390bb91036f80c0c7b040234646b0
 + *       stack like the FPU emulation); test mode (faster, less simple);
 + *   0: instruction skipped, nothing done (original sparc32 behaviour,
 + *       diagnostics only: the PLT goes stale again).
-+ * ponytail: whole I-cache invalidated (MBIST); per line (ITAG) if the cost matters.
++ * whole I-cache invalidated (MBIST); per line (ITAG) if the cost matters.
 + */
 +static int padre_flush_mode = 1;
 +module_param_named(flush, padre_flush_mode, int, 0644);

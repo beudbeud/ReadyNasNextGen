@@ -693,7 +693,7 @@ enum { C_PART, C_LVM, C_SB, C_BITMAP, C_ITABLE, C_JOURNAL, C_SAMPLE, NCAT };
 static const char *CAT[NCAT] = { "partition", "lvm", "superblock", "bitmap", "inode_table", "journal", "sample" };
 static const char *FSN[3] = { "-", "system", "data" };
 #define XR_LV "c"			/* RAIDiator's logical volume */
-#define ITABLE_MAX (256ULL << 20)	/* ponytail: inode tables beyond this are left to the samples */
+#define ITABLE_MAX (256ULL << 20)	/* inode tables beyond this are left to the samples */
 
 struct rng { u64 lba, n; int cat, fs; };
 static struct rng *rg;
@@ -897,7 +897,7 @@ static void ext3_ranges(int fa, int fb, const struct vol *v, const char *what)
 			die("%s: cannot read the journal inode", what);
 		flags = le32(ino + 0x20);
 		jleft = le32(ino + 4) / bs;
-		if (flags & 0x80000) {	/* ponytail: extent-mapped journal (ext4) not walked */
+		if (flags & 0x80000) {	/* extent-mapped journal (ext4) not walked */
 			snprintf(m, 96, "%s: extent-mapped journal not supported", what);
 			note(1, m);
 		} else {
@@ -1471,7 +1471,7 @@ static int flexraid(int argc, char **argv)
 					add_word(why, sizeof(why), "missing_member");
 					ok = 0;
 				} else if (k && (by_role[k]->data & ~(u64)(cs - 1)) != each) {
-					/* ponytail: md's multi-zone RAID 0 (members of different
+					/* md's multi-zone RAID 0 (members of different
 					 * sizes) is not mapped; RAIDiator partitions every disk
 					 * alike. Map the extra zones here if a real one shows up. */
 					add_word(why, sizeof(why), "sizes_differ");

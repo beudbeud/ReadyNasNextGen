@@ -137,7 +137,7 @@ index 0000000000000000000000000000000000000000..3a7d003b5bf60f3c986edf499f867f6b
 +#define TWSI_CLK_VAL	0x0c
 +#define RTC_ADDR	0x68
 +
-+/* ponytail: ~20 ms worst case (8 bytes at 100 kHz = 0.8 ms); measure on the NAS */
++/* ~20 ms worst case (8 bytes at 100 kHz = 0.8 ms); measure on the NAS */
 +#define BUSY_LOOPS	10000
 +#define BUSY_STEP_US	2
 +

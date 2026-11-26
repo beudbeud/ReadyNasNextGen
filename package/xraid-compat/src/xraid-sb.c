@@ -166,7 +166,7 @@ static int store(struct disk *d, const unsigned char *nsb, const int *order)
 		return 0;
 	}
 	w = open(d->path, O_RDWR | O_DIRECT | O_SYNC);
-	if (w < 0 && errno == EINVAL)	/* ponytail: disk images on a file system without O_DIRECT */
+	if (w < 0 && errno == EINVAL)	/* disk images on a file system without O_DIRECT */
 		w = open(d->path, O_RDWR | O_SYNC);
 	if (w < 0) {
 		fprintf(stderr, "xraid-sb: %s: %s\n", d->path, strerror(errno));

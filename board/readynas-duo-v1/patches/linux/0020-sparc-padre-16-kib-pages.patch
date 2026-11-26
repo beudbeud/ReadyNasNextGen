@@ -368,7 +368,7 @@ index 910390bb91036f80c0c7b040234646b0fe981f63..2e3692036f22d0158c8181de9e2e8897
 + * first 8 MB (2048 blocks of 4 KB) for page directories and page tables
 + * (hardware size: 4 KB each, also with 16 KB Linux pages),
   * last 8 MB for coherent DMA (arch_dma_alloc below).
-  * ponytail: first-fit bitmap allocators; enough for EHCI and a few pools,
+  * first-fit bitmap allocators; enough for EHCI and a few pools,
   * revisit if a driver makes large allocations.
   */
  #define PADRE_NOCACHE_SIZE	(16UL << 20)
@@ -433,7 +433,7 @@ index 910390bb91036f80c0c7b040234646b0fe981f63..2e3692036f22d0158c8181de9e2e8897
  	padre_free_nocache_page(pgd);
  }
  
-+/* ponytail: no pagetable_pte_ctor/dtor: 4 tables share a 16 KB page
++/* no pagetable_pte_ctor/dtor: 4 tables share a 16 KB page
 + * (reserved pool) and UP has no split page-table locks; only the
 + * NR_PAGETABLE statistic is missing.
 + */

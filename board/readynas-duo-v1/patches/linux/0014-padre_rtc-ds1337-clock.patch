@@ -95,7 +95,7 @@ index 0000000000000000000000000000000000000000..87d86a566706610ff541e096053321a1
 +		dev_warn_once(dev, "oscillator stopped (OSF): time invalid, set it (hwclock -w)\n");
 +		return -EINVAL;
 +	}
-+	/* ponytail: byte by byte (validated one-byte TWSI accesses); read again
++	/* byte by byte (validated one-byte TWSI accesses); read again
 +	 * if the seconds changed during the read (carry in progress).
 +	 */
 +	for (try = 0; try < 3; try++) {
