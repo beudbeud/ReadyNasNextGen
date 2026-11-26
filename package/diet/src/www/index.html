@@ -653,7 +653,7 @@ const I18N = {
   "read and write": ["lecture et écriture", "Lesen und Schreiben"],
   "a volume has a snapshot: it stays read-only": ["un volume a un instantané : il reste en lecture seule", "ein Volume hat einen Snapshot: es bleibt schreibgeschützt"],
   "Allow writing on the Flex-RAID volumes": ["Autoriser l’écriture sur les volumes Flex-RAID", "Schreiben auf die Flex-RAID-Volumes erlauben"],
-  "Only complete, up-to-date volumes without a snapshot become writable, RAID 1 and RAID 0 alike. Writing goes through the kernel ext4 driver on the ext3 file system with 16 KB blocks created by RAIDiator; nothing else is written (only a failed disk is recorded, as RAIDiator does), so RAIDiator finds its arrays as they were. A RAID 1 is written on both disks; after a power cut it is resynchronised at the next read-write start. A RAID 0 has no redundancy: a backup is strongly recommended. The volumes are unmounted and mounted again; SMB, NFS, DLNA, rsync and WebDAV are stopped meanwhile.": ["Seuls les volumes complets, à jour et sans instantané passent en écriture, en RAID 1 comme en RAID 0. L’écriture passe par le pilote ext4 du noyau sur le système de fichiers ext3 à blocs de 16 Ko créé par RAIDiator ; rien d’autre n’est écrit (seul un disque en panne est noté, comme le fait RAIDiator), RAIDiator retrouve donc ses grappes telles quelles. Un RAID 1 est écrit sur les deux disques ; après une coupure de courant, il est resynchronisé au prochain démarrage en écriture. Un RAID 0 n’a aucune redondance : une sauvegarde est fortement recommandée. Les volumes sont démontés puis remontés ; SMB, NFS, DLNA, rsync et WebDAV sont arrêtés pendant ce temps.", "Nur vollständige, aktuelle Volumes ohne Snapshot werden beschreibbar, RAID 1 wie RAID 0. Geschrieben wird über den ext4-Treiber des Kernels auf das von RAIDiator angelegte ext3-Dateisystem mit 16-KB-Blöcken; sonst wird nichts geschrieben (nur ein ausgefallener Datenträger wird vermerkt, wie RAIDiator es tut), RAIDiator findet seine Verbünde also unverändert vor. Ein RAID 1 wird auf beide Datenträger geschrieben; nach einem Stromausfall wird er beim nächsten Start mit Schreibzugriff neu synchronisiert. Ein RAID 0 hat keine Redundanz: eine Sicherung wird dringend empfohlen. Die Volumes werden aus- und wieder eingehängt; SMB, NFS, DLNA, rsync und WebDAV werden währenddessen angehalten."],
+  "Only complete, up-to-date volumes without a snapshot become writable, RAID 1 and RAID 0 alike. Writing goes through the kernel ext4 driver on the ext3 file system with 16 KB blocks created by RAIDiator; nothing else is written (only a failed disk is recorded, as RAIDiator does), so RAIDiator finds its arrays as they were. A RAID 1 is written on all its disks; after a power cut it is resynchronised at the next read-write start. A RAID 0 has no redundancy: a backup is strongly recommended. The volumes are unmounted and mounted again; SMB, NFS, DLNA, rsync and WebDAV are stopped meanwhile.": ["Seuls les volumes complets, à jour et sans instantané passent en écriture, en RAID 1 comme en RAID 0. L’écriture passe par le pilote ext4 du noyau sur le système de fichiers ext3 à blocs de 16 Ko créé par RAIDiator ; rien d’autre n’est écrit (seul un disque en panne est noté, comme le fait RAIDiator), RAIDiator retrouve donc ses grappes telles quelles. Un RAID 1 est écrit sur tous ses disques ; après une coupure de courant, il est resynchronisé au prochain démarrage en écriture. Un RAID 0 n’a aucune redondance : une sauvegarde est fortement recommandée. Les volumes sont démontés puis remontés ; SMB, NFS, DLNA, rsync et WebDAV sont arrêtés pendant ce temps.", "Nur vollständige, aktuelle Volumes ohne Snapshot werden beschreibbar, RAID 1 wie RAID 0. Geschrieben wird über den ext4-Treiber des Kernels auf das von RAIDiator angelegte ext3-Dateisystem mit 16-KB-Blöcken; sonst wird nichts geschrieben (nur ein ausgefallener Datenträger wird vermerkt, wie RAIDiator es tut), RAIDiator findet seine Verbünde also unverändert vor. Ein RAID 1 wird auf alle seine Datenträger geschrieben; nach einem Stromausfall wird er beim nächsten Start mit Schreibzugriff neu synchronisiert. Ein RAID 0 hat keine Redundanz: eine Sicherung wird dringend empfohlen. Die Volumes werden aus- und wieder eingehängt; SMB, NFS, DLNA, rsync und WebDAV werden währenddessen angehalten."],
   "Put the Flex-RAID volumes back to read-only? They are unmounted and mounted again (SMB, NFS, DLNA, rsync and WebDAV stopped meanwhile).": ["Remettre les volumes Flex-RAID en lecture seule ? Ils sont démontés puis remontés (SMB, NFS, DLNA, rsync et WebDAV arrêtés pendant ce temps).", "Die Flex-RAID-Volumes wieder schreibschützen? Sie werden aus- und wieder eingehängt (SMB, NFS, DLNA, rsync und WebDAV währenddessen angehalten)."],
   "Volumes": ["Volumes", "Volumes"],
   "readable": ["lisible", "lesbar"],
@@ -1060,7 +1060,9 @@ function health(){
   if(!last) return;
   const lay = stk && stk.layout, mem = lay ? lay.members : last.disks.map(d=>({state: d.faulty ? 'failed' : 'online'}));
   const bad = mem.filter(m=>m.state==='failed' || m.state==='missing').length, inUse = mem.filter(m=>m.state==='online').length;
-  const mdBad = last.md.some(m=>!mdOk(m)), syncs = last.md.map(m=>m.sync).filter(Boolean);
+  // a Flex-RAID array with a member failed, missing or out of date
+  const frBad = ((stk && /^flexraid-/.test(stk.mode) && stk.flexraid)||{}).arrays?.some(a=>(a.reasons||[]).some(r=>['degraded','stale_member','missing_member','no_member_in_sync'].includes(r)));
+  const mdBad = frBad || last.md.some(m=>!mdOk(m)), syncs = last.md.map(m=>m.sync).filter(Boolean);
   const pct = lay && lay.rebuild!=null ? lay.rebuild : syncs.length ? parseInt((syncs[0].match(/([0-9]+)(\.[0-9]+)?%/)||[])[1]) : null;
   const rebuilding = mem.some(m=>m.state==='rebuilding') || (lay && lay.rebuild!=null) || syncs.length;
   let st, c;
@@ -1088,7 +1090,8 @@ async function loadStk(d){
   if(fr){
     const rw = (stk.flexraid_rw_mounts||'').split(' ');
     h += `<div class="row"><span>${t('Volumes')}</span><span>${(stk.flexraid_mounts||'').split(' ').filter(Boolean).map(m=>esc(m)+' · '+t(rw.includes(m) ? 'read and write' : 'read-only')).join(', ')}</span></div>`;
-    (stk.reasons||'').split(' ').filter(r=>r==='snapshot').forEach(r=>{ h += `<div>· ${esc(t(NR[r]))}</div>`; });
+    (stk.reasons||'').split(' ').filter(r=>NR[r]).forEach(r=>{ h += `<div>· ${esc(t(NR[r]))}</div>`; });
+    if(stk.flexraid_rw==='yes' && (stk.flexraid_mounts||'').split(' ').filter(Boolean).some(m=>!rw.includes(m))) h += `<div style="color:var(--warn)">${t('writing requested, refused by the safeguards above')}</div>`;
     ((stk.flexraid||{}).arrays||[]).forEach(a=>{
       const why = (a.reasons||[]).map(r=>t(FRR[r]||r)).join(', ');
       h += `<div class="row"><span>md${a.minor} · RAID ${esc(a.level.replace(/^raid/, ''))}</span><span style="color:var(--${!a.usable?'bad':why?'warn':'ok'})">${esc(why || t('readable'))}</span></div>`;
@@ -1149,13 +1152,13 @@ async function loadStk(d){
   // technical details: superblock as RAIDiator sees it (clean-stop bit, counters,
   // base and mirror roles of a RAID 1), sections
   let tc = '';
-  if(stk.mode!=='flexraid-ro' && x.version){
+  if(!fr && x.version){
     tc += `<div class="row"><span>${t('Superblock')}</span><span style="color:var(--${x.clean?'ok':'warn'})">${esc(t(x.clean ? 'clean' : 'in use or unclean shutdown'))}</span></div>`;
     const r1 = !lay || lay.level==='raid1';
     (x.disks||[]).forEach(d=>{ tc += `<div class="row"><span>${esc(t('Bay {0}', d.channel+1))} · ${esc(d.path)}${r1 && d.role ? ' · '+esc(t(d.role)) : ''}</span><span style="color:var(--${d.state==='online'?'ok':'bad'})">${esc(t(d.state||'?'))}</span></div>`; });
     tc += `<div class="row"><span>${t('Disks')}</span><span>${esc(t('{0} working, {1} failed', x.working_disks, x.failed_disks))}</span></div>`;
   }
-  if(stk.mode!=='flexraid-ro') (x.sections||[]).forEach((s,i)=>{ tc += `<div class="row"><span>${t('Section {0}', i)}</span><span>${kb(s.sectors/2)} · ${s.init===0 ? t('sync unfinished') : t('in sync')}</span></div>`; });
+  if(!fr) (x.sections||[]).forEach((s,i)=>{ tc += `<div class="row"><span>${t('Section {0}', i)}</span><span>${kb(s.sectors/2)} · ${s.init===0 ? t('sync unfinished') : t('in sync')}</span></div>`; });
   $('#xrtc').innerHTML = tc;
   const b = [];
   if(x.base && x.mirror && !busy) b.push(`<button class="b" data-x="verify">${t('Check the volume consistency')}</button>`, `<button class="b" data-x="quick">${t('Quick check')}</button>`);
@@ -1178,7 +1181,7 @@ $('#xrzc').onchange = ev=>{
     ev.target.checked = false;   // checked again by loadStk once nas-raid has answered
     const d = $('#xrwd'); d._x = d._x || [$('#xrwt').textContent, $('#xrwp').textContent];
     $('#xrwt').textContent = isFr() ? t('Allow writing on the Flex-RAID volumes') : d._x[0];
-    $('#xrwp').textContent = isFr() ? t('Only complete, up-to-date volumes without a snapshot become writable, RAID 1 and RAID 0 alike. Writing goes through the kernel ext4 driver on the ext3 file system with 16 KB blocks created by RAIDiator; nothing else is written (only a failed disk is recorded, as RAIDiator does), so RAIDiator finds its arrays as they were. A RAID 1 is written on both disks; after a power cut it is resynchronised at the next read-write start. A RAID 0 has no redundancy: a backup is strongly recommended. The volumes are unmounted and mounted again; SMB, NFS, DLNA, rsync and WebDAV are stopped meanwhile.') : d._x[1];
+    $('#xrwp').textContent = isFr() ? t('Only complete, up-to-date volumes without a snapshot become writable, RAID 1 and RAID 0 alike. Writing goes through the kernel ext4 driver on the ext3 file system with 16 KB blocks created by RAIDiator; nothing else is written (only a failed disk is recorded, as RAIDiator does), so RAIDiator finds its arrays as they were. A RAID 1 is written on all its disks; after a power cut it is resynchronised at the next read-write start. A RAID 0 has no redundancy: a backup is strongly recommended. The volumes are unmounted and mounted again; SMB, NFS, DLNA, rsync and WebDAV are stopped meanwhile.') : d._x[1];
     $('#xrwc').checked = false; $('#xrwi').value = ''; $('#xrwl').textContent = t('Type “{0}” to confirm (this word stays in English, in capitals):', XRW_WORD);
     xrwCheck(); $('#xrwd').showModal();
   } else {

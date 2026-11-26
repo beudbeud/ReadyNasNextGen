@@ -586,6 +586,8 @@ check "storage layout, degraded: the bay without its disk is missing" "json '[m[
 echo "FR_DMS='fr-md2 fr-md3' FR_VGS='c d' FR_MNTS='/c /d'" > "$R"/var/run/flexraid.state
 stk flexraid 'flexraid-ro'
 check "storage Flex-RAID: mode flexraid-ro, mounted volumes, RAID 1 and RAID 0 arrays, no X-RAID layout" "json 'j[\"mode\"]==\"flexraid-ro\" and j[\"flexraid_mounts\"]==\"/c /d\" and [(a[\"minor\"],a[\"level\"],a[\"usable\"]) for a in j[\"flexraid\"][\"arrays\"]][2:]==[(2,\"raid1\",1),(3,\"raid0\",1)] and j[\"layout\"] is None'"
+stk flexraid 'flexraid-rw failure_unrecorded'
+check "storage Flex-RAID read-write: no X-RAID layout, nas-raid reasons passed on" "json 'j[\"mode\"]==\"flexraid-rw\" and j[\"reasons\"]==\"failure_unrecorded\" and j[\"layout\"] is None'"
 rm -f "$R"/var/run/flexraid.state
 stk clean xraid-rw
 # md wizards: disabled for now (409), nas-raid not started

@@ -1161,7 +1161,7 @@ rsync_pw() {
 storage_get() {
   command -v nas-raid >/dev/null 2>&1 || { echo '{"mode":"absent"}'; return; }
   J=$(nas-raid status --json 2>/dev/null) || { echo '{"mode":"error"}'; return; }
-  case $J in '{"mode":"flexraid-ro"'*'}') L2=null;; '{'*'}') L2=$(printf '%s\n' "$J" | layout_json);; *) echo '{"mode":"error"}'; return;; esac
+  case $J in '{"mode":"flexraid-'*'}') L2=null;; '{'*'}') L2=$(printf '%s\n' "$J" | layout_json);; *) echo '{"mode":"error"}'; return;; esac
   [ -n "$L2" ] || L2=null	# never an empty value: it would break the whole answer
   printf '%s,"layout":%s}\n' "${J%\}}" "$L2"
 }

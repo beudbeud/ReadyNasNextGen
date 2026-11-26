@@ -299,22 +299,22 @@ sb_dirty() {
 # LVM2 and carry no snapshot. Nothing is written outside the file system (no md
 # superblock, LVM metadata read-only): RAIDiator finds its arrays as they were.
 # A RAID 0 has nothing to keep in sync. A RAID 1 is a mirror without metadata
-# ("mdadm --build", role 0 first) of its members' data areas (legs frl-md<m>-0
-# and -1, outside the LVM filter), fr-md<m> on top. RAIDiator never marks a
+# ("mdadm --build", role 0 first) of its members' data areas (legs frl-md<m>-0,
+# -1..., outside the LVM filter), fr-md<m> on top. RAIDiator never marks a
 # mirror in use (docs/XRAID-FORMAT.md §6), so the crash safeguard is ours: the
 # mark flexraid-dirty-md<m> is set before the first write and removed after a
-# clean stop with both legs healthy; while it is there, the next assembly
-# resynchronises role 1 from role 0 (no --assume-clean). A leg that fails is
-# recorded on the survivor (flexraid-sb fail, as RAIDiator writes it).
+# clean stop with every leg healthy; while it is there, the next assembly
+# resynchronises the other roles from role 0 (no --assume-clean). A leg that
+# fails is recorded on the survivors (flexraid-sb fail, as RAIDiator writes it).
 LVM_FR="devices { filter = [ \"a|^/dev/mapper/fr-md|\", \"r|.*|\" ] use_devicesfile = 0 } global { metadata_read_only = 1 }"
 FR_STATE=$RUN/flexraid.state	# what flexraid_unmount undoes
 
-# fr_mirror MINOR SECTORS MEMBER0 MEMBER1: the read-write RAID 1 /dev/md(100+MINOR)
+# fr_mirror MINOR SECTORS MEMBER0 MEMBER1...: the read-write RAID 1 /dev/md(100+MINOR)
 fr_mirror() {
 	m=$1; n=$2; md=/dev/md$((100 + $1)); shift 2
-	[ $# = 2 ] || return 1
+	[ $# -ge 2 ] || return 1
 	command -v flexraid-sb >/dev/null 2>&1 || { why="${why:+$why }no_sb_writer"; return 1; }
-	# a failure would have to be recordable on either member
+	# a failure would have to be recordable on any member
 	for s in "$@"; do x flexraid-sb --dry-run fail "$s" >/dev/null 2>&1 || { why="${why:+$why }sb_not_writable"; return 1; }; done
 	mk=$STATE/flexraid-dirty-md$m; clean=--assume-clean
 	if grep -q '^failed' "$mk" 2>/dev/null; then	# never resync over the newer leg
@@ -322,25 +322,24 @@ fr_mirror() {
 		why="${why:+$why }failure_unrecorded"; return 1
 	fi
 	if [ -e "$mk" ]; then
-		clean=; log "Flex-RAID md$m: Linux stopped without a clean unmount, role 1 resynchronised from role 0"
+		clean=; log "Flex-RAID md$m: Linux stopped without a clean unmount, the other roles resynchronised from role 0"
 	fi
-	k=0
+	k=0; legs=
 	for s in "$@"; do
 		p=${s%%:*}; st=${s#*:}; st=${st%%:*}
-		x dmsetup create "frl-md$m-$k" --table "0 $n linear $p $st" || { fr_mirror_undo "$m"; return 1; }
-		k=$((k + 1))
+		x dmsetup create "frl-md$m-$k" --table "0 $n linear $p $st" || { fr_mirror_undo "$m" $#; return 1; }
+		legs="$legs /dev/mapper/frl-md$m-$k"; k=$((k + 1))
 	done
-	x mdadm --build "$md" --level=1 --raid-devices=2 $clean "/dev/mapper/frl-md$m-0" "/dev/mapper/frl-md$m-1" \
-		|| { fr_mirror_undo "$m"; return 1; }
+	x mdadm --build "$md" --level=1 --raid-devices=$# $clean $legs || { fr_mirror_undo "$m" $#; return 1; }
 	if ! write "$mk" "$(date +%s)"; then
-		fr_mirror_undo "$m"; why="${why:+$why }mark_write_failed"; return 1
+		fr_mirror_undo "$m" $#; why="${why:+$why }mark_write_failed"; return 1
 	fi
 	[ -n "$DRY_RUN" ] || sync
-	FR_R1="$FR_R1${FR_R1:+ }$m=$1,$2"
+	FR_R1="$FR_R1${FR_R1:+ }$m=$(echo "$@" | tr ' ' ,)"
 }
-fr_mirror_undo() {	# 1 = the md could not be stopped
+fr_mirror_undo() {	# fr_mirror_undo MINOR LEGS; 1 = the md could not be stopped
 	if grep -q "^md$((100 + $1)) :" "$R/proc/mdstat" 2>/dev/null; then x mdadm --stop "/dev/md$((100 + $1))" || return 1; fi
-	for k in 0 1; do dmsetup info "frl-md$1-$k" >/dev/null 2>&1 && x_ dmsetup remove "frl-md$1-$k"; done
+	k=0; while [ $k -lt "$2" ]; do dmsetup info "frl-md$1-$k" >/dev/null 2>&1 && x_ dmsetup remove "frl-md$1-$k"; k=$((k + 1)); done
 	return 0
 }
 
@@ -438,30 +437,47 @@ flexraid_unmount() {
 	[ -n "$FR_VGS" ] && x_ lvm vgchange -an --config "$LVM_FR" $FR_VGS
 	for d in $FR_DMS; do x_ dmsetup remove "$d"; done
 	# read-write mirrors: health read before the stop, then the crash mark
-	# removed (both legs healthy) or the failed leg recorded on the survivor
+	# removed (every leg healthy) or the failed legs recorded on the survivors
 	for e in $FR_R1; do
 		m=${e%%=*}; mem=${e#*=}
-		h=$(md_one "md$((100 + m))")
-		fr_mirror_undo "$m" || stopped=
+		h=$(fr_health "md$((100 + m))")
+		fr_mirror_undo "$m" $(echo "$mem" | tr , " " | wc -w) || stopped=
 		[ -n "$stopped" ] || [ "$h" != ok ] || h=busy	# still in use: the mark stays
 		fr_sb_after "$m" "$h" "$mem"
 	done
 	[ -n "$DRY_RUN" ] || rm -f "$FR_STATE"
 }
 
-# fr_sb_after MINOR HEALTH MEMBER0,MEMBER1. A failed role goes in the mark
-# first: if flexraid-sb cannot record it, the mark keeps it (read-only from
-# then on, never a resync over the newer leg); recorded, the mark goes (the
-# failed member is stale on the disks, until RAIDiator rebuilds it).
+# fr_health mdN: ok | busy (missing, resync running) | failed ROLES (the
+# failed legs, comma-separated, role order as built) | all_failed
+fr_health() {
+	map=$(awk -v n="$1" '$1 == n { f = 1; next } f && /blocks/ { print $NF; exit }' "$R/proc/mdstat" 2>/dev/null)
+	case "$map" in
+	\[*U*_*\]|\[*_*U*\]) echo "failed $(echo "$map" | awk '{ for (i = 2; i < length($0); i++) if (substr($0, i, 1) == "_") o = o (o == "" ? "" : ",") (i - 2); print o }')" ;;
+	\[_*\]) echo all_failed ;;
+	\[U*\]) read -r act 2>/dev/null < "$R/sys/block/$1/md/sync_action" || act=unknown
+		if [ "$act" = idle ]; then echo ok; else echo busy; fi ;;
+	*) echo busy ;;
+	esac
+}
+
+# fr_sb_after MINOR HEALTH MEMBER0,MEMBER1[,...]. The failed roles go in the
+# mark first: if flexraid-sb cannot record them, the mark keeps them (read-only
+# from then on, never a resync over the newer legs); recorded, the mark goes
+# (the failed members are stale on the disks, until RAIDiator rebuilds them).
 fr_sb_after() {
 	mk=$STATE/flexraid-dirty-md$1
 	case $2 in
 	ok) [ -n "$DRY_RUN" ] || rm -f "$mk" ;;
-	mirror_failed|base_failed)
-		if [ $2 = mirror_failed ]; then f=1 s=${3%%,*}; else f=0 s=${3#*,}; fi
+	failed\ *)
+		f=${2#failed }; sv=; sr=; k=0
+		for p in $(echo "$3" | tr , ' '); do
+			case ",$f," in *",$k,"*) ;; *) sv="$sv $p"; sr="$sr${sr:+,}$k" ;; esac
+			k=$((k + 1))
+		done
 		write "$mk" "failed role $f $(date +%s)"; [ -n "$DRY_RUN" ] || sync
-		log "Flex-RAID md$1: role $f failed, recording it on role $((1 - f))"
-		if x flexraid-sb fail "$s"; then
+		log "Flex-RAID md$1: role $f failed, recording it on role $sr"
+		if x flexraid-sb fail $sv; then
 			[ -n "$DRY_RUN" ] || rm -f "$mk"
 		else
 			log "Flex-RAID md$1: failure NOT recorded on the disks: read-only until $mk is deleted"
@@ -579,7 +595,7 @@ fr_watch() {
 	lock
 	FR_R1=; FR_MNTS=; [ -r "$FR_STATE" ] && . "$FR_STATE"
 	for e in $FR_R1; do
-		h=$(md_one "md$((100 + ${e%%=*}))")
+		h=$(fr_health "md$((100 + ${e%%=*}))")
 		case $h in ok|busy) continue ;; esac
 		log "Flex-RAID: md$((100 + ${e%%=*})) degraded while writing ($h): going read-only"
 		fr_sb_after "${e%%=*}" "$h" "${e#*=}"

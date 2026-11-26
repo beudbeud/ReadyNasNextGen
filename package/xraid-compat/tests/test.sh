@@ -23,7 +23,7 @@ cc -O2 -Wall -Werror -o "$T/flexraid-sb.real" "$SRC/flexraid-sb.c" || exit 1
 # ext3 images (fs, fsdirty) need e2fsprogs (mke2fs, debugfs, dumpe2fs): skipped without them
 PATH=$PATH:/usr/sbin:/sbin
 if python3 "$HERE/make-images.py" "$T" tools; then E2FS="fs fsdirty"; else E2FS=; echo "skip ext3 (quick check) tests: e2fsprogs missing"; fi
-for s in clean big dirty degraded sync different reinstall counters torn sbw flexraid flexraid-be flexraid-degraded flexraid-stale flexraid-oldxraid flexraid-lvm1 flexraid-x86 $E2FS; do
+for s in clean big dirty degraded sync different reinstall counters torn sbw flexraid flexraid-3 flexraid-be flexraid-degraded flexraid-stale flexraid-oldxraid flexraid-lvm1 flexraid-x86 $E2FS; do
 	python3 "$HERE/make-images.py" "$T/$s" "$s" > /dev/null || exit 1
 done
 
@@ -112,8 +112,8 @@ J=$("$R/bin/xraid-info" --json "$T/f-sda.img" "$T/f-sdb.img")
 check "xraid-sb fail: mirror faulty, newest superblock wins, read from the base" "js 'j[\"mode\"]==\"ro\" and [d[\"state\"] for d in j[\"disks\"]]==[\"faulty\",\"online\"] and j[\"failed_disks\"]==1 and j[\"read_disk\"].endswith(\"f-sdb.img\")'"
 # flexraid-sb on a RAIDiator superblock with its real checksum (docs/XRAID-FORMAT.md §6)
 cp --sparse=always "$T/flexraid/sda.img" "$T/fsb.img"
-fsb() {	# fsb csum|check|words: md2's superblock in fsb.img (sector 5144608 + 1048448)
-	python3 - "$1" "$T/fsb.img" <<'PY'
+fsb() {	# fsb csum|check|words|disks [IMAGE]: md2's superblock in IMAGE (fsb.img; sector 5144608 + 1048448)
+	python3 - "$1" "${2:-$T/fsb.img}" <<'PY'
 import sys, struct
 f = open(sys.argv[2], "r+b"); o = (5144608 + 1048448) * 512; f.seek(o); b = bytearray(f.read(4096))
 def cs(b):
@@ -125,6 +125,9 @@ if sys.argv[1] == "csum":
     struct.pack_into("<I", b, 152, cs(b)); f.seek(o); f.write(b)
 elif sys.argv[1] == "check":
     sys.exit(0 if cs(b) == w(38) else 1)
+elif sys.argv[1] == "disks":   # counters, events, cp_events, then major:minor:state of each descriptor
+    print(w(9), w(34), w(35), w(36), w(40), struct.unpack_from(">I", b, 168)[0],
+          *["%d:%d:%d" % (w(129 + 32 * d), w(130 + 32 * d), w(132 + 32 * d)) for d in range(w(10))])
 else:
     print(w(9), w(34), w(35), w(36), w(40), struct.unpack_from(">I", b, 168)[0], w(161), w(162), w(164))
 PY
@@ -137,6 +140,23 @@ check "flexraid-sb fail again: already recorded, nothing written, success" "[ $r
 check "flexraid-sb: --dry-run writes nothing" "[ $rc2 = 0 ] && grep -q 'would write events 42' '$T/fsb4'"
 h=$(md5sum "$T/clean/sda.img"); "$T/flexraid-sb.real" fail "$T/clean/sda.img:5144608:1048448" 2>/dev/null; rc=$?
 check "flexraid-sb fail: refused where there is no md superblock" "[ $rc = 1 ] && [ \"\$(md5sum '$T/clean/sda.img')\" = \"$h\" ]"
+# a RAID 1 of three disks (flexraid-3): every survivor written, the failed ones removed
+F3=$T/fsb3; cp -r "$T/flexraid-3" "$F3"; for d in sda sdb sdc; do fsb csum "$F3/$d.img"; done; cp -r "$F3" "$T/fsb3-fresh"
+m3() { echo "$F3/$1.img:5144608:1048448"; }
+h=$(md5sum "$F3/sdc.img"); "$T/flexraid-sb.real" fail "$(m3 sda)" "$(m3 sdb)" > /dev/null; rc=$?
+check "flexraid-sb, 3 disks, role 2 failed: both survivors = 2 disks, role 2 removed, events + 2, checksums right; role 2 untouched" "[ $rc = 0 ] && for d in sda sdb; do fsb check '$F3/'\$d.img && [ \"\$(fsb disks '$F3/'\$d.img)\" = '2 2 2 1 42 42 9:0:6 9:1:6 0:0:9' ] || exit 1; done && [ \"\$(md5sum '$F3/sdc.img')\" = \"$h\" ]"
+check "flexraid-sb, 3 disks: xraid-info then finds role 2 stale (read-only, degraded)" "[ \"\$('$R/bin/xraid-info' flexraid '$F3'/*.img | sed -n \"s/^FR_A2_REASONS='\(.*\)'/\1/p\")\" = 'degraded stale_member' ]"
+h=$(md5sum "$F3"/*.img); "$T/flexraid-sb.real" fail "$(m3 sda)" "$(m3 sdb)" > "$T/fsb5"; rc=$?
+check "flexraid-sb, 3 disks, again: already recorded, nothing written" "[ $rc = 0 ] && grep -q 'already recorded' '$T/fsb5' && [ \"\$(md5sum '$F3'/*.img)\" = \"$h\" ]"
+cp "$T/fsb3-fresh/sdb.img" "$F3/sdb.img"; "$T/flexraid-sb.real" fail "$(m3 sda)" "$(m3 sdb)" > /dev/null; rc=$?
+check "flexraid-sb, 3 disks, stopped halfway (sda written, sdb not): sdb written alike" "[ $rc = 0 ] && fsb check '$F3/sdb.img' && [ \"\$(fsb disks '$F3/sdb.img')\" = '2 2 2 1 42 42 9:0:6 9:1:6 0:0:9' ]"
+rm -rf "$F3"; cp -r "$T/fsb3-fresh" "$F3"; "$T/flexraid-sb.real" fail "$(m3 sdb)" > /dev/null; rc=$?
+check "flexraid-sb, 3 disks, roles 0 and 2 failed: the survivor = 1 disk, both removed" "[ $rc = 0 ] && fsb check '$F3/sdb.img' && [ \"\$(fsb disks '$F3/sdb.img')\" = '1 1 1 2 42 42 0:0:9 9:1:6 0:0:9' ]"
+rm -rf "$F3"; cp -r "$T/fsb3-fresh" "$F3"; h=$(md5sum "$F3"/*.img)
+"$T/flexraid-sb.real" fail "$(m3 sda)" "$(m3 sdb)" "$(m3 sdc)" 2>/dev/null; rc=$?
+"$T/flexraid-sb.real" fail "$(m3 sda)" "$F3/sdb.img:6193192:2178816" 2>/dev/null; rc2=$?
+"$T/flexraid-sb.real" fail "$(m3 sda)" "$(m3 sda)" 2>/dev/null; rc3=$?
+check "flexraid-sb, 3 disks: refused (nothing written) with every member, another array's member, or a member twice" "[ $rc = 1 ] && [ $rc2 = 1 ] && [ $rc3 = 1 ] && [ \"\$(md5sum '$F3'/*.img)\" = \"$h\" ]"
 check "smart: clean refusal on an image (no SG_IO)" "! '$R/bin/xraid-info' smart '$T/clean/sda.img' 2>/dev/null"
 
 # ---------- nas-raid with simulated commands ----------
@@ -391,6 +411,23 @@ printf '#!/bin/sh\necho "flexraid-sb $*" >> "%s/cmd.log"\nexec "%s/flexraid-sb.r
 stub umount 'case "$1" in /c) exit 1;; esac'
 nr mount 2>/dev/null >/dev/null; printf '/dev/mapper/c-c /c ext4 rw 0 0\n' > "$R/proc/mounts"; nr unmount 2>/dev/null >/dev/null
 check "RAID 1 volume busy at the stop: crash mark kept" "[ -e '$MK' ]"
+# RAID 1 of three disks read-write: three legs, a 3-disk mirror; one or two legs failed
+stub umount; : > "$R/proc/mounts"; rm -f "$MK"
+fr3stat() { mdstat '[UU]'; printf 'md102 : active raid1 dm-6[2] dm-5[1] dm-4[0]\n      100 blocks [3/3] %s\n' "$1" >> "$R/proc/mdstat"; }
+FR3=$T/fr-rw3; cp -r "$T/flexraid-3" "$FR3"; DISKS="$FR3/sda.img $FR3/sdb.img $FR3/sdc.img"; h=$(md5sum "$FR3"/*.img)
+fr3stat '[UUU]'; : > "$T/cmd.log"; nr mount 2>/dev/null >/dev/null
+check "RAID 1, 3 disks, rw: three legs, mdadm --build of 3 devices in role order, --assume-clean, c and d (3-disk RAID 0) writable" "grep -q '^dmsetup create frl-md2-2 --table 0 1048448 linear $FR3/sdc.img 5144608\$' '$T/cmd.log' && grep -q '^mdadm --build /dev/md102 --level=1 --raid-devices=3 --assume-clean /dev/mapper/frl-md2-0 /dev/mapper/frl-md2-1 /dev/mapper/frl-md2-2\$' '$T/cmd.log' && grep -q 'errors=remount-ro,noatime /dev/mapper/c-c /c' '$T/cmd.log' && grep -q 'errors=remount-ro,noatime /dev/mapper/d-d /d' '$T/cmd.log' && [ -e '$MK' ]"
+: > "$T/cmd.log"; nr unmount 2>/dev/null >/dev/null
+check "RAID 1, 3 disks, clean stop: the three legs removed, mark removed, superblocks untouched" "grep -q '^dmsetup remove frl-md2-2\$' '$T/cmd.log' && [ ! -e '$MK' ] && ! grep -q '^flexraid-sb fail' '$T/cmd.log' && [ \"\$(md5sum '$FR3'/*.img)\" = \"$h\" ]"
+nr mount 2>/dev/null >/dev/null; fr3stat '[U_U]'; : > "$T/cmd.log"; nr unmount 2>/dev/null >/dev/null
+check "RAID 1, 3 disks, role 1 failed: recorded on roles 0 and 2, mark removed, role 1 stale next time" "grep -q '^flexraid-sb fail $FR3/sda.img:5144608:1048448:0:in_sync $FR3/sdc.img:5144608:1048448:2:in_sync\$' '$T/cmd.log' && grep -q 'role 1 failed, recording it on role 0,2' '$S/log' && [ ! -e '$MK' ] && [ \"\$(frv fr-rw3 A2_REASONS)\" = 'degraded stale_member' ]"
+rm -rf "$FR3"; cp -r "$T/flexraid-3" "$FR3"; fr3stat '[UUU]'
+nr mount 2>/dev/null >/dev/null; fr3stat '[__U]'; : > "$T/cmd.log"; nr unmount 2>/dev/null >/dev/null
+check "RAID 1, 3 disks, roles 0 and 1 failed: recorded on role 2 alone, read from role 2 next time" "grep -q '^flexraid-sb fail $FR3/sdc.img:5144608:1048448:2:in_sync\$' '$T/cmd.log' && [ \"\$(frv fr-rw3 A2_TABLE)\" = '0 1048448 linear $FR3/sdc.img 5144608' ]"
+rm -rf "$FR3"; cp -r "$T/flexraid-3" "$FR3"; fr3stat '[UUU]'
+nr mount 2>/dev/null >/dev/null; fr3stat '[___]'; : > "$T/cmd.log"; nr unmount 2>/dev/null >/dev/null
+check "RAID 1, 3 disks, every leg failed: nothing written, mark kept" "! grep -q '^flexraid-sb fail' '$T/cmd.log' && [ -e '$MK' ]"
+rm -f "$MK"
 stub umount; : > "$R/proc/mounts"; rm -f "$MK" "$R/bin/flexraid-sb"; mdstat '[UU]'
 cp "$T/nrconf.bak" "$R/etc/nas-raid.conf"
 stub lvm 'case "$1" in lvs) printf "  c c owi-a-----\n  c snap swi-a-s---\n  d d -wi-a-----\n";; pvs) printf "  /dev/mapper/fr-md2 c\n  /dev/mapper/fr-md3 d\n";; esac'

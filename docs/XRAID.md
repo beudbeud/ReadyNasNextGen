@@ -451,34 +451,37 @@ is writable.
 
 - RAID 0: the striped table, mapped without `--readonly`. Nothing to keep in
   sync, nothing written outside the file system.
-- RAID 1: each member's data area becomes a dm-linear leg (`frl-md<m>-0` and
-  `-1` in role order, outside the LVM filter so that LVM never sees a leg on
-  its own), assembled by `mdadm --build` (RAID 1 without metadata, role 0
-  first, `--assume-clean`) as `/dev/md<100+m>`; `fr-md<m>` is a dm-linear on
+- RAID 1, 2 disks or more: each member's data area becomes a dm-linear leg
+  (`frl-md<m>-0`, `-1`... in role order, outside the LVM filter so that LVM
+  never sees a leg on its own), assembled by `mdadm --build` (RAID 1 without
+  metadata over every leg, role 0 first, `--assume-clean`) as
+  `/dev/md<100+m>`; `fr-md<m>` is a dm-linear on
   top. The md superblocks are not touched while the mirror is written:
   RAIDiator itself never marks a mirror in use (XRAID-FORMAT.md §6), so its
   superblocks look the same before and after. The crash safeguard is ours:
   `/var/lib/nas-raid/flexraid-dirty-md<m>` is written before the volume is
-  mounted and removed at a clean stop with both legs healthy and nothing
+  mounted and removed at a clean stop with every leg healthy and nothing
   resyncing; if it is still there at the next read-write mount, the mirror is
-  built without `--assume-clean` and md resynchronises role 1 from role 0
-  (the volume stays writable meanwhile). A leg that fails (`nas-raid watch`,
-  every 30 s, or at the stop) is recorded on the survivor by `flexraid-sb
-  fail`, with the words RAIDiator's md leaves there once a member is gone
-  (nr_disks, active, working - 1, failed + 1, the other member "removed,
-  faulty", events and cp_events + 2, checksum corrected): RAIDiator then
-  assembles the array degraded on the survivor and xraid-info reads the
-  failed member as stale (read-only from then on). The failed role is
-  written in the mark first: if flexraid-sb cannot record it, the mark keeps
+  built without `--assume-clean` and md resynchronises the other roles from
+  role 0 (the volume stays writable meanwhile). Legs that fail (`nas-raid
+  watch`, every 30 s, or at the stop) are recorded on every survivor by
+  `flexraid-sb fail SURVIVOR...`, with the words RAIDiator's md leaves there
+  once a member is gone (nr_disks, active, working = the survivors, failed =
+  the others, each failed member "removed, faulty", events and cp_events + 2,
+  checksum corrected): RAIDiator then assembles the array degraded on the
+  survivors and xraid-info reads the failed members as stale (read-only from
+  then on). flexraid-sb reads and checks every survivor before writing any;
+  a call stopped halfway (one survivor written, the next not) is completed by
+  the next one. The failed roles are written in the mark first: if flexraid-sb cannot record it, the mark keeps
   it and the volume stays read-only (reason `failure_unrecorded`, never a
   resync over the newer leg) until the mark is deleted by hand. Read-write
-  also needs flexraid-sb to accept both members (`--dry-run`; reason
+  also needs flexraid-sb to accept every member (`--dry-run`; reason
   `sb_not_writable`) and the mark to be written (`mark_write_failed`). A
   power cut within the 30 s between a leg failing and `nas-raid watch`
   leaves the failure unrecorded: the next read-write mount resyncs from role
   0, wrong if role 0 was the one that failed.
 - Not covered: after a power cut under RAIDiator, nothing on the disks says
-  so (its RAID 1 superblocks stay clean), so its two members may differ
+  so (its RAID 1 superblocks stay clean), so its members may differ
   without anyone knowing; RAIDiator does not resynchronise them either.
 
 Limits: only `/c` can hold shares (SMB, NFS, DLNA): other volumes are reachable
@@ -497,7 +500,10 @@ e2fsck 1.40 finds both file systems written by 6.18 clean and the files read
 back identical (on-nas.sh check618, 11/11). Then rbc's role 1 failed under
 6.18 while writing (PHASE=fail): recorded on role 0 by flexraid-sb, and
 RAIDiator's md "kicking non-fresh" role 1, md5 running on role 0 alone with
-the file written after the failure (11/11).
+the file written after the failure (11/11). A RAID 1 of 3 disks or more
+(more SATA disks than the Duo's 2 bays: nas-raid never takes USB disks) is
+covered by the PC tests only (make-images.py flexraid-3): RAIDiator's words
+for it are those seen with 2 disks, generalised, not checked on its kernel.
 
 ## Files
 

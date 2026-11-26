@@ -1,26 +1,29 @@
 /*
- * flexraid-sb: records on the surviving member of a RAIDiator RAID 1 ("Flex-
- * RAID", X-RAID off) that the other member failed while Linux 6.18 wrote on
+ * flexraid-sb: records on the surviving members of a RAIDiator RAID 1 ("Flex-
+ * RAID", X-RAID off) that the other members failed while Linux 6.18 wrote on
  * the mirror (docs/XRAID.md §10, docs/XRAID-FORMAT.md §6). Nothing else: a
  * healthy mirror written under 6.18 keeps its superblocks as they were.
  *
- *   flexraid-sb [--dry-run] fail MEMBER
+ *   flexraid-sb [--dry-run] fail SURVIVOR...
  *
- * MEMBER (the survivor) = PATH:START:DATA[:...] as xraid-info flexraid prints
- * it (START the partition start, DATA the sectors before the superblock). The
- * words written are those RAIDiator's md leaves on the survivor once a member
- * is gone (seen on the NAS, bench scenario "failed"): nr_disks, active and
- * working - 1, failed + 1, the other member's descriptor "removed, faulty"
- * (state 9, major/minor 0), the event count + 2 (cp_events too, as at a
- * clean stop): RAIDiator's md accepts a
- * member one event behind at assembly, two behind it leaves it out (degraded),
- * and xraid-info finds it stale. Refuses (exit 1, nothing written) unless the
- * superblock is md 0.90 in RAIDiator's layout (little-endian words in the
- * SPARC word order), of a 2-disk RAID 1 with both members active and in sync.
+ * SURVIVOR = PATH:START:DATA[:...] as xraid-info flexraid prints it (START the
+ * partition start, DATA the sectors before the superblock); every member of
+ * the array not given is the failed one(s). The words written are those
+ * RAIDiator's md leaves on a survivor once a member is gone (seen on the NAS
+ * with 2 disks, bench scenario "failed"): nr_disks, active and working = the
+ * survivors, failed = the others, each failed member's descriptor "removed,
+ * faulty" (state 9, major/minor 0), the event count + 2 (cp_events too, as at
+ * a clean stop): RAIDiator's md accepts a member one event behind at assembly,
+ * two behind it leaves it out (degraded), and xraid-info finds it stale.
+ * Every survivor is read and checked before anything is written: md 0.90 in
+ * RAIDiator's layout (little-endian words in the SPARC word order), the same
+ * RAID 1 of 2 to 27 disks, each one healthy (all members active, in sync) at
+ * the same event count, or already holding this failure two events above (a
+ * call stopped halfway: the rest is written). Refuses otherwise (exit 1).
  * The checksum is corrected by the difference of each word changed, in ones'
  * complement over the little-endian words (the rule RAIDiator's kernel checks).
  * O_DIRECT|O_SYNC, fsync (disk cache flush), read back and compared.
- * Already recorded (the other member removed, faulty): nothing written, exit 0.
+ * Already recorded on every survivor: nothing written, exit 0.
  * Exit: 0 written or already recorded, 1 refused, 2 usage or I/O error.
  */
 #define _GNU_SOURCE
@@ -87,6 +90,9 @@ static int refuse(const char *path, const char *why)
 	return 1;
 }
 
+#define MAXR 27			/* descriptors 0..26 fit before word 992 */
+static unsigned ds(const struct member *m, unsigned d) { return w(m, 128 + 32 * d + 4); }
+
 static int load(struct member *m, const char *arg)
 {
 	char *p = strdup(arg), *c1, *c2;
@@ -115,16 +121,30 @@ static int load(struct member *m, const char *arg)
 		return refuse(p, "not an md 0.90 superblock");
 	if (!(w(m, W_EV_HI) == 0 && w(m, W_EV_LO) != 0))
 		return refuse(p, "not RAIDiator's layout (events_hi in word 39)");
-	if (w(m, 7) != 1 || w(m, 10) != 2)
-		return refuse(p, "not a 2-disk RAID 1");
+	if (w(m, 7) != 1 || w(m, 10) < 2 || w(m, 10) > MAXR || w(m, 992) >= w(m, 10))
+		return refuse(p, "not a RAID 1 of 2 or more disks");
 	if (w(m, W_EV_LO) >= 0xfffffffdu)
 		return refuse(p, "event count at its limit");
-	if (w(m, 992) <= 1 && w(m, W_NR) == 1 && w(m, W_FAILED) == 1 && w(m, 128 + 32 * (1 - w(m, 992)) + 4) == 9)
-		return 3;	/* the other member already recorded as gone */
-	if (w(m, 992) > 1 || w(m, W_NR) != 2 || w(m, W_ACTIVE) != 2 || w(m, W_WORK) != 2 || w(m, W_FAILED) != 0
-	    || w(m, 128 + 32 * w(m, 992) + 4) != 6 || w(m, 128 + 32 * (1 - w(m, 992)) + 4) != 6)
-		return refuse(p, "not a healthy mirror (both members active and in sync)");
 	return 0;
+}
+
+/* 0 healthy (every member active, in sync), 1 already recorded with the
+ * failed set f (f[d] = 1: member d gone), -1 neither */
+static int sb_state(const struct member *m, const char *f)
+{
+	unsigned n = w(m, 10), d, nf = 0, healthy = 1, rec = 1;
+	for (d = 0; d < n; d++) {
+		nf += f[d];
+		if (ds(m, d) != 6)
+			healthy = 0;
+		if (ds(m, d) != (f[d] ? 9u : 6u))
+			rec = 0;
+	}
+	if (healthy && w(m, W_NR) == n && w(m, W_ACTIVE) == n && w(m, W_WORK) == n && w(m, W_FAILED) == 0)
+		return 0;
+	if (rec && w(m, W_NR) == n - nf && w(m, W_ACTIVE) == n - nf && w(m, W_WORK) == n - nf && w(m, W_FAILED) == nf)
+		return 1;
+	return -1;
 }
 
 static int store(struct member *m)
@@ -132,7 +152,7 @@ static int store(struct member *m)
 	unsigned char *back;
 	int fd;
 	if (dry) {
-		printf("flexraid-sb: %s: would write events %u, other member removed\n", m->path, w(m, W_EV_LO));
+		printf("flexraid-sb: %s: would write events %u, failed members removed\n", m->path, w(m, W_EV_LO));
 		return 0;
 	}
 	fd = open(m->path, O_RDWR | O_DIRECT | O_SYNC);
@@ -155,38 +175,80 @@ static int store(struct member *m)
 		return 2;
 	}
 	free(back);
-	printf("flexraid-sb: %s: written and checked (events %u, other member removed)\n", m->path, w(m, W_EV_LO));
+	printf("flexraid-sb: %s: written and checked (events %u, failed members removed)\n", m->path, w(m, W_EV_LO));
 	return 0;
 }
 
 int main(int argc, char **argv)
 {
-	struct member m;
-	unsigned o;
-	int r;
+	struct member m[MAXR];
+	char f[MAXR];
+	int st[MAXR], ns, i, r, todo = 0;
+	unsigned n, d, ev = 0, evr = 0, target;
 
 	argc--, argv++;
 	if (argc && !strcmp(argv[0], "--dry-run"))
 		dry = 1, argc--, argv++;
-	if (argc != 2 || strcmp(argv[0], "fail")) {
-		fprintf(stderr, "usage: flexraid-sb [--dry-run] fail MEMBER\n");
+	if (argc < 2 || strcmp(argv[0], "fail") || argc - 1 > MAXR) {
+		fprintf(stderr, "usage: flexraid-sb [--dry-run] fail SURVIVOR...\n");
 		return 2;
 	}
-	if ((r = load(&m, argv[1])) == 3) {
-		printf("flexraid-sb: %s: the other member is already recorded as gone\n", m.path);
+	ns = argc - 1;
+	/* everything read and checked before anything is written */
+	for (i = 0; i < ns; i++)
+		if ((r = load(&m[i], argv[i + 1])) != 0)
+			return r;
+	n = w(&m[0], 10);
+	memset(f, 1, sizeof(f));
+	for (i = 0; i < ns; i++) {
+		if (w(&m[i], 10) != n || memcmp(m[i].sb + 4 * 5, m[0].sb + 4 * 5, 4)
+		    || memcmp(m[i].sb + 4 * 13, m[0].sb + 4 * 13, 12))
+			return refuse(m[i].path, "not a member of the same array as the first survivor");
+		if (!f[w(&m[i], 992)])
+			return refuse(m[i].path, "the same member given twice");
+		f[w(&m[i], 992)] = 0;
+	}
+	if ((unsigned)ns >= n)
+		return refuse(m[0].path, "no member left out: nothing failed");
+	/* healthy survivors at one event count, already recorded ones (an
+	 * earlier call stopped halfway) two above it */
+	for (i = 0; i < ns; i++) {
+		if ((st[i] = sb_state(&m[i], f)) < 0)
+			return refuse(m[i].path, "neither a healthy mirror nor this failure already recorded");
+		if (st[i] == 0) {
+			if (todo++ && w(&m[i], W_EV_LO) != ev)
+				return refuse(m[i].path, "event counts of the survivors differ");
+			ev = w(&m[i], W_EV_LO);
+		} else {
+			if (evr && w(&m[i], W_EV_LO) != evr)
+				return refuse(m[i].path, "event counts of the survivors differ");
+			evr = w(&m[i], W_EV_LO);
+		}
+	}
+	if (!todo) {
+		printf("flexraid-sb: %s: the failure is already recorded\n", m[0].path);
 		return 0;
 	}
-	if (r != 0)
-		return r;
-	o = 128 + 32 * (1 - w(&m, 992));	/* the other member's descriptor */
-	set_word(&m, W_NR, 1);
-	set_word(&m, W_ACTIVE, 1);
-	set_word(&m, W_WORK, 1);
-	set_word(&m, W_FAILED, 1);
-	set_word(&m, o + 1, 0);
-	set_word(&m, o + 2, 0);
-	set_word(&m, o + 4, 9);
-	set_word(&m, W_EV_LO, w(&m, W_EV_LO) + 2);
-	set_be_word(&m, W_CP_EV, w(&m, W_EV_LO));	/* as at RAIDiator's clean stop */
-	return store(&m);
+	target = ev + 2;
+	if (evr && evr != target)
+		return refuse(m[0].path, "event counts of the survivors differ");
+	for (i = 0; i < ns; i++) {
+		if (st[i])
+			continue;
+		set_word(&m[i], W_NR, ns);
+		set_word(&m[i], W_ACTIVE, ns);
+		set_word(&m[i], W_WORK, ns);
+		set_word(&m[i], W_FAILED, n - ns);
+		for (d = 0; d < n; d++)
+			if (f[d]) {
+				set_word(&m[i], 128 + 32 * d + 1, 0);
+				set_word(&m[i], 128 + 32 * d + 2, 0);
+				set_word(&m[i], 128 + 32 * d + 4, 9);
+			}
+		set_word(&m[i], W_EV_LO, target);
+		set_be_word(&m[i], W_CP_EV, target);	/* as at RAIDiator's clean stop */
+		if ((r = store(&m[i])) != 0)
+			return r;
+	}
+	return 0;
 }
