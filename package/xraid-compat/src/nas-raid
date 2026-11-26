@@ -5,7 +5,8 @@
 # keeping its superblock up to date the way RAIDiator does (xraid-sb,
 # docs/XRAID-FORMAT.md). md (Linux software RAID) is disabled for now: nothing
 # creates one. The md volumes of a RAIDiator with X-RAID off ("Flex-RAID",
-# RAID 0/1) are mounted read-only (flexraid_mount).
+# RAID 0/1) are mounted read-only, or read-write with FLEXRAID_RW=yes
+# (flexraid_mount).
 #
 #   nas-raid status [--json] [--refresh]   mode, sections, consistency, migration
 #   nas-raid mount | unmount               at boot / at shutdown (S35storage)
@@ -22,8 +23,9 @@
 #                                          + reasons), read-only (the web API remounts
 #                                          /c read-write once a check lifts a safeguard)
 #   nas-raid repair                        copies the base onto the mirror (md repair)
-#   nas-raid watch                         read-write X-RAID: a failed leg is recorded
-#                                          in the superblock, /c goes read-only (S35storage)
+#   nas-raid watch                         read-write X-RAID or Flex-RAID RAID 1: a failed
+#                                          leg is recorded in the superblock, the volume
+#                                          goes read-only (S35storage)
 #   nas-raid migrate|create|add|grow       refused: md support is disabled for now
 # Options: --dry-run (prints the commands without doing anything),
 #          --confirm PHRASE and --yes (double confirmation of repair, quick-accept).
@@ -56,7 +58,7 @@ XRAID_VG=c				# LVM group created by RAIDiator, LV "c"
 XRAID_LV=c
 EXT4_OPTS=noatime			# options of the kernel mount of /c
 XRAID_RW=no				# "yes": X-RAID writable if all safeguards pass
-FLEXRAID_RW=no				# "yes": RAIDiator RAID 0 volumes writable (docs/XRAID.md §10)
+FLEXRAID_RW=no				# "yes": RAIDiator RAID 0 and RAID 1 volumes writable (docs/XRAID.md §10)
 SAMPLES=256				# 64 KiB blocks compared per section before a rw mount (0 = none)
 QUICK_SAMPLES=512			# random 64 KiB blocks per section in quick-verify (~70 ms each on the NAS)
 CONF=${NAS_RAID_CONF:-$R/etc/nas-raid.conf}
@@ -234,17 +236,29 @@ disassemble_xraid() {
 	sb_after_rw
 }
 
-# md_health: HEALTH = ok | busy (missing md, resync/repair running) | base_failed | mirror_failed | both_failed
+# md_one mdN: ok | busy (missing, resync/repair running) | base_failed (first
+# leg) | mirror_failed (second leg) | both_failed
+md_one() {
+	map=$(awk -v n="$1" '$1 == n { f = 1; next } f && /blocks/ { print $NF; exit }' "$R/proc/mdstat" 2>/dev/null)
+	case "$map" in
+	"[UU]") read -r act 2>/dev/null < "$R/sys/block/$1/md/sync_action" || act=unknown
+		if [ "$act" = idle ]; then echo ok; else echo busy; fi ;;
+	"[U_]") echo mirror_failed ;;
+	"[_U]") echo base_failed ;;
+	"[__]") echo both_failed ;;
+	*) echo busy ;;
+	esac
+}
+
+# md_health: HEALTH = the worst md_one of the X-RAID sections
 md_health() {
 	HEALTH=ok; i=0
 	while [ $i -lt "$XR_NR_SECTIONS" ]; do
-		map=$(awk -v n="md1$i" '$1 == n { f = 1; next } f && /blocks/ { print $NF; exit }' "$R/proc/mdstat" 2>/dev/null)
-		case "$map" in
-		"[UU]") read -r act 2>/dev/null < "$R/sys/block/md1$i/md/sync_action" || act=unknown
-			[ "$act" = idle ] || { [ $HEALTH = ok ] && HEALTH=busy; } ;;
-		"[U_]") case $HEALTH in base_failed|both_failed) HEALTH=both_failed;; *) HEALTH=mirror_failed;; esac ;;
-		"[_U]") case $HEALTH in mirror_failed|both_failed) HEALTH=both_failed;; *) HEALTH=base_failed;; esac ;;
-		*) [ $HEALTH = ok ] && HEALTH=busy ;;
+		h=$(md_one "md1$i")
+		case $h in
+		ok) ;;
+		busy) [ $HEALTH = ok ] && HEALTH=busy ;;
+		*) case $HEALTH in ok|busy|"$h") HEALTH=$h ;; *) HEALTH=both_failed ;; esac ;;
 		esac
 		i=$((i + 1))
 	done
@@ -281,14 +295,54 @@ sb_dirty() {
 # (fr-md<minor>); LVM is activated on top, VG c is mounted on /c and any other
 # one-letter VG x on /x (RAIDiator: one VG and LV per volume).
 # Read-only by default. With FLEXRAID_RW=yes, a volume is writable only if its
-# VG lies on RAID 0 arrays that are complete and up to date (no reason at all),
-# hold LVM2 and carry no snapshot: a RAID 0 has nothing to keep in sync, so
-# nothing is written outside the file system (no md superblock, LVM metadata
-# read-only) and RAIDiator finds its arrays as they were. RAID 1 stays
-# read-only (marking its superblocks in use needs RAIDiator's checksum, not
-# understood yet).
+# VG lies on arrays that are complete and up to date (no reason at all), hold
+# LVM2 and carry no snapshot. Nothing is written outside the file system (no md
+# superblock, LVM metadata read-only): RAIDiator finds its arrays as they were.
+# A RAID 0 has nothing to keep in sync. A RAID 1 is a mirror without metadata
+# ("mdadm --build", role 0 first) of its members' data areas (legs frl-md<m>-0
+# and -1, outside the LVM filter), fr-md<m> on top. RAIDiator never marks a
+# mirror in use (docs/XRAID-FORMAT.md §6), so the crash safeguard is ours: the
+# mark flexraid-dirty-md<m> is set before the first write and removed after a
+# clean stop with both legs healthy; while it is there, the next assembly
+# resynchronises role 1 from role 0 (no --assume-clean). A leg that fails is
+# recorded on the survivor (flexraid-sb fail, as RAIDiator writes it).
 LVM_FR="devices { filter = [ \"a|^/dev/mapper/fr-md|\", \"r|.*|\" ] use_devicesfile = 0 } global { metadata_read_only = 1 }"
 FR_STATE=$RUN/flexraid.state	# what flexraid_unmount undoes
+
+# fr_mirror MINOR SECTORS MEMBER0 MEMBER1: the read-write RAID 1 /dev/md(100+MINOR)
+fr_mirror() {
+	m=$1; n=$2; md=/dev/md$((100 + $1)); shift 2
+	[ $# = 2 ] || return 1
+	command -v flexraid-sb >/dev/null 2>&1 || { why="${why:+$why }no_sb_writer"; return 1; }
+	# a failure would have to be recordable on either member
+	for s in "$@"; do x flexraid-sb --dry-run fail "$s" >/dev/null 2>&1 || { why="${why:+$why }sb_not_writable"; return 1; }; done
+	mk=$STATE/flexraid-dirty-md$m; clean=--assume-clean
+	if grep -q '^failed' "$mk" 2>/dev/null; then	# never resync over the newer leg
+		log "Flex-RAID md$m: a failed member could not be recorded on the disks ($(cat "$mk")): read-only; delete $mk once the disks are checked"
+		why="${why:+$why }failure_unrecorded"; return 1
+	fi
+	if [ -e "$mk" ]; then
+		clean=; log "Flex-RAID md$m: Linux stopped without a clean unmount, role 1 resynchronised from role 0"
+	fi
+	k=0
+	for s in "$@"; do
+		p=${s%%:*}; st=${s#*:}; st=${st%%:*}
+		x dmsetup create "frl-md$m-$k" --table "0 $n linear $p $st" || { fr_mirror_undo "$m"; return 1; }
+		k=$((k + 1))
+	done
+	x mdadm --build "$md" --level=1 --raid-devices=2 $clean "/dev/mapper/frl-md$m-0" "/dev/mapper/frl-md$m-1" \
+		|| { fr_mirror_undo "$m"; return 1; }
+	if ! write "$mk" "$(date +%s)"; then
+		fr_mirror_undo "$m"; why="${why:+$why }mark_write_failed"; return 1
+	fi
+	[ -n "$DRY_RUN" ] || sync
+	FR_R1="$FR_R1${FR_R1:+ }$m=$1,$2"
+}
+fr_mirror_undo() {	# 1 = the md could not be stopped
+	if grep -q "^md$((100 + $1)) :" "$R/proc/mdstat" 2>/dev/null; then x mdadm --stop "/dev/md$((100 + $1))" || return 1; fi
+	for k in 0 1; do dmsetup info "frl-md$1-$k" >/dev/null 2>&1 && x_ dmsetup remove "frl-md$1-$k"; done
+	return 0
+}
 
 flexraid_mount() {	# 1 = no RAIDiator md array at all
 	FR_NR_ARRAYS=0
@@ -296,13 +350,18 @@ flexraid_mount() {	# 1 = no RAIDiator md array at all
 	output=$(xraid-info flexraid "$@") || { log "xraid-info flexraid failed"; return 1; }
 	eval "$output"
 	[ "$FR_NR_ARRAYS" -gt 0 ] || return 1
-	dms=; why=; rwmd=; i=0
+	dms=; why=; rwmd=; FR_R1=; i=0
 	while [ $i -lt "$FR_NR_ARRAYS" ]; do
-		eval "set -- \$FR_A$i; t=\$FR_A${i}_TABLE; r=\$FR_A${i}_REASONS; c=\$FR_A${i}_CONTENT"	# minor level usable sectors
+		eval "set -- \$FR_A$i; t=\$FR_A${i}_TABLE; r=\$FR_A${i}_REASONS; c=\$FR_A${i}_CONTENT; mem=\$FR_A${i}_MEMBERS"	# minor level usable sectors
 		for w in $r; do case " $why " in *" $w "*) ;; *) why="$why${why:+ }$w";; esac; done
 		ro=--readonly
-		if [ "$FLEXRAID_RW" = yes ] && [ "$2" = raid0 ] && [ "$3" = 1 ] && [ -z "$r" ] && [ "$c" = lvm2 ]; then
-			ro=; rwmd="$rwmd fr-md$1"
+		if [ "$FLEXRAID_RW" = yes ] && [ "$3" = 1 ] && [ -z "$r" ] && [ "$c" = lvm2 ]; then
+			case $2 in
+			raid0) ro=; rwmd="$rwmd fr-md$1" ;;
+			raid1) if fr_mirror "$1" "$4" $mem; then
+					t="0 $4 linear /dev/md$((100 + $1)) 0"; ro=; rwmd="$rwmd fr-md$1"
+				fi ;;
+			esac
 		fi
 		[ "$3" = 1 ] && x dmsetup create "fr-md$1" $ro --table "$t" && dms="$dms${dms:+ }fr-md$1"
 		i=$((i + 1))
@@ -357,7 +416,7 @@ flexraid_mount() {	# 1 = no RAIDiator md array at all
 			mnts="$mnts${mnts:+ }$m"
 		fi
 	done
-	write "$FR_STATE" "FR_DMS='$dms' FR_VGS='$vgs' FR_MNTS='$mnts' FR_RW='$rwm'"
+	write "$FR_STATE" "FR_DMS='$dms' FR_VGS='$vgs' FR_MNTS='$mnts' FR_RW='$rwm' FR_R1='$FR_R1'"
 	if [ -n "$mnts" ]; then
 		log "Flex-RAID: mounted: $mnts${rwm:+ (read-write: $rwm)}"
 		if [ -n "$rwm" ]; then write "$RUN/nas-raid.mode" "flexraid-rw $why"
@@ -371,13 +430,44 @@ flexraid_mount() {	# 1 = no RAIDiator md array at all
 }
 
 flexraid_unmount() {
-	FR_DMS=; FR_VGS=; FR_MNTS=; FR_RW=
+	FR_DMS=; FR_VGS=; FR_MNTS=; FR_RW=; FR_R1=
 	[ -r "$FR_STATE" ] && . "$FR_STATE"
 	[ -n "$FR_RW" ] && [ -z "$DRY_RUN" ] && sync
-	for m in $FR_MNTS; do mounted "$m" && x_ umount "$m"; done
+	stopped=1
+	for m in $FR_MNTS; do mounted "$m" && { x umount "$m" || { log "(failure ignored: umount $m)"; stopped=; }; }; done
 	[ -n "$FR_VGS" ] && x_ lvm vgchange -an --config "$LVM_FR" $FR_VGS
 	for d in $FR_DMS; do x_ dmsetup remove "$d"; done
+	# read-write mirrors: health read before the stop, then the crash mark
+	# removed (both legs healthy) or the failed leg recorded on the survivor
+	for e in $FR_R1; do
+		m=${e%%=*}; mem=${e#*=}
+		h=$(md_one "md$((100 + m))")
+		fr_mirror_undo "$m" || stopped=
+		[ -n "$stopped" ] || [ "$h" != ok ] || h=busy	# still in use: the mark stays
+		fr_sb_after "$m" "$h" "$mem"
+	done
 	[ -n "$DRY_RUN" ] || rm -f "$FR_STATE"
+}
+
+# fr_sb_after MINOR HEALTH MEMBER0,MEMBER1. A failed role goes in the mark
+# first: if flexraid-sb cannot record it, the mark keeps it (read-only from
+# then on, never a resync over the newer leg); recorded, the mark goes (the
+# failed member is stale on the disks, until RAIDiator rebuilds it).
+fr_sb_after() {
+	mk=$STATE/flexraid-dirty-md$1
+	case $2 in
+	ok) [ -n "$DRY_RUN" ] || rm -f "$mk" ;;
+	mirror_failed|base_failed)
+		if [ $2 = mirror_failed ]; then f=1 s=${3%%,*}; else f=0 s=${3#*,}; fi
+		write "$mk" "failed role $f $(date +%s)"; [ -n "$DRY_RUN" ] || sync
+		log "Flex-RAID md$1: role $f failed, recording it on role $((1 - f))"
+		if x flexraid-sb fail "$s"; then
+			[ -n "$DRY_RUN" ] || rm -f "$mk"
+		else
+			log "Flex-RAID md$1: failure NOT recorded on the disks: read-only until $mk is deleted"
+		fi ;;
+	*) log "Flex-RAID md$1 $2 at stop: crash mark kept, resynchronised at the next read-write mount" ;;
+	esac
 }
 
 current_mode() { read -r CURRENT_MODE _ 2>/dev/null < "$RUN/nas-raid.mode" || CURRENT_MODE=none; }
@@ -462,6 +552,7 @@ do_remount() {
 # Run every 30 s by S35storage; cheap when nothing happened.
 watch() {
 	current_mode
+	[ "$CURRENT_MODE" = flexraid-rw ] && { fr_watch; return 0; }
 	[ "$CURRENT_MODE" = xraid-rw ] || return 0
 	awk '/^md1[0-6] :/ { n = 1; next } n && /blocks/ { if ($NF ~ /_/) f = 1; n = 0 } END { exit !f }' "$R/proc/mdstat" 2>/dev/null || return 0
 	lock
@@ -477,6 +568,30 @@ watch() {
 	else
 		do_unmount; do_mount
 	fi
+	services start
+}
+
+# Read-write Flex-RAID RAID 1 with a failed leg: recorded at once on the
+# survivor (the legs end before the superblock: md never writes there), then
+# every volume remounted (the failed member is now stale: read-only).
+fr_watch() {
+	awk '/^md1[0-9][0-9] :/ { n = 1; next } n && /blocks/ { if ($NF ~ /_/) f = 1; n = 0 } END { exit !f }' "$R/proc/mdstat" 2>/dev/null || return 0
+	lock
+	FR_R1=; FR_MNTS=; [ -r "$FR_STATE" ] && . "$FR_STATE"
+	for e in $FR_R1; do
+		h=$(md_one "md$((100 + ${e%%=*}))")
+		case $h in ok|busy) continue ;; esac
+		log "Flex-RAID: md$((100 + ${e%%=*})) degraded while writing ($h): going read-only"
+		fr_sb_after "${e%%=*}" "$h" "${e#*=}"
+	done
+	services stop
+	for m in $FR_MNTS; do
+		if mounted "$m" && ! x umount "$m"; then
+			log "$m is busy: stays mounted on the surviving disk until it can be unmounted"
+			services start; return 0
+		fi
+	done
+	do_unmount; do_mount
 	services start
 }
 

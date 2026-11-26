@@ -33,7 +33,8 @@ touching the original firmware.
 - **Your existing X-RAID disks** are used as they are, read-only by default, and stay
   readable by RAIDiator (its superblock is kept up to date). Planned: switching to a
   standard Linux RAID1 (md), disabled for now. Disks of a RAIDiator with X-RAID
-  switched off ("Flex-RAID": RAID 1 and/or RAID 0 volumes) are mounted read-only.
+  switched off ("Flex-RAID": RAID 1 and/or RAID 0 volumes) are mounted read-only, or
+  read-write behind a switch.
 - **Temperature-controlled fan**: the NAS stays quiet when idle.
 - **Hardware clock** read at boot, then kept accurate over the network (NTP).
 - The **original firmware stays intact**: without the USB stick, the NAS starts RAIDiator
@@ -193,11 +194,13 @@ standard Linux RAID1 is disabled for now ([docs/XRAID-MIGRATION.md](docs/XRAID-M
 
 **Flex-RAID** (RAIDiator with X-RAID switched off: md volumes in RAID 1 or RAID 0, possibly
 several on the same disks): mounted **read-only**, volume `c` on `/c` and any other volume
-`x` on `/x`. RAID 0 volumes can be made writable (a switch in the Storage card; nothing is
-written outside the file system), RAID 1 volumes stay read-only for now. Only `/c` can hold
+`x` on `/x`. They can be made writable (a switch in the Storage card; nothing is written
+outside the file system; a RAID 1 is resynchronised after a power cut under 6.18, a failed
+disk recorded as RAIDiator does). Only `/c` can hold
 shares, the other volumes are reachable over SSH. Checked on the NAS: arrays made by
-RAIDiator's own kernel and tools read under 6.18, a RAID 0 written under 6.18 then read
-back and checked clean by RAIDiator
+RAIDiator's own kernel and tools read under 6.18; a RAID 1 and a RAID 0 written under 6.18
+then read back and checked clean by RAIDiator, and a RAID 1 disk failed under 6.18 left out
+by RAIDiator
 ([docs/XRAID.md §10](docs/XRAID.md#10-raidiator-md-volumes-x-raid-off-flex-raid)).
 
 ## Current limitations

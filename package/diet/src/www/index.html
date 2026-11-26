@@ -649,11 +649,11 @@ const I18N = {
   "X-RAID, read and write": ["X-RAID, lecture et écriture", "X-RAID, Lesen und Schreiben"],
   "X-RAID, read-only": ["X-RAID, lecture seule", "X-RAID, nur Lesen"],
   "Flex-RAID (md), read-only": ["Flex-RAID (md), lecture seule", "Flex-RAID (md), nur Lesen"],
-  "Flex-RAID (md), RAID 0 volumes writable": ["Flex-RAID (md), volumes RAID 0 en écriture", "Flex-RAID (md), RAID-0-Volumes beschreibbar"],
+  "Flex-RAID (md), volumes writable": ["Flex-RAID (md), volumes en écriture", "Flex-RAID (md), Volumes beschreibbar"],
   "read and write": ["lecture et écriture", "Lesen und Schreiben"],
   "a volume has a snapshot: it stays read-only": ["un volume a un instantané : il reste en lecture seule", "ein Volume hat einen Snapshot: es bleibt schreibgeschützt"],
-  "Allow writing on the Flex-RAID RAID 0 volumes": ["Autoriser l’écriture sur les volumes RAID 0 Flex-RAID", "Schreiben auf die Flex-RAID-RAID-0-Volumes erlauben"],
-  "Only RAID 0 volumes, complete and without a snapshot, become writable; RAID 1 volumes stay read-only. Writing goes through the kernel ext4 driver on the ext3 file system with 16 KB blocks created by RAIDiator; nothing is written outside it, so RAIDiator finds its arrays as they were. A RAID 0 has no redundancy: a backup is strongly recommended. The volumes are unmounted and mounted again; SMB, NFS, DLNA, rsync and WebDAV are stopped meanwhile.": ["Seuls les volumes RAID 0 complets et sans instantané passent en écriture ; les volumes RAID 1 restent en lecture seule. L’écriture passe par le pilote ext4 du noyau sur le système de fichiers ext3 à blocs de 16 Ko créé par RAIDiator ; rien n’est écrit en dehors, RAIDiator retrouve donc ses grappes telles quelles. Un RAID 0 n’a aucune redondance : une sauvegarde est fortement recommandée. Les volumes sont démontés puis remontés ; SMB, NFS, DLNA, rsync et WebDAV sont arrêtés pendant ce temps.", "Nur vollständige RAID-0-Volumes ohne Snapshot werden beschreibbar; RAID-1-Volumes bleiben schreibgeschützt. Geschrieben wird über den ext4-Treiber des Kernels auf das von RAIDiator angelegte ext3-Dateisystem mit 16-KB-Blöcken; außerhalb davon wird nichts geschrieben, RAIDiator findet seine Verbünde also unverändert vor. Ein RAID 0 hat keine Redundanz: eine Sicherung wird dringend empfohlen. Die Volumes werden aus- und wieder eingehängt; SMB, NFS, DLNA, rsync und WebDAV werden währenddessen angehalten."],
+  "Allow writing on the Flex-RAID volumes": ["Autoriser l’écriture sur les volumes Flex-RAID", "Schreiben auf die Flex-RAID-Volumes erlauben"],
+  "Only complete, up-to-date volumes without a snapshot become writable, RAID 1 and RAID 0 alike. Writing goes through the kernel ext4 driver on the ext3 file system with 16 KB blocks created by RAIDiator; nothing else is written (only a failed disk is recorded, as RAIDiator does), so RAIDiator finds its arrays as they were. A RAID 1 is written on both disks; after a power cut it is resynchronised at the next read-write start. A RAID 0 has no redundancy: a backup is strongly recommended. The volumes are unmounted and mounted again; SMB, NFS, DLNA, rsync and WebDAV are stopped meanwhile.": ["Seuls les volumes complets, à jour et sans instantané passent en écriture, en RAID 1 comme en RAID 0. L’écriture passe par le pilote ext4 du noyau sur le système de fichiers ext3 à blocs de 16 Ko créé par RAIDiator ; rien d’autre n’est écrit (seul un disque en panne est noté, comme le fait RAIDiator), RAIDiator retrouve donc ses grappes telles quelles. Un RAID 1 est écrit sur les deux disques ; après une coupure de courant, il est resynchronisé au prochain démarrage en écriture. Un RAID 0 n’a aucune redondance : une sauvegarde est fortement recommandée. Les volumes sont démontés puis remontés ; SMB, NFS, DLNA, rsync et WebDAV sont arrêtés pendant ce temps.", "Nur vollständige, aktuelle Volumes ohne Snapshot werden beschreibbar, RAID 1 wie RAID 0. Geschrieben wird über den ext4-Treiber des Kernels auf das von RAIDiator angelegte ext3-Dateisystem mit 16-KB-Blöcken; sonst wird nichts geschrieben (nur ein ausgefallener Datenträger wird vermerkt, wie RAIDiator es tut), RAIDiator findet seine Verbünde also unverändert vor. Ein RAID 1 wird auf beide Datenträger geschrieben; nach einem Stromausfall wird er beim nächsten Start mit Schreibzugriff neu synchronisiert. Ein RAID 0 hat keine Redundanz: eine Sicherung wird dringend empfohlen. Die Volumes werden aus- und wieder eingehängt; SMB, NFS, DLNA, rsync und WebDAV werden währenddessen angehalten."],
   "Put the Flex-RAID volumes back to read-only? They are unmounted and mounted again (SMB, NFS, DLNA, rsync and WebDAV stopped meanwhile).": ["Remettre les volumes Flex-RAID en lecture seule ? Ils sont démontés puis remontés (SMB, NFS, DLNA, rsync et WebDAV arrêtés pendant ce temps).", "Die Flex-RAID-Volumes wieder schreibschützen? Sie werden aus- und wieder eingehängt (SMB, NFS, DLNA, rsync und WebDAV währenddessen angehalten)."],
   "Volumes": ["Volumes", "Volumes"],
   "readable": ["lisible", "lesbar"],
@@ -686,6 +686,10 @@ const I18N = {
   "spare": ["de réserve", "Reserve"],
   "{0} working, {1} failed": ["{0} en service, {1} en panne", "{0} in Betrieb, {1} ausgefallen"],
   "superblock writer (xraid-sb) missing: read-only only": ["outil d’écriture du superbloc (xraid-sb) absent : lecture seule uniquement", "Superblock-Schreiber (xraid-sb) fehlt: nur Lesen"],
+  "superblock writer (xraid-sb, flexraid-sb) missing: read-only only": ["outil d’écriture du superbloc (xraid-sb, flexraid-sb) absent : lecture seule uniquement", "Superblock-Schreiber (xraid-sb, flexraid-sb) fehlt: nur Lesen"],
+  "a failed disk could not be recorded: read-only until checked": ["un disque en panne n’a pas pu être noté : lecture seule jusqu’à vérification", "ein ausgefallener Datenträger konnte nicht vermerkt werden: schreibgeschützt bis zur Prüfung"],
+  "the md superblocks could not take a disk failure: read-only": ["les superblocs md ne pourraient pas noter une panne de disque : lecture seule", "die md-Superblöcke könnten keinen Datenträgerausfall vermerken: schreibgeschützt"],
+  "the crash mark could not be written: read-only": ["la marque de coupure n’a pas pu être écrite : lecture seule", "die Absturzmarke konnte nicht geschrieben werden: schreibgeschützt"],
   "a superblock and its copy differ (interrupted update)": ["un superbloc et sa copie diffèrent (mise à jour interrompue)", "ein Superblock und seine Kopie unterscheiden sich (unterbrochene Aktualisierung)"],
   "RAIDiator reinstall flag set: RAIDiator would reset the NAS at its next boot": ["drapeau de réinstallation RAIDiator posé : RAIDiator réinitialiserait le NAS à son prochain démarrage", "RAIDiator-Neuinstallationsflag gesetzt: RAIDiator würde das NAS beim nächsten Start zurücksetzen"],
   "RAIDiator counters: a disk failed or is missing": ["compteurs RAIDiator : un disque est en panne ou absent", "RAIDiator-Zähler: eine Platte ist ausgefallen oder fehlt"],
@@ -1037,15 +1041,17 @@ const XR = {version:'unknown superblock version (0.1.0 expected)', level:'level 
 // reasons added by nas-raid
 const NR = {rw_disabled:'writing disabled (switch “Allow writing on the X-RAID”)', unclean_shutdown_linux:'unclean shutdown under Linux: check the mirror',
   unclean_shutdown_verified:'unclean RAIDiator shutdown, mirror checked since', migration_in_progress:'migration to md in progress',
-  no_sb_writer:'superblock writer (xraid-sb) missing: read-only only', sb_write_failed:'the superblock could not be marked “in use”',
-  flexraid_failed:'RAIDiator md volumes found, none could be mounted', snapshot:'a volume has a snapshot: it stays read-only'};
+  no_sb_writer:'superblock writer (xraid-sb, flexraid-sb) missing: read-only only', sb_write_failed:'the superblock could not be marked “in use”',
+  flexraid_failed:'RAIDiator md volumes found, none could be mounted', snapshot:'a volume has a snapshot: it stays read-only',
+  failure_unrecorded:'a failed disk could not be recorded: read-only until checked', sb_not_writable:'the md superblocks could not take a disk failure: read-only',
+  mark_write_failed:'the crash mark could not be written: read-only'};
 // reasons of an md array of RAIDiator with X-RAID off (xraid-info flexraid)
 const FRR = {degraded:'a member is missing or not in sync', stale_member:'a member is out of date', unclean:'not cleanly stopped by RAIDiator',
   missing_member:'a member is missing: not readable', sizes_differ:'members of different sizes: not readable',
   no_member_in_sync:'no member in sync: not readable', level:'RAID level not supported', layout:'layout not supported',
   version:'md superblock version not supported', inconsistent:'the superblocks of the members disagree', same_minor:'two arrays with the same md number', size:'inconsistent size',
   lvm1:'volume still in the old LVM1 format: start RAIDiator once to convert it'};
-const XRM = {'xraid-rw':'X-RAID, read and write', 'xraid-ro':'X-RAID, read-only', 'flexraid-ro':'Flex-RAID (md), read-only', 'flexraid-rw':'Flex-RAID (md), RAID 0 volumes writable', 'none':'no volume'};
+const XRM = {'xraid-rw':'X-RAID, read and write', 'xraid-ro':'X-RAID, read-only', 'flexraid-ro':'Flex-RAID (md), read-only', 'flexraid-rw':'Flex-RAID (md), volumes writable', 'none':'no volume'};
 // Storage health, on the dashboard and the storage page: degraded (a member failed
 // or missing, an md array not complete) > rebuilding (N %) > read-only > OK.
 // Member counts from storage.layout (X-RAID), otherwise from the disks of the status.
@@ -1132,7 +1138,7 @@ async function loadStk(d){
     z += `<div class="row"><label><input type="checkbox" id="xrw" ${stk.xraid_rw==='yes'?'checked':''}${nosb?' disabled':''}> ${t('Allow writing on the X-RAID')}</label></div>`;
     if(nosb) z += `<div style="color:var(--warn)">${t('superblock writer (xraid-sb) missing: read-only only')}</div>`;
   }
-  if(fr) z += `<div class="row"><label><input type="checkbox" id="xrw" ${stk.flexraid_rw==='yes'?'checked':''}> ${t('Allow writing on the Flex-RAID RAID 0 volumes')}</label></div>`;
+  if(fr) z += `<div class="row"><label><input type="checkbox" id="xrw" ${stk.flexraid_rw==='yes'?'checked':''}> ${t('Allow writing on the Flex-RAID volumes')}</label></div>`;
   if(q.accept===1 && !busy) z += `<div class="btns" style="margin-top:8px"><button class="b danger" data-x="qaccept">${t('Accept the quick check…')}</button></div>`;
   if(v.state==='differences' || q.state==='differences'){
     h += `<div style="color:var(--bad);margin-top:6px">${t('The disks differ: see the sensitive zone below.')}</div>`;
@@ -1158,7 +1164,7 @@ async function loadStk(d){
 }
 // X-RAID writing switch: enabling = warning, tick box AND typed word; disabling = simple confirm
 const XRW_WORD = 'WRITE';
-// the same switch for the Flex-RAID RAID 0 volumes (flexraid_rw): only the texts change
+// the same switch for the Flex-RAID volumes (flexraid_rw): only the texts change
 const isFr = ()=> !!(stk && /^flexraid-/.test(stk.mode));
 async function xrwPost(body){
   toast(t('Remounting the /c volume…'));
@@ -1171,8 +1177,8 @@ $('#xrzc').onchange = ev=>{
   if(ev.target.checked){
     ev.target.checked = false;   // checked again by loadStk once nas-raid has answered
     const d = $('#xrwd'); d._x = d._x || [$('#xrwt').textContent, $('#xrwp').textContent];
-    $('#xrwt').textContent = isFr() ? t('Allow writing on the Flex-RAID RAID 0 volumes') : d._x[0];
-    $('#xrwp').textContent = isFr() ? t('Only RAID 0 volumes, complete and without a snapshot, become writable; RAID 1 volumes stay read-only. Writing goes through the kernel ext4 driver on the ext3 file system with 16 KB blocks created by RAIDiator; nothing is written outside it, so RAIDiator finds its arrays as they were. A RAID 0 has no redundancy: a backup is strongly recommended. The volumes are unmounted and mounted again; SMB, NFS, DLNA, rsync and WebDAV are stopped meanwhile.') : d._x[1];
+    $('#xrwt').textContent = isFr() ? t('Allow writing on the Flex-RAID volumes') : d._x[0];
+    $('#xrwp').textContent = isFr() ? t('Only complete, up-to-date volumes without a snapshot become writable, RAID 1 and RAID 0 alike. Writing goes through the kernel ext4 driver on the ext3 file system with 16 KB blocks created by RAIDiator; nothing else is written (only a failed disk is recorded, as RAIDiator does), so RAIDiator finds its arrays as they were. A RAID 1 is written on both disks; after a power cut it is resynchronised at the next read-write start. A RAID 0 has no redundancy: a backup is strongly recommended. The volumes are unmounted and mounted again; SMB, NFS, DLNA, rsync and WebDAV are stopped meanwhile.') : d._x[1];
     $('#xrwc').checked = false; $('#xrwi').value = ''; $('#xrwl').textContent = t('Type “{0}” to confirm (this word stays in English, in capitals):', XRW_WORD);
     xrwCheck(); $('#xrwd').showModal();
   } else {

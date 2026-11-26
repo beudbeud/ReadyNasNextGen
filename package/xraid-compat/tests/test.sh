@@ -19,6 +19,7 @@ check() {	# check "description" shell-condition
 mkdir -p "$R/bin" "$R/proc" "$R/var/run" "$R/var/lib" "$R/etc/init.d"
 cc -O2 -Wall -Werror -o "$R/bin/xraid-info" "$SRC/xraid-info.c" || exit 1
 cc -O2 -Wall -Werror -o "$R/bin/xraid-sb.real" "$SRC/xraid-sb.c" || exit 1
+cc -O2 -Wall -Werror -o "$T/flexraid-sb.real" "$SRC/flexraid-sb.c" || exit 1
 # ext3 images (fs, fsdirty) need e2fsprogs (mke2fs, debugfs, dumpe2fs): skipped without them
 PATH=$PATH:/usr/sbin:/sbin
 if python3 "$HERE/make-images.py" "$T" tools; then E2FS="fs fsdirty"; else E2FS=; echo "skip ext3 (quick check) tests: e2fsprogs missing"; fi
@@ -109,6 +110,33 @@ F=$(python3 "$HERE/sb.py" diff "$T/ref-sdb.img" "$T/f-sdb.img")
 check "xraid-sb fail: on the survivor only ctime, counters, the failed disk state and the sections change" "python3 -c \"import sys; f=[int(x,16) for x in '$F'.split(',')]; ok=lambda o: 0x18<=o<0x1c or 0x88<=o<0x94 or 0x290<=o<0x294 or o in (0x804,0x807,0x824,0x827) or 0x808<o<0x80c or 0x828<o<0x82c; sys.exit(0 if 0x293 in f and all(map(ok,f)) else 1)\" && [ -z \"\$(python3 '$HERE/sb.py' diff '$T/ref-sda.img' '$T/f-sda.img')\" ]"
 J=$("$R/bin/xraid-info" --json "$T/f-sda.img" "$T/f-sdb.img")
 check "xraid-sb fail: mirror faulty, newest superblock wins, read from the base" "js 'j[\"mode\"]==\"ro\" and [d[\"state\"] for d in j[\"disks\"]]==[\"faulty\",\"online\"] and j[\"failed_disks\"]==1 and j[\"read_disk\"].endswith(\"f-sdb.img\")'"
+# flexraid-sb on a RAIDiator superblock with its real checksum (docs/XRAID-FORMAT.md §6)
+cp --sparse=always "$T/flexraid/sda.img" "$T/fsb.img"
+fsb() {	# fsb csum|check|words: md2's superblock in fsb.img (sector 5144608 + 1048448)
+	python3 - "$1" "$T/fsb.img" <<'PY'
+import sys, struct
+f = open(sys.argv[2], "r+b"); o = (5144608 + 1048448) * 512; f.seek(o); b = bytearray(f.read(4096))
+def cs(b):
+    s = sum(struct.unpack_from(">I" if i in (42, 65) else "<I", b, 4 * i)[0] for i in range(1024) if i != 38)
+    while s >> 32: s = (s & 0xffffffff) + (s >> 32)
+    return s
+w = lambda i: struct.unpack_from("<I", b, 4 * i)[0]
+if sys.argv[1] == "csum":
+    struct.pack_into("<I", b, 152, cs(b)); f.seek(o); f.write(b)
+elif sys.argv[1] == "check":
+    sys.exit(0 if cs(b) == w(38) else 1)
+else:
+    print(w(9), w(34), w(35), w(36), w(40), struct.unpack_from(">I", b, 168)[0], w(161), w(162), w(164))
+PY
+}
+fsb csum; "$T/flexraid-sb.real" fail "$T/fsb.img:5144608:1048448:0:in_sync" > /dev/null
+check "flexraid-sb fail: RAIDiator's words on the survivor (1 disk, other removed, events + 2), checksum still right" "fsb check && [ \"\$(fsb words)\" = '1 1 1 1 42 42 0 0 9' ]"
+h=$(md5sum "$T/fsb.img"); "$T/flexraid-sb.real" fail "$T/fsb.img:5144608:1048448" > "$T/fsb2"; rc=$?
+check "flexraid-sb fail again: already recorded, nothing written, success" "[ $rc = 0 ] && grep -q 'already recorded' '$T/fsb2' && [ \"\$(md5sum '$T/fsb.img')\" = \"$h\" ]"
+"$T/flexraid-sb.real" --dry-run fail "$T/flexraid/sda.img:5144608:1048448" > "$T/fsb4"; rc2=$?
+check "flexraid-sb: --dry-run writes nothing" "[ $rc2 = 0 ] && grep -q 'would write events 42' '$T/fsb4'"
+h=$(md5sum "$T/clean/sda.img"); "$T/flexraid-sb.real" fail "$T/clean/sda.img:5144608:1048448" 2>/dev/null; rc=$?
+check "flexraid-sb fail: refused where there is no md superblock" "[ $rc = 1 ] && [ \"\$(md5sum '$T/clean/sda.img')\" = \"$h\" ]"
 check "smart: clean refusal on an image (no SG_IO)" "! '$R/bin/xraid-info' smart '$T/clean/sda.img' 2>/dev/null"
 
 # ---------- nas-raid with simulated commands ----------
@@ -320,6 +348,50 @@ stub lvm 'case "$1" in lvs) printf "  c c -wi-a-----\n";; pvs) printf "  /dev/ma
 DISKS="$T/flexraid-degraded/sda.img"; : > "$T/cmd.log"; nr mount 2>/dev/null >/dev/null
 check "FLEXRAID_RW=yes, one disk: no writable array, c read-only" "grep -q '^flexraid-ro' '$R/var/run/nas-raid.mode' && ! grep -q '^dmsetup create fr-md[0-9]* --table' '$T/cmd.log'"
 nr unmount 2>/dev/null >/dev/null
+# RAID 1 read-write (flexraid-sb present): a mirror without metadata, a crash mark of ours
+printf '#!/bin/sh\necho "flexraid-sb $*" >> "%s/cmd.log"\nexec "%s/flexraid-sb.real" "$@"\n' "$T" "$T" > "$R/bin/flexraid-sb"; chmod 755 "$R/bin/flexraid-sb"
+stub lvm 'case "$1" in lvs) printf "  c c -wi-a-----\n  d d -wi-a-----\n";; pvs) printf "  /dev/mapper/fr-md2 c\n  /dev/mapper/fr-md3 d\n";; esac'
+mkdir -p "$R/sys/block/md102/md"; echo idle > "$R/sys/block/md102/md/sync_action"
+fr1stat() { mdstat '[UU]'; printf 'md102 : active raid1 dm-5[1] dm-4[0]\n      100 blocks [2/2] %s\n' "$1" >> "$R/proc/mdstat"; }
+FRW=$T/fr-rw; cp -r "$T/flexraid" "$FRW"; DISKS="$FRW/sda.img $FRW/sdb.img"; h=$(md5sum "$FRW"/*.img)
+S=$R/var/lib/nas-raid; MK=$S/flexraid-dirty-md2; rm -f "$MK"; fr1stat '[UU]'
+: > "$T/cmd.log"; : > "$R/proc/mounts"; nr mount 2>/dev/null >/dev/null
+check "RAID 1 rw: legs = the members' data areas, outside the LVM filter (frl-)" "grep -q '^dmsetup create frl-md2-0 --table 0 1048448 linear $FRW/sda.img 5144608\$' '$T/cmd.log' && grep -q '^dmsetup create frl-md2-1 --table 0 1048448 linear $FRW/sdb.img 5144608\$' '$T/cmd.log'"
+check "RAID 1 rw: mdadm --build, no superblock, role 0 first, --assume-clean; fr-md2 writable on it" "grep -q '^mdadm --build /dev/md102 --level=1 --raid-devices=2 --assume-clean /dev/mapper/frl-md2-0 /dev/mapper/frl-md2-1\$' '$T/cmd.log' && grep -q '^dmsetup create fr-md2 --table 0 1048448 linear /dev/md102 0\$' '$T/cmd.log'"
+check "RAID 1 rw: c and d mounted read-write, md0/md1 (no LVM) stay read-only, crash mark set" "grep -q 'mount -t ext4 -o errors=remount-ro,noatime /dev/mapper/c-c /c' '$T/cmd.log' && grep -q 'mount -t ext4 -o errors=remount-ro,noatime /dev/mapper/d-d /d' '$T/cmd.log' && grep -q '^dmsetup create fr-md0 --readonly' '$T/cmd.log' && grep -q '^dmsetup create fr-md1 --readonly' '$T/cmd.log' && [ -e '$MK' ] && [ \"\$(mode_of)\" = flexraid-rw ]"
+: > "$T/cmd.log"; nr unmount 2>/dev/null >/dev/null
+check "RAID 1 clean stop: fr-md2, then md, then legs removed; mark removed; superblocks untouched" "[ \"\$(grep -n '^dmsetup remove fr-md2\$\|^mdadm --stop /dev/md102\|^dmsetup remove frl-md2-1' '$T/cmd.log' | cut -d: -f2- | tr '\\n' '|')\" = 'dmsetup remove fr-md2|mdadm --stop /dev/md102|dmsetup remove frl-md2-1|' ] && [ ! -e '$MK' ] && ! grep -q '^flexraid-sb\|^xraid-sb' '$T/cmd.log' && [ \"\$(md5sum '$FRW'/*.img)\" = \"$h\" ]"
+echo 1 > "$MK"; : > "$T/cmd.log"; nr mount 2>/dev/null >/dev/null
+check "RAID 1 after a Linux crash (mark left): built without --assume-clean (md resyncs role 1 from role 0)" "grep -q '^mdadm --build /dev/md102 --level=1 --raid-devices=2 /dev/mapper/frl-md2-0' '$T/cmd.log' && grep -q 'resynchronised from role 0' '$S/log'"
+echo resync > "$R/sys/block/md102/md/sync_action"; nr unmount 2>/dev/null >/dev/null
+check "RAID 1 stopped while resyncing: mark kept, nothing written" "[ -e '$MK' ] && ! grep -q '^flexraid-sb fail' '$T/cmd.log' && [ \"\$(md5sum '$FRW'/*.img)\" = \"$h\" ]"
+echo idle > "$R/sys/block/md102/md/sync_action"; rm -f "$MK"
+nr mount 2>/dev/null >/dev/null; fr1stat '[U_]'; : > "$T/cmd.log"; nr unmount 2>/dev/null >/dev/null
+check "RAID 1 role 1 failed at stop: recorded on role 0 (flexraid-sb fail), mark removed" "grep -q '^flexraid-sb fail $FRW/sda.img:5144608:1048448:0:in_sync\$' '$T/cmd.log' && [ ! -e '$MK' ]"
+check "RAID 1 after the failure: role 1 stale, read from role 0, c read-only next time" "[ \"\$(frv fr-rw A2_REASONS)\" = 'degraded stale_member' ] && [ \"\$(frv fr-rw A2_TABLE)\" = '0 1048448 linear $FRW/sda.img 5144608' ]"
+fr1stat '[UU]'; : > "$T/cmd.log"; nr mount 2>/dev/null >/dev/null
+check "RAID 1 with a stale member: no mirror built, fr-md2 read-only" "! grep -q '^mdadm' '$T/cmd.log' && grep -q '^dmsetup create fr-md2 --readonly' '$T/cmd.log'"
+nr unmount 2>/dev/null >/dev/null
+# a leg failing while mounted read-write: nas-raid watch records it at once and remounts
+rm -rf "$FRW"; cp -r "$T/flexraid" "$FRW"; rm -f "$MK"; : > "$R/proc/mounts"
+nr mount 2>/dev/null >/dev/null; fr1stat '[_U]'; : > "$T/cmd.log"
+printf '/dev/mapper/c-c /c ext4 rw 0 0\n/dev/mapper/d-d /d ext4 rw 0 0\n' > "$R/proc/mounts"; nr watch 2>/dev/null >/dev/null
+check "watch: role 0 failed while writing: recorded on role 1, volumes remounted, c read-only" "grep -q '^flexraid-sb fail $FRW/sdb.img:5144608:1048448:1:in_sync\$' '$T/cmd.log' && grep -q '^umount /c' '$T/cmd.log' && grep -q '^dmsetup create fr-md2 --readonly' '$T/cmd.log' && [ \"\$(frv fr-rw A2_TABLE)\" = '0 1048448 linear $FRW/sdb.img 5144608' ]"
+fr1stat '[UU]'; nr unmount 2>/dev/null >/dev/null; : > "$R/proc/mounts"
+check "watch: failure recorded, mark removed" "[ ! -e '$MK' ]"
+# the failure cannot be written: the mark keeps the failed role, never a resync afterwards
+rm -rf "$FRW"; cp -r "$T/flexraid" "$FRW"; h=$(md5sum "$FRW"/*.img)
+printf '#!/bin/sh\necho "flexraid-sb $*" >> "%s/cmd.log"\n[ "$1" = fail ] && exit 2\nexec "%s/flexraid-sb.real" "$@"\n' "$T" "$T" > "$R/bin/flexraid-sb"
+nr mount 2>/dev/null >/dev/null; fr1stat '[U_]'; nr unmount 2>/dev/null >/dev/null; fr1stat '[UU]'; : > "$T/cmd.log"
+nr mount 2>/dev/null >/dev/null
+check "failure not recorded: mark 'failed role 1' kept, next mount read-only (failure_unrecorded), no mirror" "grep -q '^failed role 1' '$MK' && ! grep -q '^mdadm' '$T/cmd.log' && grep -q '^dmsetup create fr-md2 --readonly' '$T/cmd.log' && grep -q failure_unrecorded '$R/var/run/nas-raid.mode' && [ \"\$(md5sum '$FRW'/*.img)\" = \"$h\" ]"
+nr unmount 2>/dev/null >/dev/null; rm -f "$MK"
+# a volume still busy at the stop: the md is not known to be stopped, the mark stays
+printf '#!/bin/sh\necho "flexraid-sb $*" >> "%s/cmd.log"\nexec "%s/flexraid-sb.real" "$@"\n' "$T" "$T" > "$R/bin/flexraid-sb"
+stub umount 'case "$1" in /c) exit 1;; esac'
+nr mount 2>/dev/null >/dev/null; printf '/dev/mapper/c-c /c ext4 rw 0 0\n' > "$R/proc/mounts"; nr unmount 2>/dev/null >/dev/null
+check "RAID 1 volume busy at the stop: crash mark kept" "[ -e '$MK' ]"
+stub umount; : > "$R/proc/mounts"; rm -f "$MK" "$R/bin/flexraid-sb"; mdstat '[UU]'
 cp "$T/nrconf.bak" "$R/etc/nas-raid.conf"
 stub lvm 'case "$1" in lvs) printf "  c c owi-a-----\n  c snap swi-a-s---\n  d d -wi-a-----\n";; pvs) printf "  /dev/mapper/fr-md2 c\n  /dev/mapper/fr-md3 d\n";; esac'
 # on the NAS next to its own volume (on-618.sh): test VG names, mounted under NAS_RAID_MNT

@@ -5,7 +5,8 @@ X-RAID volume created by RAIDiator (ReadyNAS Duo v1, 2 mirrored disks) without
 converting it, keeping its superblock up to date the way RAIDiator does, so that
 RAIDiator can take the disks back at any time. **md (Linux software RAID) is
 disabled for now** (§6). The md volumes of a RAIDiator with X-RAID off
-("Flex-RAID", RAID 0/1) are mounted read-only (§10).
+("Flex-RAID", RAID 0/1) are mounted read-only, or read-write behind a switch
+(§10).
 
 **Status:** reading has been checked on the NAS (real superblocks, read-only
 mount). Writing, and the superblock updates that go with it, were only tried on
@@ -437,21 +438,48 @@ status --json` adds `flexraid` (the arrays, from `xraid-info flexraid
 card shows the mounted volumes (read-only or read and write) and one line per
 array.
 
-**Writing, RAID 0 only** (`FLEXRAID_RW=yes` in `/etc/nas-raid.conf`, or the
-DIET switch "Allow writing on the Flex-RAID RAID 0 volumes": warning, tick box
-and the word `WRITE`, `POST ?a=flexraid_rw`, then `nas-raid remount`). A volume
-becomes writable only if its VG lies, with at least one PV, only on RAID 0
-arrays that are complete, up to date and without any reason, hold LVM2, and
-the VG has no snapshot (reason `snapshot` otherwise: writing the origin
-without its snapshot active would corrupt the snapshot). Its array is mapped
-without `--readonly`, the VG is left out of `read_only_volume_list` (LVM
-metadata stays read-only: nothing is resized) and ext4 is mounted
-`errors=remount-ro` (a failing member turns the volume read-only). Nothing is
-written outside the file system: no md superblock (a RAID 0 has nothing to
-keep in sync), so RAIDiator finds its arrays as they were. Mode `flexraid-rw`
-as soon as one volume is writable. RAID 1 volumes stay read-only: marking
-their superblocks in use, needed for a crash to be resynchronised by
-RAIDiator, requires RAIDiator's superblock checksum, not understood yet.
+**Writing** (`FLEXRAID_RW=yes` in `/etc/nas-raid.conf`, or the DIET switch
+"Allow writing on the Flex-RAID volumes": warning, tick box and the word
+`WRITE`, `POST ?a=flexraid_rw`, then `nas-raid remount`). A volume becomes
+writable only if its VG lies, with at least one PV, only on arrays that are
+complete, up to date and without any reason, hold LVM2, and the VG has no
+snapshot (reason `snapshot` otherwise: writing the origin without its snapshot
+active would corrupt the snapshot). The VG is left out of
+`read_only_volume_list` (LVM metadata stays read-only: nothing is resized) and
+ext4 is mounted `errors=remount-ro`. Mode `flexraid-rw` as soon as one volume
+is writable.
+
+- RAID 0: the striped table, mapped without `--readonly`. Nothing to keep in
+  sync, nothing written outside the file system.
+- RAID 1: each member's data area becomes a dm-linear leg (`frl-md<m>-0` and
+  `-1` in role order, outside the LVM filter so that LVM never sees a leg on
+  its own), assembled by `mdadm --build` (RAID 1 without metadata, role 0
+  first, `--assume-clean`) as `/dev/md<100+m>`; `fr-md<m>` is a dm-linear on
+  top. The md superblocks are not touched while the mirror is written:
+  RAIDiator itself never marks a mirror in use (XRAID-FORMAT.md §6), so its
+  superblocks look the same before and after. The crash safeguard is ours:
+  `/var/lib/nas-raid/flexraid-dirty-md<m>` is written before the volume is
+  mounted and removed at a clean stop with both legs healthy and nothing
+  resyncing; if it is still there at the next read-write mount, the mirror is
+  built without `--assume-clean` and md resynchronises role 1 from role 0
+  (the volume stays writable meanwhile). A leg that fails (`nas-raid watch`,
+  every 30 s, or at the stop) is recorded on the survivor by `flexraid-sb
+  fail`, with the words RAIDiator's md leaves there once a member is gone
+  (nr_disks, active, working - 1, failed + 1, the other member "removed,
+  faulty", events and cp_events + 2, checksum corrected): RAIDiator then
+  assembles the array degraded on the survivor and xraid-info reads the
+  failed member as stale (read-only from then on). The failed role is
+  written in the mark first: if flexraid-sb cannot record it, the mark keeps
+  it and the volume stays read-only (reason `failure_unrecorded`, never a
+  resync over the newer leg) until the mark is deleted by hand. Read-write
+  also needs flexraid-sb to accept both members (`--dry-run`; reason
+  `sb_not_writable`) and the mark to be written (`mark_write_failed`). A
+  power cut within the 30 s between a leg failing and `nas-raid watch`
+  leaves the failure unrecorded: the next read-write mount resyncs from role
+  0, wrong if role 0 was the one that failed.
+- Not covered: after a power cut under RAIDiator, nothing on the disks says
+  so (its RAID 1 superblocks stay clean), so its two members may differ
+  without anyone knowing; RAIDiator does not resynchronise them either.
 
 Limits: only `/c` can hold shares (SMB, NFS, DLNA): other volumes are reachable
 over SSH (rsync, scp) only. md's multi-zone RAID 0 (members of different sizes)
@@ -461,10 +489,15 @@ Checked on the NAS (tools/raidiator-bench): arrays made by RAIDiator's own
 kernel and tools (RAID 1, RAID 0, failed, rebuilding, spare, single disk,
 snapshot) read back by xraid-info (nas-check.py); then, end to end, the same
 RAID 1 + RAID 0 mounted by nas-raid under Linux 6.18 with the real dm, LVM
-2.03 and ext4, read-only, then RAID 0 written with FLEXRAID_RW=yes (on-618.sh,
-9/9); then back under RAIDiator's kernel: its autorun assembles both arrays,
-its e2fsck 1.40 finds the file system written by 6.18 clean and the files
-read back identical (on-nas.sh check618, 7/7).
+2.03 and ext4, read-only, then both written with FLEXRAID_RW=yes (on-618.sh:
+legs identical after the stop, md superblocks unchanged to the byte, a crash
+replayed and resynchronised by md); then back under RAIDiator's kernel: its
+autorun assembles both arrays, md5 on both members without a resync, its
+e2fsck 1.40 finds both file systems written by 6.18 clean and the files read
+back identical (on-nas.sh check618, 11/11). Then rbc's role 1 failed under
+6.18 while writing (PHASE=fail): recorded on role 0 by flexraid-sb, and
+RAIDiator's md "kicking non-fresh" role 1, md5 running on role 0 alone with
+the file written after the failure (11/11).
 
 ## Files
 

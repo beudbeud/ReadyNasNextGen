@@ -1,9 +1,10 @@
 #!/bin/sh
 # Data volume /c: existing X-RAID (compatibility, rw or ro depending on the
 # safeguards) or RAIDiator md volumes (X-RAID off,
-# "Flex-RAID", read-only). Before S60nfs and S70ksmbd. See
+# "Flex-RAID", read-only or read-write). Before S60nfs and S70ksmbd. See
 # docs/XRAID.md. While running, "nas-raid watch" every 30 s: a leg that fails
-# under a read-write X-RAID is recorded in the superblock and /c goes read-only.
+# under a read-write X-RAID or Flex-RAID RAID 1 is recorded in the superblock
+# and the volume goes read-only.
 PID=/var/run/nas-raid.watch.pid
 case "$1" in
 start)
@@ -16,7 +17,8 @@ start)
 	;;
 stop)
 	[ -r "$PID" ] && kill "$(cat "$PID")" 2>/dev/null; rm -f "$PID"
-	# rw X-RAID: superblock back to "clean" only if both legs stayed healthy
+	# rw X-RAID: superblock back to "clean" only if both legs stayed healthy;
+	# rw Flex-RAID RAID 1: crash mark removed only then
 	/usr/sbin/nas-raid unmount 2>&1 | logger -t nas-raid
 	;;
 restart)

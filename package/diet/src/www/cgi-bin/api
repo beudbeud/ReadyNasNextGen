@@ -1258,7 +1258,7 @@ guard() {
 # mode obtained (rw or ro with its reasons) is in nas-raid.mode.
 NRCONF=$ETC/nas-raid.conf
 XRSVC="S51webdav S61rsyncd S60minidlnad S60nfs S70ksmbd"
-# The same switch for RAIDiator's Flex-RAID volumes: FLEXRAID_RW (RAID 0 only,
+# The same switch for RAIDiator's Flex-RAID volumes: FLEXRAID_RW (RAID 1 and 0,
 # nas-raid decides which volume is writable, docs/XRAID.md §10).
 xraid_rw() { storage_rw XRAID_RW xraid X-RAID; }
 flexraid_rw() { storage_rw FLEXRAID_RW flexraid Flex-RAID; }

@@ -646,7 +646,7 @@ check "xraid_rw off: no heavy confirmation, XRAID_RW=no, remounted read-only (rw
 echo flexraid-ro > "$R"/var/run/nas-raid.mode
 api POST a=xraid_rw 'on=1&confirm=WRITE&yes=1'
 check "xraid_rw: refused on Flex-RAID volumes (409)" '[ "$ST" = 409 ] && grep -qx "XRAID_RW=no" "$R"/etc/nas-raid.conf'
-# the same switch for the Flex-RAID RAID 0 volumes (FLEXRAID_RW)
+# the same switch for the Flex-RAID volumes (FLEXRAID_RW)
 api POST a=flexraid_rw 'on=1'
 check "flexraid_rw on: refused without the typed word" '[ "$ST" = 400 ] && ! grep -q FLEXRAID_RW "$R"/etc/nas-raid.conf'
 : > "$R"/cmd.log

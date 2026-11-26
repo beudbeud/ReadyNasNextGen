@@ -101,16 +101,25 @@ X-RAID, through test-only variables (NAS_RAID_BIN/RUN/STATE/CONF/MNT and
 NAS_RAID_VG_PATTERN, which needs NAS_RAID_MNT: never a test volume at the
 root):
 
-    # under 6.18: BIN = nas-raid, xraid-info (SPARC build), mbr.img; KEY = the test key
-    sh on-618.sh BIN /dev/sdX WORK      # read-only, then FLEXRAID_RW=yes: writes on rbd
+    # under 6.18: BIN = nas-raid, xraid-info, flexraid-sb (SPARC build), mbr.img; KEY = the test key
+    sh on-618.sh BIN /dev/sdX WORK      # read-only, then FLEXRAID_RW=yes: writes on rbd and rbc
+                                        # (legs compared, superblocks unchanged), a crash replayed
+                                        # (role 1 altered, mark left: md resyncs it from role 0)
+    PHASE=fail sh on-618.sh BIN /dev/sdX WORK2   # later, a second run: rbc's role 1 failed
+                                        # while writing, recorded on role 0 (flexraid-sb)
 
 Then the NAS booted on DIET or RAIDiator, the key still plugged in: the kernel
 notes its 0xfd partitions, `mdconfig -a autorun` assembles them as at
 RAIDiator's boot, and RAIDiator's e2fsck and kernel check what 6.18 wrote:
 
-    CHECK_DIR=<folder with random-618.sha256> sh on-nas.sh TOOLS WORK check618
+    CHECK_DIR=<WORK of the write phase> sh on-nas.sh TOOLS WORK check618              # md5 on both members, no resync
+    PHASE=fail CHECK_DIR=<same> sh on-nas.sh TOOLS WORK check618   # after the fail phase: md5 on role 0 alone
 
-Seen on the NAS: 9/9 under 6.18 (RAID 1 and RAID 0 read, RAID 0 written, RAID 1
-kept read-only), 7/7 back under RAIDiator (both arrays started by autorun,
-e2fsck 1.40 clean on the file system written by 6.18's ext4, the files
-identical).
+Seen on the NAS: write phase 18/19 under 6.18 (both read, both written, rbc's
+legs identical and the superblocks unchanged, the crash resynchronised in
+19 s; the failed check compared role 0 with its state before the read-write
+mount, which ext4 changes: fixed since, the legs checked identical by hand), 11/11 back under RAIDiator (md5 on both members without a resync,
+e2fsck 1.40 clean on both file systems written by 6.18's ext4, the files
+identical); fail phase 6/6 under 6.18 (role 1 failed through md's sysfs:
+mdadm --fail answers "No such device" on a --build array; recorded on role 0),
+11/11 under RAIDiator ("kicking non-fresh sda7", md5 [2/1] [U_]).

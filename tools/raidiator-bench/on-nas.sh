@@ -183,17 +183,27 @@ sc_snapshot() {
 	finish "$1"
 }
 # check618: the base scenario's arrays after on-618.sh wrote on rbd under Linux
-# 6.18, on the partitions of the test USB key (type 0xfd). They are started by
-# RAIDiator's own boot path: the kernel noted the 0xfd partitions when the key
-# appeared, "mdconfig -a autorun" (RAID_AUTORUN) assembles them; the volumes
-# mounted read-only; RAIDiator's e2fsck -n on rbd. CHECK_DIR holds
-# random-618.sha256 (written by on-618.sh).
+# 6.18 and on rbc (RAID 1), on the partitions of the test USB key (type
+# 0xfd). They are started by RAIDiator's own boot path: the kernel noted the
+# 0xfd partitions when the key appeared, "mdconfig -a autorun" (RAID_AUTORUN)
+# assembles them; the volumes mounted read-only; RAIDiator's e2fsck -n on rbd
+# and rbc. PHASE=write (on-618.sh's first run): md5 must run on both members,
+# no resync. PHASE=fail (its second run): md5 on role 0 alone (role 1 left out
+# as stale), the file written after the failure there. CHECK_DIR holds
+# random-618.sha256 and rbc-random.sha256 (on-618.sh's write phase).
 sc_check618() {
 	C=${CHECK_DIR:?CHECK_DIR: the folder holding random-618.sha256}
+	P=${PHASE:-write}
 	[ -r "$C/random-618.sha256" ] || { echo "$C/random-618.sha256 missing"; return 1; }
 	grep -q "^md5 \|^md6 " /proc/mdstat || mdc -a autorun
 	cat /proc/mdstat >> "$LOG"
 	grep -q "^md5 : active" /proc/mdstat && say "ok   RAIDiator's kernel starts md5 (RAID 1)" || say "FAIL md5 not started"
+	if [ "$P" = fail ]; then
+		grep -A1 "^md5 :" /proc/mdstat | grep -q '\[2/1\] \[U_\]' && say "ok   md5 degraded: role 1, recorded as failed under 6.18, left out" || say "FAIL md5 not degraded on role 0 (see $LOG)"
+	else
+		grep -A1 "^md5 :" /proc/mdstat | grep -q '\[2/2\] \[UU\]' && say "ok   md5 on both members (mirror written by 6.18)" || say "FAIL md5 not on both members (see $LOG)"
+		sleep 5; grep -A2 "^md5 :" /proc/mdstat | grep -q 'resync\|recovery' && say "FAIL md5 resyncing (see $LOG)" || say "ok   md5: no resync started"
+	fi
 	grep -q "^md6 : active" /proc/mdstat && say "ok   RAIDiator's kernel starts md6 (RAID 0)" || say "FAIL md6 not started"
 	echo rbc >> "$VGS"; echo rbd >> "$VGS"
 	lvm vgchange -ay rbc
@@ -206,8 +216,14 @@ sc_check618() {
 	if [ "$got" = "$(cat "$C/random-618.sha256")" ]; then say "ok   rbd: random-618.bin, same sha256 as written under 6.18"; else say "FAIL rbd: random-618.bin sha256 $got"; fi
 	grep -q '^volume rbd' /tmp/rbmnt/hello.txt && say "ok   rbd: hello.txt (written by RAIDiator) still there" || say "FAIL rbd: hello.txt"
 	run umount /tmp/rbmnt
+	tool e2fsck -n -f /dev/rbc/rbc && say "ok   RAIDiator's e2fsck -n: rbc (written by Linux 6.18) clean" || say "FAIL e2fsck -n on rbc (see $LOG)"
 	run mount -t ext3 -o ro /dev/rbc/rbc /tmp/rbmnt
-	grep -q '^volume rbc' /tmp/rbmnt/hello.txt && say "ok   rbc (RAID 1): unchanged, hello.txt read" || say "FAIL rbc: hello.txt"
+	grep -q '^volume rbc' /tmp/rbmnt/hello.txt && say "ok   rbc (RAID 1): hello.txt (written by RAIDiator) still there" || say "FAIL rbc: hello.txt"
+	got=$(sha256sum < /tmp/rbmnt/rbc-random.bin | cut -d' ' -f1)
+	if [ "$got" = "$(cat "$C/rbc-random.sha256")" ]; then say "ok   rbc: rbc-random.bin, same sha256 as written under 6.18"; else say "FAIL rbc: rbc-random.bin sha256 $got"; fi
+	if [ "$P" = fail ]; then
+		grep -q '^written on role 0 alone' /tmp/rbmnt/rbc-after-fail.txt && say "ok   rbc: the file written after the failure read" || say "FAIL rbc: rbc-after-fail.txt"
+	fi
 	run umount /tmp/rbmnt
 	stop_all; NEXT=0
 }
