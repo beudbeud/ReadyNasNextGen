@@ -182,6 +182,35 @@ sc_snapshot() {
 	lvm lvs rbn || true
 	finish "$1"
 }
+# check618: the base scenario's arrays after on-618.sh wrote on rbd under Linux
+# 6.18, on the partitions of the test USB key (type 0xfd). They are started by
+# RAIDiator's own boot path: the kernel noted the 0xfd partitions when the key
+# appeared, "mdconfig -a autorun" (RAID_AUTORUN) assembles them; the volumes
+# mounted read-only; RAIDiator's e2fsck -n on rbd. CHECK_DIR holds
+# random-618.sha256 (written by on-618.sh).
+sc_check618() {
+	C=${CHECK_DIR:?CHECK_DIR: the folder holding random-618.sha256}
+	[ -r "$C/random-618.sha256" ] || { echo "$C/random-618.sha256 missing"; return 1; }
+	grep -q "^md5 \|^md6 " /proc/mdstat || mdc -a autorun
+	cat /proc/mdstat >> "$LOG"
+	grep -q "^md5 : active" /proc/mdstat && say "ok   RAIDiator's kernel starts md5 (RAID 1)" || say "FAIL md5 not started"
+	grep -q "^md6 : active" /proc/mdstat && say "ok   RAIDiator's kernel starts md6 (RAID 0)" || say "FAIL md6 not started"
+	echo rbc >> "$VGS"; echo rbd >> "$VGS"
+	lvm vgchange -ay rbc
+	lvm vgchange -ay rbd
+	tool e2fsck -n -f /dev/rbd/rbd && say "ok   RAIDiator's e2fsck -n: rbd (written by Linux 6.18) clean" || say "FAIL e2fsck -n on rbd (see $LOG)"
+	mkdir -p /tmp/rbmnt
+	run mount -t ext3 -o ro /dev/rbd/rbd /tmp/rbmnt
+	if grep -q '^written under Linux 6.18' /tmp/rbmnt/from-618.txt; then say "ok   rbd: from-618.txt read by RAIDiator's kernel"; else say "FAIL rbd: from-618.txt"; fi
+	got=$(sha256sum < /tmp/rbmnt/random-618.bin | cut -d' ' -f1)
+	if [ "$got" = "$(cat "$C/random-618.sha256")" ]; then say "ok   rbd: random-618.bin, same sha256 as written under 6.18"; else say "FAIL rbd: random-618.bin sha256 $got"; fi
+	grep -q '^volume rbd' /tmp/rbmnt/hello.txt && say "ok   rbd: hello.txt (written by RAIDiator) still there" || say "FAIL rbd: hello.txt"
+	run umount /tmp/rbmnt
+	run mount -t ext3 -o ro /dev/rbc/rbc /tmp/rbmnt
+	grep -q '^volume rbc' /tmp/rbmnt/hello.txt && say "ok   rbc (RAID 1): unchanged, hello.txt read" || say "FAIL rbc: hello.txt"
+	run umount /tmp/rbmnt
+	stop_all; NEXT=0
+}
 # delete: what mdconfig -a delete leaves on the members of a stopped array
 sc_delete() {
 	member "$1" d0p1 64; a=$L; member "$1" d1p1 64; c=$L

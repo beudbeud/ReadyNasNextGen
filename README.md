@@ -195,8 +195,9 @@ standard Linux RAID1 is disabled for now ([docs/XRAID-MIGRATION.md](docs/XRAID-M
 several on the same disks): mounted **read-only**, volume `c` on `/c` and any other volume
 `x` on `/x`. RAID 0 volumes can be made writable (a switch in the Storage card; nothing is
 written outside the file system), RAID 1 volumes stay read-only for now. Only `/c` can hold
-shares, the other volumes are reachable over SSH. Reading checked against arrays made by
-RAIDiator's own kernel and tools; writing not yet tried on the NAS
+shares, the other volumes are reachable over SSH. Checked on the NAS: arrays made by
+RAIDiator's own kernel and tools read under 6.18, a RAID 0 written under 6.18 then read
+back and checked clean by RAIDiator
 ([docs/XRAID.md §10](docs/XRAID.md#10-raidiator-md-volumes-x-raid-off-flex-raid)).
 
 ## Current limitations

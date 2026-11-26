@@ -455,10 +455,16 @@ RAIDiator, requires RAIDiator's superblock checksum, not understood yet.
 
 Limits: only `/c` can hold shares (SMB, NFS, DLNA): other volumes are reachable
 over SSH (rsync, scp) only. md's multi-zone RAID 0 (members of different sizes)
-and RAID 5 are refused. Reading checked against arrays made by RAIDiator's own
-kernel and tools (tools/raidiator-bench: on-nas.sh, nas-check.py); the mount
-by nas-raid on the NAS under 6.18 and RAID 0 writing are tested with simulated
-dm/LVM/mount only so far.
+and RAID 5 are refused.
+
+Checked on the NAS (tools/raidiator-bench): arrays made by RAIDiator's own
+kernel and tools (RAID 1, RAID 0, failed, rebuilding, spare, single disk,
+snapshot) read back by xraid-info (nas-check.py); then, end to end, the same
+RAID 1 + RAID 0 mounted by nas-raid under Linux 6.18 with the real dm, LVM
+2.03 and ext4, read-only, then RAID 0 written with FLEXRAID_RW=yes (on-618.sh,
+9/9); then back under RAIDiator's kernel: its autorun assembles both arrays,
+its e2fsck 1.40 finds the file system written by 6.18 clean and the files
+read back identical (on-nas.sh check618, 7/7).
 
 ## Files
 

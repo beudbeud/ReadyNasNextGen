@@ -89,3 +89,28 @@ the SPARC word order of the event count, the clean bit left at 0 on every
 RAID 0, and that `mdconfig -a add` needs a whole disk (it repartitions it
 first: a loop device has no geometry), so replacements are done with
 `raidhotadd` as RAIDiator does for spares.
+
+## End to end: nas-raid under 6.18, then RAIDiator again (on-618.sh, check618)
+
+The 6.18 kernel has neither a loop driver nor vfat: the test USB key is
+partitioned instead (partition 1: the fake disks' MBR; logical partitions 5-8,
+type 0xfd, the exact size of the base scenario's members, their contents
+written there). Under 6.18 each fake disk is a dm device (partition 1 + two
+member partitions) and the real nas-raid runs on them, next to the NAS's own
+X-RAID, through test-only variables (NAS_RAID_BIN/RUN/STATE/CONF/MNT and
+NAS_RAID_VG_PATTERN, which needs NAS_RAID_MNT: never a test volume at the
+root):
+
+    # under 6.18: BIN = nas-raid, xraid-info (SPARC build), mbr.img; KEY = the test key
+    sh on-618.sh BIN /dev/sdX WORK      # read-only, then FLEXRAID_RW=yes: writes on rbd
+
+Then the NAS booted on DIET or RAIDiator, the key still plugged in: the kernel
+notes its 0xfd partitions, `mdconfig -a autorun` assembles them as at
+RAIDiator's boot, and RAIDiator's e2fsck and kernel check what 6.18 wrote:
+
+    CHECK_DIR=<folder with random-618.sha256> sh on-nas.sh TOOLS WORK check618
+
+Seen on the NAS: 9/9 under 6.18 (RAID 1 and RAID 0 read, RAID 0 written, RAID 1
+kept read-only), 7/7 back under RAIDiator (both arrays started by autorun,
+e2fsck 1.40 clean on the file system written by 6.18's ext4, the files
+identical).

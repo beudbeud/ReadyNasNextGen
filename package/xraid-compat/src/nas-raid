@@ -40,11 +40,16 @@
 # Tests on a PC: NAS_RAID_ROOT prefixes /proc, /var, /etc and puts
 # $NAS_RAID_ROOT/bin first in PATH; NAS_RAID_DISKS replaces the list of
 # SATA disks (disk images).
+# Tests on the NAS next to its own volume (tools/raidiator-bench/on-618.sh):
+# NAS_RAID_BIN first in PATH, NAS_RAID_RUN / NAS_RAID_STATE / NAS_RAID_CONF
+# for the state, log and settings, NAS_RAID_MNT where the Flex-RAID volumes
+# are mounted and NAS_RAID_VG_PATTERN the VG names accepted there (only with
+# NAS_RAID_MNT: never a test volume at the root). Unset: the NAS's own paths.
 set -u
 R=${NAS_RAID_ROOT:-}
-export PATH=${R:+$R/bin:}/bin:/sbin:/usr/bin:/usr/sbin
-STATE=$R/var/lib/nas-raid		# persistent (USB key): marks, migration
-RUN=$R/var/run
+export PATH=${NAS_RAID_BIN:+$NAS_RAID_BIN:}${R:+$R/bin:}/bin:/sbin:/usr/bin:/usr/sbin
+STATE=${NAS_RAID_STATE:-$R/var/lib/nas-raid}	# persistent (USB key): marks, migration
+RUN=${NAS_RAID_RUN:-$R/var/run}
 LOG=$STATE/log
 DATA=/c
 XRAID_VG=c				# LVM group created by RAIDiator, LV "c"
@@ -54,7 +59,13 @@ XRAID_RW=no				# "yes": X-RAID writable if all safeguards pass
 FLEXRAID_RW=no				# "yes": RAIDiator RAID 0 volumes writable (docs/XRAID.md §10)
 SAMPLES=256				# 64 KiB blocks compared per section before a rw mount (0 = none)
 QUICK_SAMPLES=512			# random 64 KiB blocks per section in quick-verify (~70 ms each on the NAS)
-[ -r "$R/etc/nas-raid.conf" ] && . "$R/etc/nas-raid.conf"
+CONF=${NAS_RAID_CONF:-$R/etc/nas-raid.conf}
+[ -r "$CONF" ] && . "$CONF"
+FR_MNT=${NAS_RAID_MNT:-}		# Flex-RAID mount points under it (tests)
+FR_VG_PATTERN=${NAS_RAID_VG_PATTERN:-}
+if [ -n "$FR_VG_PATTERN" ] && [ -z "$FR_MNT" ]; then
+	echo "NAS_RAID_VG_PATTERN needs NAS_RAID_MNT" >&2; exit 2
+fi
 
 LVM_XR="devices { filter = [ \"a|^/dev/mapper/xr-p|\", \"r|.*|\" ] use_devicesfile = 0 } global { metadata_read_only = 1 }"
 LVM_XR_RO="$LVM_XR activation { read_only_volume_list = [ \"$XRAID_VG\" ] }"
@@ -323,10 +334,15 @@ flexraid_mount() {	# 1 = no RAIDiator md array at all
 	set -f; set -- $lvs; set +f
 	while [ $# -ge 3 ]; do
 		v=$1; lv=$2; shift 3
-		case "$v" in [c-z]) ;; *) continue;; esac	# RAIDiator volume letters; never /usr...
+		if [ -n "$FR_VG_PATTERN" ]; then		# tests: their own names, under FR_MNT
+			case "$v" in $FR_VG_PATTERN) ;; *) continue;; esac
+			m=$FR_MNT/$v
+		else
+			case "$v" in [c-z]) ;; *) continue;; esac	# RAIDiator volume letters; never /usr...
+			m=$FR_MNT/$v; [ "$v" = c ] && m=$FR_MNT$DATA
+		fi
 		[ "$lv" = "$v" ] || continue			# snapshots and other LVs: not mounted
 		case " $vgs " in *" $v "*) ;; *) continue;; esac
-		m=/$v; [ "$v" = c ] && m=$DATA
 		[ -n "$DRY_RUN" ] || mkdir -p "$m" 2>/dev/null
 		case " $rwvgs " in
 		*" $v "*)	# writable: a journal left by RAIDiator is replayed; errors make it read-only

@@ -322,6 +322,15 @@ check "FLEXRAID_RW=yes, one disk: no writable array, c read-only" "grep -q '^fle
 nr unmount 2>/dev/null >/dev/null
 cp "$T/nrconf.bak" "$R/etc/nas-raid.conf"
 stub lvm 'case "$1" in lvs) printf "  c c owi-a-----\n  c snap swi-a-s---\n  d d -wi-a-----\n";; pvs) printf "  /dev/mapper/fr-md2 c\n  /dev/mapper/fr-md3 d\n";; esac'
+# on the NAS next to its own volume (on-618.sh): test VG names, mounted under NAS_RAID_MNT
+stub lvm 'case "$1" in lvs) printf "  rbc rbc -wi-a-----\n  rbd rbd -wi-a-----\n";; pvs) printf "  /dev/mapper/fr-md2 rbc\n  /dev/mapper/fr-md3 rbd\n";; esac'
+DISKS="$T/flexraid/sda.img $T/flexraid/sdb.img"; : > "$T/cmd.log"
+NAS_RAID_MNT=$T/mnt NAS_RAID_VG_PATTERN='rb[a-z]' NAS_RAID_RUN=$T/run618 nr mount 2>/dev/null >/dev/null
+check "NAS_RAID_MNT + NAS_RAID_VG_PATTERN: rbc, rbd mounted under the test folder, own run dir, /c untouched" "grep -q 'mount -t ext4 -o ro,noatime /dev/mapper/rbc-rbc $T/mnt/rbc' '$T/cmd.log' && grep -q 'mount -t ext4 -o ro,noatime /dev/mapper/rbd-rbd $T/mnt/rbd' '$T/cmd.log' && ! grep -q ' /c\$\| /d\$' '$T/cmd.log' && grep -q '^flexraid-ro' '$T/run618/nas-raid.mode'"
+NAS_RAID_MNT=$T/mnt NAS_RAID_VG_PATTERN='rb[a-z]' NAS_RAID_RUN=$T/run618 nr unmount 2>/dev/null >/dev/null
+: > "$T/cmd.log"; NAS_RAID_VG_PATTERN='rb[a-z]' nr mount > /dev/null 2>&1; rc=$?
+check "NAS_RAID_VG_PATTERN without NAS_RAID_MNT: refused before anything (never a test volume at the root)" "[ $rc = 2 ] && [ ! -s '$T/cmd.log' ]"
+stub lvm 'case "$1" in lvs) printf "  c c owi-a-----\n  c snap swi-a-s---\n  d d -wi-a-----\n";; pvs) printf "  /dev/mapper/fr-md2 c\n  /dev/mapper/fr-md3 d\n";; esac'
 # disks reinstalled by RAIDiator in md mode keep the X-RAID superblock of an earlier
 # install at their end: Flex-RAID must win, even with XRAID_RW=yes (set above)
 DISKS="$T/flexraid-oldxraid/sda.img $T/flexraid-oldxraid/sdb.img"; h=$(md5sum "$T"/flexraid-oldxraid/*.img); : > "$T/cmd.log"
