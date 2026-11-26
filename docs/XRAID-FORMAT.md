@@ -319,6 +319,10 @@ full list, with the new write paths, is in docs/XRAID.md §9:
 ## 6. RAIDiator with X-RAID off (md mode, "Flex-RAID")
 
 Reference for `xraid-info flexraid` and `nas-raid` (docs/XRAID.md §10).
+Sources added to those of the header: **[fv]** Frontview's code (`Frontview.pmc`,
+ByteLoader bytecode whose op tree is stripped, disassembled op by op under QEMU
+user mode, read for interoperability only), **[bin]** RAIDiator's binaries run
+under QEMU. Test bench with RAIDiator's own tools: tools/raidiator-bench.
 When the X-RAID function bit of the flash is 0, RAIDiator does not use the
 X-RAID sections at all: its `linuxrc` builds ordinary Linux md arrays
 [script][dec], sure.
@@ -327,11 +331,14 @@ X-RAID sections at all: its `linuxrc` builds ordinary Linux md arrays
 |---|---|---|
 | Partitions (factory install) | p1 [32, +4,096,000) root, p2 swap, p3 data, all type `0xfd`, same table on every disk | [script], sure |
 | Arrays (factory install) | `md0` root RAID 1, `md1` swap (RAID 1 on 2 disks), `md2` data: RAID 1 on 2 disks, RAID 0 on 1, RAID 5 on 3+ | [script], sure |
-| Chunk | `mdconfig … -c 16`: 16 KiB | [script], likely (unit of `-c` not checked) |
+| Chunk | `mdconfig … -c 16`: 16 KiB (`mdconfig` usage: "chunk-size … (in KB)") | [script][bin], sure |
 | Data volume | LVM on `md2`: VG `c`, LV `c` (32 MiB extents), ext3 mounted on `/c` | [script], sure |
-| Other volumes | created later by Frontview (not by `linuxrc`): partitions, levels and VG names not seen; RAIDiator's fstab mounts each VG `x` (LV `x`) on `/x` | [script] for the fstab, **uncertain** for the rest |
+| Other volumes | Frontview's "add volume": name = first free letter from `c` (VG = LV = mount point `/x`); md = lowest free `mdN`, N ≥ 2; one **primary** partition (type `0xfd`, at most 4 per disk, no logical ones) per member disk in its first free slot from 3, start on 8 sectors, whole MiB, never in the last 8 MiB; RAID 0 or RAID 1 on 2 disks, RAID 0 on 1; `vgcreate -s 32M` (16M, 4M fallbacks), LV = all extents but the snapshot reserve; `mke2fs -m0 -j -L x -b 16384`; added at the next boot | [fv], sure |
+| `mdconfig` | creates arrays through the legacy md ioctls (`SET_ARRAY_INFO`, `ADD_NEW_DISK`, `RUN_ARRAY`): the kernel writes the 0.90 superblocks | [bin], sure |
+| LVM format | **LVM2**: RAIDiator's LVM 2.02.07 with its `lvm.conf` creates LVM2 VGs (observed on the NAS's own kernel, tools/raidiator-bench/on-nas.sh). `rc3` converts LVM1 VGs (`vgconvert -M2`, after removing `x_*` snapshots) at each boot: those come from older firmwares. lvm2 2.03 cannot read LVM1: `xraid-info flexraid` reports such a VG (`content` `lvm1`, reason `lvm1`) | [bin][script], sure for new volumes |
+| Snapshots | at most one per VG, LV `x_YYYY_MM_DD_HH_MM` in the free extents after LV `x` (chunk 256K) | [fv], sure |
 | md superblock | **0.90**, last 64 KiB of each member, data from sector 0 | [GPL], sure |
-| Byte order | **little-endian** (x86 layout): `md.c` calls `padre_NSPIO.init(padre_1_xm)` around every superblock read and write, which byte-swaps it (`swab_sb`) | [GPL][dec], likely; a PC assembles these arrays as they are |
+| Byte order | **mixed**, seen on the NAS's own kernel (tools/raidiator-bench/on-nas.sh): `md.c` calls `padre_NSPIO.init(padre_1_xm)` around every superblock read and write (`swab_sb`), which byte-swaps the 32-bit words of the generic sections and the disk descriptors **but keeps the SPARC word order** (`events_hi` in word 39, `events_lo` in word 40, where an x86 superblock has them the other way round) and **leaves the personality section big-endian** (`layout`, `chunk_size`: 16 KiB stored as `0x00004000` big-endian). A PC's md reads the magic, levels and sizes right but the chunk as 4096K: it assembles a RAIDiator RAID 1 correctly, **a RAID 0 wrongly**. `xraid-info flexraid` recognises the layout (word 39 = 0 while word 40 ≠ 0; `byte_order` `raidiator`) and reads the chunk big-endian | [bin][GPL][dec], sure |
 
 Consequences for the big-endian 6.18 kernel: it rejects these superblocks
 ("invalid raid superblock magic", harmless at autodetect), and

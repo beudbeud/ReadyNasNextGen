@@ -22,7 +22,7 @@ cc -O2 -Wall -Werror -o "$R/bin/xraid-sb.real" "$SRC/xraid-sb.c" || exit 1
 # ext3 images (fs, fsdirty) need e2fsprogs (mke2fs, debugfs, dumpe2fs): skipped without them
 PATH=$PATH:/usr/sbin:/sbin
 if python3 "$HERE/make-images.py" "$T" tools; then E2FS="fs fsdirty"; else E2FS=; echo "skip ext3 (quick check) tests: e2fsprogs missing"; fi
-for s in clean big dirty degraded sync different reinstall counters torn sbw flexraid flexraid-be flexraid-degraded flexraid-stale flexraid-oldxraid $E2FS; do
+for s in clean big dirty degraded sync different reinstall counters torn sbw flexraid flexraid-be flexraid-degraded flexraid-stale flexraid-oldxraid flexraid-lvm1 flexraid-x86 $E2FS; do
 	python3 "$HERE/make-images.py" "$T/$s" "$s" > /dev/null || exit 1
 done
 
@@ -254,6 +254,7 @@ check "flexraid: X-RAID images hold no md 0.90 array" "[ \"\$(fr clean | head -n
 check "flexraid images: no X-RAID superblock" "[ \"\$(reasons flexraid)\" = no_xraid ]"
 check "flexraid: 4 arrays (root, swap, data RAID 1, data RAID 0), all usable" "fr flexraid | grep -qx FR_NR_ARRAYS=4 && [ \"\$(frv flexraid A2)\" = '2 raid1 1 1048448' ] && [ \"\$(frv flexraid A3)\" = '3 raid0 1 4357632' ]"
 check "flexraid: RAID 1 = linear on the first in-sync member, RAID 0 = striped in role order, 16 KiB chunk" "[ \"\$(frv flexraid A2_TABLE)\" = '0 1048448 linear $T/flexraid/sda.img 5144608' ] && [ \"\$(frv flexraid A3_TABLE)\" = '0 4357632 striped 2 32 $T/flexraid/sdb.img 6193192 $T/flexraid/sda.img 6193192' ]"
+check "flexraid: superblocks as a PC writes them (x86 layout) read alike" "[ \"\$(fr flexraid-x86 | sed 's/flexraid-x86/X/g')\" = \"\$(fr flexraid | sed 's/flexraid/X/g')\" ]"
 check "flexraid: big-endian superblocks read alike" "[ \"\$(fr flexraid-be | sed 's/flexraid-be/X/g')\" = \"\$(fr flexraid | sed 's/flexraid/X/g')\" ]"
 # the dm tables, read back the way dm linear/striped map them, find what the images hold
 dmread() {	# dmread TABLE SECTOR LENGTH: bytes at SECTOR of the mapped device
@@ -277,8 +278,10 @@ check "flexraid: RAID 0 table gives the 8 logical chunks in order" "[ -n '$ok' ]
 check "flexraid: RAID 1 table gives the data volume" "[ \"\$(dmread \"\$(frv flexraid A2_TABLE)\" 0 8)\" = VOLUME-C ]"
 check "flexraid degraded (one disk): RAID 1 read from it, RAID 0 refused" "[ \"\$(frv flexraid-degraded A2)\" = '2 raid1 1 1048448' ] && [ \"\$(frv flexraid-degraded A2_REASONS)\" = degraded ] && [ \"\$(frv flexraid-degraded A3)\" = '3 raid0 0 0' ] && [ \"\$(frv flexraid-degraded A3_REASONS)\" = missing_member ] && [ -z \"\$(frv flexraid-degraded A3_TABLE)\" ]"
 check "flexraid stale member (older events): read from the up-to-date one" "[ \"\$(dmread \"\$(frv flexraid-stale A2_TABLE)\" 0 8)\" = VOLUME-C ] && [ \"\$(frv flexraid-stale A2_REASONS)\" = 'degraded stale_member' ]"
+check "flexraid: what the arrays hold (md2: LVM2 label)" "[ \"\$(frv flexraid A2_CONTENT)\" = lvm2 ]"
+check "flexraid: a volume still in LVM1 (created, RAIDiator not rebooted since) is reported" "[ \"\$(frv flexraid-lvm1 A2_CONTENT)\" = lvm1 ] && [ \"\$(frv flexraid-lvm1 A2_REASONS)\" = lvm1 ] && [ \"\$(frv flexraid-lvm1 A2)\" = '2 raid1 1 1048448' ]"
 J=$("$R/bin/xraid-info.real" flexraid --json "$T"/flexraid/*.img)
-check "flexraid --json: valid, levels, byte order, members" "js '[a[\"level\"] for a in j[\"arrays\"]]==[\"raid1\"]*3+[\"raid0\"] and all(a[\"byte_order\"]==\"le\" and a[\"usable\"]==1 and [m[\"state\"] for m in a[\"members\"]]==[\"in_sync\"]*2 for a in j[\"arrays\"])'"
+check "flexraid --json: valid, levels, RAIDiator's byte order, members" "js '[a[\"level\"] for a in j[\"arrays\"]]==[\"raid1\"]*3+[\"raid0\"] and all(a[\"byte_order\"]==\"raidiator\" and a[\"usable\"]==1 and [m[\"state\"] for m in a[\"members\"]]==[\"in_sync\"]*2 for a in j[\"arrays\"])'"
 # nas-raid: VGs c and d (plus a snapshot LV) seen by the simulated lvm
 stub lvm 'case "$1" in lvs) printf "  c c\n  c snap\n  d d\n";; esac'
 DISKS="$T/flexraid/sda.img $T/flexraid/sdb.img"; h=$(md5sum "$T"/flexraid/*.img)

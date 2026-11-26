@@ -1325,7 +1325,7 @@ static int smart(const char *path)
 
 struct mdm {
 	const char *path;
-	int part, le, role, grp;
+	int part, le, role, grp, fd, raidiator;
 	u64 start, data, events;	/* partition start, sectors before the superblock */
 	unsigned uuid[4], version, level, size, raid_disks, minor, chunk, state, dstate;
 };
@@ -1349,7 +1349,7 @@ static int md_read(int fd, const char *path, const struct part *p, struct mdm *m
 	else
 		return 0;
 	memset(m, 0, sizeof(*m));
-	m->path = path; m->part = p->num; m->le = le;
+	m->path = path; m->part = p->num; m->le = le; m->fd = fd;
 	m->start = p->start; m->data = off;
 	m->version = mw(b, le, 1) << 16 | mw(b, le, 2);	/* 0.90 = 90 */
 	m->uuid[0] = mw(b, le, 5); m->uuid[1] = mw(b, le, 13);
@@ -1357,9 +1357,18 @@ static int md_read(int fd, const char *path, const struct part *p, struct mdm *m
 	m->level = mw(b, le, 7); m->size = mw(b, le, 8);
 	m->raid_disks = mw(b, le, 10); m->minor = mw(b, le, 11);
 	m->state = mw(b, le, 33);
-	/* events_lo/hi: words 39/40 in the x86 layout, 40/39 in the native SPARC one */
-	m->events = le ? (u64)mw(b, le, 40) << 32 | mw(b, le, 39) : (u64)mw(b, le, 39) << 32 | mw(b, le, 40);
-	m->chunk = mw(b, le, 65);
+	/* RAIDiator's md.c (swab_sb) byte-swaps the words but keeps the SPARC word
+	 * order (events_hi in word 39, events_lo in 40) and leaves the personality
+	 * section (layout, chunk_size: words 64+) big-endian, as seen on the NAS's
+	 * own kernel (tools/raidiator-bench/on-nas.sh, docs/XRAID-FORMAT.md §6).
+	 * Its tell: word 39 is 0 (events_hi) where an x86 superblock has events_lo,
+	 * never 0 on a used array. */
+	m->raidiator = le && mw(b, 1, 39) == 0 && mw(b, 1, 40) != 0;
+	if (le && !m->raidiator)	/* x86 layout: events_lo in 39, events_hi in 40 */
+		m->events = (u64)mw(b, 1, 40) << 32 | mw(b, 1, 39);
+	else				/* SPARC word order, native or swapped by RAIDiator */
+		m->events = (u64)mw(b, le, 39) << 32 | mw(b, le, 40);
+	m->chunk = mw(b, le && !m->raidiator, 65);
 	m->role = (int)mw(b, le, 992 + 3);	/* this_disk: raid_disk, state */
 	m->dstate = mw(b, le, 992 + 4);
 	return 1;
@@ -1371,6 +1380,26 @@ static const char *md_state(const struct mdm *m, u64 ev)
 	if (m->dstate & 1) return "faulty";
 	if ((m->dstate & 6) == 6) return "in_sync";
 	return "spare";
+}
+
+/* what an array holds, from its first 4 KiB (the start of member 0: RAID 1
+ * mirror, RAID 0 first chunk). RAIDiator's LVM 2.02.07 creates a new volume
+ * in the LVM1 format; rc3 converts it to LVM2 (vgconvert -M2) at the next
+ * boot (docs/XRAID-FORMAT.md §6). lvm2 2.03 no longer reads LVM1. */
+static const char *md_content(const struct mdm *m)
+{
+	unsigned char b[4096];
+	int s;
+	if (!m || read_at(m->fd, m->start * 512, b, sizeof(b)))
+		return "";
+	for (s = 0; s < 4; s++)		/* LVM2 label: one of the first 4 sectors */
+		if (!memcmp(b + 512 * s, "LABELONE", 8))
+			return "lvm2";
+	if (b[0] == 'H' && b[1] == 'M' && (b[2] == 1 || b[2] == 2) && b[3] == 0)
+		return "lvm1";		/* pv_disk: "HM", version 1 or 2 (LE) */
+	if (b[1080] == 0x53 && b[1081] == 0xEF)
+		return "ext";
+	return "";
 }
 
 static void add_word(char *s, size_t n, const char *w)
@@ -1411,7 +1440,8 @@ static int flexraid(int argc, char **argv)
 	else
 		printf("FR_NR_ARRAYS=%d\n", na);
 	for (a = 0; a < na; a++) {
-		const struct mdm *r = NULL, *best = NULL, *by_role[MAXM];
+		const struct mdm *r = NULL, *best = NULL, *first = NULL, *by_role[MAXM];
+		const char *content = "";
 		char why[160] = "", table[512] = "", lvl[16];
 		u64 ev = 0, sectors = 0;
 		int usable = 0, insync = 0, stale = 0, dup = 0;
@@ -1452,6 +1482,7 @@ static int flexraid(int argc, char **argv)
 				add_word(why, sizeof(why), "size");
 			else {
 				usable = 1;
+				first = best;
 				snprintf(table, sizeof(table), "0 %llu linear %s %llu", sectors, best->path, best->start);
 			}
 			if (insync < (int)r->raid_disks)
@@ -1482,6 +1513,7 @@ static int flexraid(int argc, char **argv)
 			if (ok && each) {
 				int l;
 				usable = 1;
+				first = by_role[0];
 				sectors = each * n;
 				l = snprintf(table, sizeof(table), "0 %llu striped %u %u", sectors, n, cs);
 				for (k = 0; k < n && l < (int)sizeof(table); k++)
@@ -1491,15 +1523,20 @@ static int flexraid(int argc, char **argv)
 			}
 		} else
 			add_word(why, sizeof(why), "level");
+		if (usable) {
+			content = md_content(first);
+			if (!strcmp(content, "lvm1"))
+				add_word(why, sizeof(why), "lvm1");
+		}
 		if (stale)
 			add_word(why, sizeof(why), "stale_member");
 		if (!(r->state & 1))
 			add_word(why, sizeof(why), "unclean");
 		if (json) {
 			char *w, *s;
-			printf("%s{\"minor\":%u,\"uuid\":\"%08x:%08x:%08x:%08x\",\"level\":\"%s\",\"raid_disks\":%u,\"chunk\":%u,\"sectors\":%llu,\"usable\":%d,\"clean\":%u,\"byte_order\":\"%s\",\"read\":\"%s\",\"members\":[",
+			printf("%s{\"minor\":%u,\"uuid\":\"%08x:%08x:%08x:%08x\",\"level\":\"%s\",\"raid_disks\":%u,\"chunk\":%u,\"sectors\":%llu,\"usable\":%d,\"clean\":%u,\"byte_order\":\"%s\",\"content\":\"%s\",\"read\":\"%s\",\"members\":[",
 			       a ? "," : "", r->minor, r->uuid[0], r->uuid[1], r->uuid[2], r->uuid[3], lvl, r->raid_disks,
-			       r->chunk, usable ? sectors : 0, usable, r->state & 1, r->le ? "le" : "be",
+			       r->chunk, usable ? sectors : 0, usable, r->state & 1, r->raidiator ? "raidiator" : r->le ? "le" : "be", content,
 			       usable && best ? best->path : "");
 			for (i = 0, j = 0; i < nm; i++)
 				if (M[i].grp == a)
@@ -1513,6 +1550,7 @@ static int flexraid(int argc, char **argv)
 			printf("FR_A%d='%u %s %d %llu'\n", a, r->minor, lvl, usable, usable ? sectors : 0);
 			printf("FR_A%d_TABLE='%s'\n", a, table);
 			printf("FR_A%d_REASONS='%s'\n", a, why);
+			printf("FR_A%d_CONTENT='%s'\n", a, content);
 		}
 	}
 	if (json)

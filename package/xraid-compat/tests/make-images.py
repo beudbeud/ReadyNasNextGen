@@ -11,7 +11,7 @@ Nothing comes from a real disk: identifiers and dates are made up.
 SCENARIO: clean | dirty | degraded | sync | different | big | reinstall
           | counters | torn | fs | fsdirty
           | flexraid | flexraid-be | flexraid-degraded | flexraid-stale
-          | flexraid-oldxraid
+          | flexraid-oldxraid | flexraid-lvm1 | flexraid-x86
             (RAIDiator md mode, X-RAID off: see flexraid() below)
           | tools (exits 77 if mke2fs, debugfs or dumpe2fs is missing)
           (any other name: same as clean)
@@ -272,11 +272,15 @@ def poke(folder, what):
 # As RAIDiator's linuxrc partitions both disks alike (type 0xfd): md0 root
 # RAID 1 (p1), md1 swap RAID 1 (p2), md2 data RAID 1 (p3, volume c), and a
 # second data volume md3 RAID 0 (p5, logical, volume d). md 0.90 superblocks
-# in the last 64 KiB of each partition, little-endian as RAIDiator's kernel
-# stores them (big-endian for "flexraid-be"). Roles are swapped on md3 (sda =
+# in the last 64 KiB of each partition, as RAIDiator's kernel stores them (seen
+# on the NAS): words little-endian in the SPARC word order (events_hi in word
+# 39), personality section (chunk_size) big-endian. "flexraid-x86": as a PC
+# writes them; "flexraid-be": native big-endian. Roles are swapped on md3 (sda =
 # role 1) so that the stripe order is not the disk order. Every logical chunk
 # k < FR_CHUNKS of md3 starts with b"CHUNK%04d" % k, and md2 starts with
 # b"VOLUME-C", so that a test can read them back through the dm tables.
+# md2 carries an LVM2 label in sector 1 ("flexraid-lvm1": an LVM1 header
+# instead, as a VG left by an older firmware).
 # "flexraid-oldxraid" also keeps, at the end of the disks, the clean X-RAID
 # superblocks of an earlier install: RAIDiator's md install erases only the
 # start of the disks (linuxrc: no X_RAID_CLEAR on that path).
@@ -291,7 +295,7 @@ def fr_parts(n):
             (3, 0xFD, 5144608, 1048576), (5, 0xFD, FR_EXT + 8, p5)]
 
 
-def md90(le, uuid, level, size_kib, minor, chunk, role, events, clean=True, dstate=6):
+def md90(le, uuid, level, size_kib, minor, chunk, role, events, clean=True, dstate=6, raidiator=False):
     w = [0] * 1024
     w[0], w[1], w[2], w[4] = 0xa92b4efc, 0, 90, 32
     w[5], w[13], w[14], w[15] = uuid
@@ -299,16 +303,20 @@ def md90(le, uuid, level, size_kib, minor, chunk, role, events, clean=True, dsta
     w[33] = 1 if clean else 0
     w[34], w[35] = 2, 2
     lo, hi = events & 0xFFFFFFFF, events >> 32
-    w[39], w[40] = (lo, hi) if le else (hi, lo)
+    w[39], w[40] = (lo, hi) if le and not raidiator else (hi, lo)
     w[65] = chunk * 512
     for r in (0, 1):
         w[128 + 32 * r: 128 + 32 * r + 5] = [r, 9, r, r, 6]
     w[992:997] = [role, 9, role, role, dstate]
-    return struct.pack(("<" if le else ">") + "1024I", *w)
+    b = bytearray(struct.pack(("<" if le else ">") + "1024I", *w))
+    if raidiator:   # RAIDiator's swab_sb leaves the personality section (words 64-127) big-endian
+        b[256:512] = struct.pack(">64I", *w[64:128])
+    return bytes(b)
 
 
 def flexraid(folder, scen, n):
     le = scen != "flexraid-be"
+    raidiator = le and scen != "flexraid-x86"   # x86: superblocks as a PC writes them
     parts = fr_parts(n)
     os.makedirs(folder, exist_ok=True)
     for name in ("sda", "sdb"):
@@ -328,10 +336,14 @@ def flexraid(folder, scen, n):
                 role = (1 if name == "sda" else 0) if raid0 else (0 if name == "sda" else 1)
                 events = 7 if scen == "flexraid-stale" and name == "sda" and num == 3 else 40
                 sb = md90(le, (0x1000 + num, 2, 3, 4), 0 if raid0 else 1,
-                          0 if raid0 else data // 2, num - 1 if num < 5 else 3, FR_CHUNK, role, events)
+                          0 if raid0 else data // 2, num - 1 if num < 5 else 3, FR_CHUNK, role, events, raidiator=raidiator)
                 write(f, start + data, sb)
                 if num == 3 and not (scen == "flexraid-stale" and name == "sda"):
                     write(f, start, b"VOLUME-C")
+                    if scen == "flexraid-lvm1":     # LVM1 pv_disk: "HM", version 2
+                        write(f, start, b"HM\x02\x00")
+                    else:                           # LVM2 label in sector 1
+                        write(f, start + 1, b"LABELONE")
                 if raid0:   # md RAID 0, one zone: chunk k on role k % 2, at (k // 2) chunks
                     for k in range(FR_CHUNKS):
                         if k % 2 == role:

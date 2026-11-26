@@ -664,6 +664,7 @@ const I18N = {
   "the superblocks of the members disagree": ["les superblocs des membres ne concordent pas", "die Superblöcke der Mitglieder stimmen nicht überein"],
   "two arrays with the same md number": ["deux grappes avec le même numéro md", "zwei Verbünde mit derselben md-Nummer"],
   "inconsistent size": ["taille incohérente", "inkonsistente Größe"],
+  "volume still in the old LVM1 format: start RAIDiator once to convert it": ["volume encore à l’ancien format LVM1 : démarre RAIDiator une fois pour le convertir", "Volume noch im alten LVM1-Format: RAIDiator einmal starten, um es umzuwandeln"],
   "no volume": ["aucun volume", "kein Volume"],
   "Section {0}": ["Section {0}", "Bereich {0}"],
   "in sync": ["synchronisée", "synchron"],
@@ -1036,7 +1037,8 @@ const NR = {rw_disabled:'writing disabled (switch “Allow writing on the X-RAID
 const FRR = {degraded:'a member is missing or not in sync', stale_member:'a member is out of date', unclean:'not cleanly stopped by RAIDiator',
   missing_member:'a member is missing: not readable', sizes_differ:'members of different sizes: not readable',
   no_member_in_sync:'no member in sync: not readable', level:'RAID level not supported', layout:'layout not supported',
-  version:'md superblock version not supported', inconsistent:'the superblocks of the members disagree', same_minor:'two arrays with the same md number', size:'inconsistent size'};
+  version:'md superblock version not supported', inconsistent:'the superblocks of the members disagree', same_minor:'two arrays with the same md number', size:'inconsistent size',
+  lvm1:'volume still in the old LVM1 format: start RAIDiator once to convert it'};
 const XRM = {'xraid-rw':'X-RAID, read and write', 'xraid-ro':'X-RAID, read-only', 'flexraid-ro':'Flex-RAID (md), read-only', 'none':'no volume'};
 // Storage health, on the dashboard and the storage page: degraded (a member failed
 // or missing, an md array not complete) > rebuilding (N %) > read-only > OK.
