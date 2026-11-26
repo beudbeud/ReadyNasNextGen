@@ -8,8 +8,11 @@ mark at N-2, MBR on the base disk only, sections 0 (32, 4 096 000) and
 Nothing comes from a real disk: identifiers and dates are made up.
 
   make-images.py FOLDER SCENARIO [N]
-SCENARIO: clean | dirty | degraded | sync | different | md | big | reinstall
+SCENARIO: clean | dirty | degraded | sync | different | big | reinstall
           | counters | torn | fs | fsdirty
+          | flexraid | flexraid-be | flexraid-degraded | flexraid-stale
+          | flexraid-oldxraid
+            (RAIDiator md mode, X-RAID off: see flexraid() below)
           | tools (exits 77 if mke2fs, debugfs or dumpe2fs is missing)
           (any other name: same as clean)
 "fs" (clean superblock) and "fsdirty" (unclean shutdown) add real ext3 file
@@ -23,7 +26,7 @@ changes one byte on the mirror (sda.img) in that area (located with
 debugfs/dumpe2fs and an independent LV mapping) and prints its LBA.
 Writes FOLDER/sda.img (mirror, SATA channel 0) and FOLDER/sdb.img (base,
 SATA channel 1), as on the Duo where the base was hde; "degraded" writes
-only sdb.img; "md" adds an md 1.2 superblock on sda.img (already migrated disk).
+only sdb.img.
 """
 import os
 import re
@@ -265,10 +268,91 @@ def poke(folder, what):
     print(lba)
 
 
+# ---------- "flexraid*" scenarios: RAIDiator md mode (X-RAID off) ----------
+# As RAIDiator's linuxrc partitions both disks alike (type 0xfd): md0 root
+# RAID 1 (p1), md1 swap RAID 1 (p2), md2 data RAID 1 (p3, volume c), and a
+# second data volume md3 RAID 0 (p5, logical, volume d). md 0.90 superblocks
+# in the last 64 KiB of each partition, little-endian as RAIDiator's kernel
+# stores them (big-endian for "flexraid-be"). Roles are swapped on md3 (sda =
+# role 1) so that the stripe order is not the disk order. Every logical chunk
+# k < FR_CHUNKS of md3 starts with b"CHUNK%04d" % k, and md2 starts with
+# b"VOLUME-C", so that a test can read them back through the dm tables.
+# "flexraid-oldxraid" also keeps, at the end of the disks, the clean X-RAID
+# superblocks of an earlier install: RAIDiator's md install erases only the
+# start of the disks (linuxrc: no X_RAID_CLEAR on that path).
+FR_CHUNK = 32           # sectors (RAIDiator: mdconfig -c 16, 16 KiB)
+FR_CHUNKS = 8
+FR_EXT = 6193184        # extended partition (p4), p5 at FR_EXT + 8
+
+
+def fr_parts(n):
+    p5 = n - 16384 - (FR_EXT + 8)
+    return [(1, 0xFD, 32, 4096000), (2, 0xFD, 4096032, 1048576),
+            (3, 0xFD, 5144608, 1048576), (5, 0xFD, FR_EXT + 8, p5)]
+
+
+def md90(le, uuid, level, size_kib, minor, chunk, role, events, clean=True, dstate=6):
+    w = [0] * 1024
+    w[0], w[1], w[2], w[4] = 0xa92b4efc, 0, 90, 32
+    w[5], w[13], w[14], w[15] = uuid
+    w[6], w[7], w[8], w[9], w[10], w[11] = 0x4A000000, level & 0xFFFFFFFF, size_kib, 2, 2, minor
+    w[33] = 1 if clean else 0
+    w[34], w[35] = 2, 2
+    lo, hi = events & 0xFFFFFFFF, events >> 32
+    w[39], w[40] = (lo, hi) if le else (hi, lo)
+    w[65] = chunk * 512
+    for r in (0, 1):
+        w[128 + 32 * r: 128 + 32 * r + 5] = [r, 9, r, r, 6]
+    w[992:997] = [role, 9, role, role, dstate]
+    return struct.pack(("<" if le else ">") + "1024I", *w)
+
+
+def flexraid(folder, scen, n):
+    le = scen != "flexraid-be"
+    parts = fr_parts(n)
+    os.makedirs(folder, exist_ok=True)
+    for name in ("sda", "sdb"):
+        path = os.path.join(folder, name + ".img")
+        if os.path.exists(path):
+            os.unlink(path)
+        if scen == "flexraid-degraded" and name == "sdb":
+            continue
+        with open(path, "wb") as f:
+            f.truncate(n * 512)
+            write(f, 0, mbr([(t, s, nb) for num, t, s, nb in parts if num < 5]
+                            + [(0x05, FR_EXT, n - 16384 - FR_EXT)]))
+            write(f, FR_EXT, mbr([(0xFD, 8, parts[3][3])]))
+            for num, typ, start, nb in parts:
+                data = (nb & ~127) - 128
+                raid0 = num == 5
+                role = (1 if name == "sda" else 0) if raid0 else (0 if name == "sda" else 1)
+                events = 7 if scen == "flexraid-stale" and name == "sda" and num == 3 else 40
+                sb = md90(le, (0x1000 + num, 2, 3, 4), 0 if raid0 else 1,
+                          0 if raid0 else data // 2, num - 1 if num < 5 else 3, FR_CHUNK, role, events)
+                write(f, start + data, sb)
+                if num == 3 and not (scen == "flexraid-stale" and name == "sda"):
+                    write(f, start, b"VOLUME-C")
+                if raid0:   # md RAID 0, one zone: chunk k on role k % 2, at (k // 2) chunks
+                    for k in range(FR_CHUNKS):
+                        if k % 2 == role:
+                            write(f, start + (k // 2) * FR_CHUNK, b"CHUNK%04d" % k)
+        if scen == "flexraid-oldxraid":
+            v = visible_size(n)
+            old = superblock(n, v, [(32, 4096000), (4096032, v - 4096000 - 2)],
+                             {1: (True, 1), 2: (False, 1)}, this=1 if name == "sda" else 2)
+            with open(path, "r+b") as f:
+                for off in (4096, 4072, 4048, 4024):
+                    write(f, n - off, old)
+                write(f, n - 2, b"WGam")
+    print("N=%d flexraid" % n)
+
+
 def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__)
     folder, scen = sys.argv[1], sys.argv[2]
+    if scen.startswith("flexraid"):
+        return flexraid(folder, scen, int(sys.argv[3]) if len(sys.argv) > 3 else 8388608)
     if scen in ("fs", "fsdirty", "poke", "tools"):
         missing = [t for t in E2FS if not shutil.which(t, path=E2FS_PATH)]
         if missing:
@@ -314,11 +398,6 @@ def main():
             if scen == "torn" and name == "sdb":
                 write(f, n - 4072, sb[:0x84] + b"\0\0\0\0" + sb[0x88:])   # copy updated, main not
             write(f, n - 2, b"WGam")
-            if scen == "md" and name == "sda":
-                for off in (4096, 4072, 4048, 4024):      # nas-raid erases the X-RAID zone
-                    write(f, n - off, bytes(SB_LEN))
-                f.seek(4096)
-                f.write(struct.pack("<I", 0xa92b4efc))   # md 1.2 superblock
     if scen in ("fs", "fsdirty"):
         fs_build(folder, data)
     print("N=%d V=%d data=%d" % (n, v, data))

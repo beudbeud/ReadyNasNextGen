@@ -22,7 +22,7 @@ cc -O2 -Wall -Werror -o "$R/bin/xraid-sb.real" "$SRC/xraid-sb.c" || exit 1
 # ext3 images (fs, fsdirty) need e2fsprogs (mke2fs, debugfs, dumpe2fs): skipped without them
 PATH=$PATH:/usr/sbin:/sbin
 if python3 "$HERE/make-images.py" "$T" tools; then E2FS="fs fsdirty"; else E2FS=; echo "skip ext3 (quick check) tests: e2fsprogs missing"; fi
-for s in clean big dirty degraded sync different md reinstall counters torn sbw $E2FS; do
+for s in clean big dirty degraded sync different reinstall counters torn sbw flexraid flexraid-be flexraid-degraded flexraid-stale flexraid-oldxraid $E2FS; do
 	python3 "$HERE/make-images.py" "$T/$s" "$s" > /dev/null || exit 1
 done
 
@@ -32,7 +32,7 @@ check "overlay: nothing inside /c" "[ ! -e '$HERE/../../../board/readynas-duo-v1
 
 # ---------- xraid-info ----------
 mode() { "$R/bin/xraid-info" --samples 32 "$T/$1"/*.img | sed -n "s/^XR_MODE='\(.*\)'/\1/p"; }
-for c in clean:rw big:rw dirty:ro degraded:ro sync:ro different:ro md:ro; do
+for c in clean:rw big:rw dirty:ro degraded:ro sync:ro different:ro; do
 	check "xraid-info: ${c%%:*} -> ${c#*:}" "[ \"\$(mode ${c%%:*})\" = ${c#*:} ]"
 done
 J=$("$R/bin/xraid-info" --json --samples 4 "$T"/big/*.img)
@@ -247,6 +247,68 @@ nr status --json > "$T/e0"
 check "status --json: valid, superblock writer reported" "python3 -c \"import json; j=json.load(open('$T/e0')); assert j['sb_writer']=='yes' and 'migration' not in j and 'relay' not in j\""
 nr unmount 2>/dev/null >/dev/null
 
+# ---------- Flex-RAID: RAIDiator md volumes (X-RAID off), read-only ----------
+fr() { "$R/bin/xraid-info.real" flexraid "$T/$1"/*.img; }
+frv() { fr "$1" | sed -n "s/^FR_$2='\(.*\)'/\1/p"; }
+check "flexraid: X-RAID images hold no md 0.90 array" "[ \"\$(fr clean | head -n 1)\" = FR_NR_ARRAYS=0 ]"
+check "flexraid images: no X-RAID superblock" "[ \"\$(reasons flexraid)\" = no_xraid ]"
+check "flexraid: 4 arrays (root, swap, data RAID 1, data RAID 0), all usable" "fr flexraid | grep -qx FR_NR_ARRAYS=4 && [ \"\$(frv flexraid A2)\" = '2 raid1 1 1048448' ] && [ \"\$(frv flexraid A3)\" = '3 raid0 1 4357632' ]"
+check "flexraid: RAID 1 = linear on the first in-sync member, RAID 0 = striped in role order, 16 KiB chunk" "[ \"\$(frv flexraid A2_TABLE)\" = '0 1048448 linear $T/flexraid/sda.img 5144608' ] && [ \"\$(frv flexraid A3_TABLE)\" = '0 4357632 striped 2 32 $T/flexraid/sdb.img 6193192 $T/flexraid/sda.img 6193192' ]"
+check "flexraid: big-endian superblocks read alike" "[ \"\$(fr flexraid-be | sed 's/flexraid-be/X/g')\" = \"\$(fr flexraid | sed 's/flexraid/X/g')\" ]"
+# the dm tables, read back the way dm linear/striped map them, find what the images hold
+dmread() {	# dmread TABLE SECTOR LENGTH: bytes at SECTOR of the mapped device
+	python3 - "$@" <<'EOF'
+import sys
+t, s, n = sys.argv[1].split(), int(sys.argv[2]), int(sys.argv[3])
+if t[2] == "linear":
+    dev, off = t[3], int(t[4]) + s
+else:
+    k, cs = int(t[3]), int(t[4])
+    c, r = divmod(s, cs)
+    dev, off = t[5 + 2 * (c % k)], int(t[6 + 2 * (c % k)]) + (c // k) * cs + r
+with open(dev, "rb") as f:
+    f.seek(off * 512)
+    sys.stdout.write(f.read(n).decode("latin-1"))
+EOF
+}
+t3=$(frv flexraid A3_TABLE); ok=1
+for k in 0 1 2 3 4 5 6 7; do [ "$(dmread "$t3" $((k * 32)) 9)" = "$(printf 'CHUNK%04d' $k)" ] || ok=; done
+check "flexraid: RAID 0 table gives the 8 logical chunks in order" "[ -n '$ok' ]"
+check "flexraid: RAID 1 table gives the data volume" "[ \"\$(dmread \"\$(frv flexraid A2_TABLE)\" 0 8)\" = VOLUME-C ]"
+check "flexraid degraded (one disk): RAID 1 read from it, RAID 0 refused" "[ \"\$(frv flexraid-degraded A2)\" = '2 raid1 1 1048448' ] && [ \"\$(frv flexraid-degraded A2_REASONS)\" = degraded ] && [ \"\$(frv flexraid-degraded A3)\" = '3 raid0 0 0' ] && [ \"\$(frv flexraid-degraded A3_REASONS)\" = missing_member ] && [ -z \"\$(frv flexraid-degraded A3_TABLE)\" ]"
+check "flexraid stale member (older events): read from the up-to-date one" "[ \"\$(dmread \"\$(frv flexraid-stale A2_TABLE)\" 0 8)\" = VOLUME-C ] && [ \"\$(frv flexraid-stale A2_REASONS)\" = 'degraded stale_member' ]"
+J=$("$R/bin/xraid-info.real" flexraid --json "$T"/flexraid/*.img)
+check "flexraid --json: valid, levels, byte order, members" "js '[a[\"level\"] for a in j[\"arrays\"]]==[\"raid1\"]*3+[\"raid0\"] and all(a[\"byte_order\"]==\"le\" and a[\"usable\"]==1 and [m[\"state\"] for m in a[\"members\"]]==[\"in_sync\"]*2 for a in j[\"arrays\"])'"
+# nas-raid: VGs c and d (plus a snapshot LV) seen by the simulated lvm
+stub lvm 'case "$1" in lvs) printf "  c c\n  c snap\n  d d\n";; esac'
+DISKS="$T/flexraid/sda.img $T/flexraid/sdb.img"; h=$(md5sum "$T"/flexraid/*.img)
+: > "$T/cmd.log"; : > "$T/xi.log"; nr mount 2>/dev/null >/dev/null
+check "Flex-RAID mount: mode flexraid-ro, 4 arrays mapped" "[ \"\$(mode_of)\" = flexraid-ro ] && [ \$(grep -c '^dmsetup create fr-md[0-3] --readonly --table' '$T/cmd.log') = 4 ]"
+check "Flex-RAID mount: every dm table read-only, never md, xraid-sb nor dd" "! grep '^dmsetup create' '$T/cmd.log' | grep -qv -- --readonly && ! grep -q '^mdadm\|^xraid-sb\|^dd' '$T/cmd.log'"
+check "Flex-RAID mount: LVM read-only (metadata and both VGs), c on /c and d on /d read-only, no snapshot" "grep -q 'metadata_read_only = 1.*read_only_volume_list = \[ \"c\", \"d\" \] } c d' '$T/cmd.log' && grep -q 'mount -t ext4 -o ro,noatime /dev/mapper/c-c /c' '$T/cmd.log' && grep -q 'mount -t ext4 -o ro,noatime /dev/mapper/d-d /d' '$T/cmd.log' && ! grep -q snap '$T/cmd.log'"
+printf '/dev/mapper/c-c /c ext4 ro 0 0\n/dev/mapper/d-d /d ext4 ro 0 0\n' > "$R/proc/mounts"; : > "$T/cmd.log"
+nr status --json > "$T/fr1"
+check "status --json: valid, mode flexraid-ro, arrays listed, xraid stays the last key" "python3 -c \"import json; j=json.load(open('$T/fr1')); assert j['mode']=='flexraid-ro' and len(j['flexraid']['arrays'])==4 and list(j)[-1]=='xraid'\""
+nr unmount 2>/dev/null >/dev/null
+check "Flex-RAID unmount: /c and /d unmounted, VGs off, arrays removed" "grep -q '^umount /c' '$T/cmd.log' && grep -q '^umount /d' '$T/cmd.log' && grep -q 'vgchange -an .* c d' '$T/cmd.log' && [ \$(grep -c '^dmsetup remove fr-md' '$T/cmd.log') = 4 ] && [ \"\$(cat '$R/var/run/nas-raid.mode')\" = 'none stopped' ] && [ ! -e '$R/var/run/flexraid.state' ]"
+check "Flex-RAID: the disk images were never written" "[ \"\$(md5sum '$T'/flexraid/*.img)\" = \"$h\" ]"
+: > "$R/proc/mounts"
+DISKS="$T/flexraid-degraded/sda.img"; : > "$T/cmd.log"; nr mount 2>/dev/null >/dev/null
+check "Flex-RAID one disk: RAID 0 array not mapped, mode flexraid-ro (degraded missing_member)" "grep -qx 'flexraid-ro degraded missing_member' '$R/var/run/nas-raid.mode' && ! grep -q 'fr-md3' '$T/cmd.log'"
+nr unmount 2>/dev/null >/dev/null
+# disks reinstalled by RAIDiator in md mode keep the X-RAID superblock of an earlier
+# install at their end: Flex-RAID must win, even with XRAID_RW=yes (set above)
+DISKS="$T/flexraid-oldxraid/sda.img $T/flexraid-oldxraid/sdb.img"; h=$(md5sum "$T"/flexraid-oldxraid/*.img); : > "$T/cmd.log"
+nr mount 2>/dev/null >/dev/null
+check "leftover X-RAID superblock on Flex-RAID disks: Flex-RAID wins, read-only, nothing written" "grep -qx XRAID_RW=yes '$R/etc/nas-raid.conf' && [ \"\$(mode_of)\" = flexraid-ro ] && ! grep -q '^mdadm\\|^xraid-sb\\|xr-p' '$T/cmd.log' && [ \"\$(md5sum '$T'/flexraid-oldxraid/*.img)\" = \"$h\" ] && grep -q 'X-RAID superblock of an earlier install ignored' '$R/var/lib/nas-raid/log'"
+nr unmount 2>/dev/null >/dev/null
+stub lvm; DISKS="$T/flexraid/sda.img $T/flexraid/sdb.img"; : > "$T/cmd.log"; nr mount 2>/dev/null >/dev/null
+check "Flex-RAID without any LV: nothing mounted, everything undone" "grep -q '^none flexraid_failed' '$R/var/run/nas-raid.mode' && [ \$(grep -c '^dmsetup remove fr-md' '$T/cmd.log') = 4 ] && [ ! -e '$R/var/run/flexraid.state' ]"
+nr unmount 2>/dev/null >/dev/null
+DISKS="$T/clean/sda.img $T/clean/sdb.img"; : > "$T/cmd.log"; nr mount 2>/dev/null >/dev/null
+check "X-RAID present: no Flex-RAID array mapped, its status cached anyway (empty)" "mode_of | grep -q '^xraid-' && ! grep -q 'fr-md' '$T/cmd.log' && [ \"\$(cat '$R/var/run/flexraid.json')\" = '{\"arrays\":[]}' ]"
+nr unmount 2>/dev/null >/dev/null
+
 # ---------- md: disabled for now ----------
 DISKS="$T/big/sda.img $T/big/sdb.img"
 for op in migrate create add grow; do
@@ -255,11 +317,6 @@ for op in migrate create add grow; do
 	check "md disabled: $op refused, nothing run" "[ $rc != 0 ] && grep -q 'md support is disabled for now: X-RAID only' '$T/d-$op' && grep -q WGam '$T/d-$op' && [ ! -s '$T/cmd.log' ] && [ \"\$(stat -c %Y.%s '$T'/big/*.img)\" = \"$h\" ]"
 done
 check "md disabled: --i-know-relay-will-break no longer exists" "! nr migrate --i-know-relay-will-break 2>&1 | grep -q 'md support'"
-DISKS="$T/md/sda.img $T/md/sdb.img"; : > "$T/cmd.log"
-nr mount 2>/dev/null >/dev/null
-check "existing md volume: still mounted on /c (read only path unchanged)" "[ \"\$(mode_of)\" = md ] && grep -q 'mdadm --assemble --scan' '$T/cmd.log' && grep -q 'mount -t ext4 /dev/mapper/donnees-c /c' '$T/cmd.log'"
-nr status --json --refresh > "$T/e1"
-check "status --json: valid, mode md" "python3 -c \"import json; j=json.load(open('$T/e1')); assert j['mode']=='md' and j['xraid']['mode']=='ro'\""
 
 # ---------- state left by the earlier (French) version ----------
 S=$R/var/lib/nas-raid

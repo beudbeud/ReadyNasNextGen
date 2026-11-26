@@ -23,6 +23,10 @@
  *        64 KiB blocks per section; --list prints the ranges without reading
  *        the mirror's data. Exit 0 = identical, 1 = differences, 2 = errors,
  *        3 = identical but incomplete (a file system was not located).
+ *   xraid-info flexraid [--json] DISK...
+ *        RAIDiator md volumes (X-RAID off, "Flex-RAID"): md 0.90 superblocks
+ *        of the partitions (little- or big-endian), grouped into arrays, and
+ *        a read-only dm table for each usable RAID 1 / RAID 0 array.
  *   xraid-info smart [--json] DISK
  *        SMART through ATA PASS-THROUGH (SG_IO): health, reallocated,
  *        pending, uncorrectable sectors, hours (format of /var/run/smart.sdX).
@@ -81,7 +85,6 @@ struct disk {
 	unsigned char sb[4][SB_LEN];
 	unsigned magic[4];
 	int wgam;			/* "WGam" mark at N-2 */
-	int md;				/* md superblock found (already migrated) */
 	unsigned char mbr[512];
 	int mbr_ok;
 	int channel;			/* hwif index from this_disk (1 = SATA 0) */
@@ -135,21 +138,6 @@ static void open_disk(struct disk *d, const char *path)
 	d->n = (u64)t / 512;
 }
 
-/* md superblock (1.0 at the end, 1.1 at the start, 1.2 at 4 KiB, 0.90 at the end, 64 KiB) */
-static void find_md(struct disk *d)
-{
-	unsigned char b[4];
-	u64 size = d->n * 512, pos[4];
-	int i;
-	pos[0] = 0;
-	pos[1] = 4096;
-	pos[2] = size >= 8192 ? (size - 8192) & ~(u64)4095 : 0;
-	pos[3] = size >= 65536 ? (size & ~(u64)65535) - 65536 : 0;
-	for (i = 0; i < 4; i++)
-		if (read_at(d->fd, pos[i], b, 4) == 0 && (le32(b) == MD_MAGIC || be32(b) == MD_MAGIC))
-			d->md = 1;
-}
-
 static void read_disk(struct disk *d)
 {
 	unsigned char b[4];
@@ -164,7 +152,6 @@ static void read_disk(struct disk *d)
 		d->wgam = memcmp(b, "WGam", 4) == 0;
 	if (read_at(d->fd, 0, d->mbr, 512) == 0)
 		d->mbr_ok = d->mbr[510] == 0x55 && d->mbr[511] == 0xAA;
-	find_md(d);
 	if (d->magic[0] == WGAO)
 		d->ref = 0;
 	else if (d->magic[2] == WGAO)
@@ -328,8 +315,6 @@ static int analyse(int argc, char **argv, int k)
 		printf("{");
 	if (ref < 0) {
 		key_s("MODE", "none");
-		for (i = 0; i < nd; i++)
-			if (D[i].md) { key_s("MD", "1"); break; }
 		if (json) printf(",\"reasons\":[{\"code\":\"no_xraid\",\"text\":\"no X-RAID superblock (WGao)\"}]}\n");
 		else printf("XR_REASONS='no_xraid'\n");
 		return 0;
@@ -503,8 +488,6 @@ static int analyse(int argc, char **argv, int k)
 	}
 
 	key_s("MODE", block_all ? "none" : block_rw ? "ro" : "rw");
-	for (i = 0; i < nd; i++)
-		if (D[i].md) { key_s("MD", "1"); break; }
 	key_n("N", D[ref].n);
 	key_n("V", v);
 	key_n("PROTECTED_ZONE", v);
@@ -541,11 +524,11 @@ static int analyse(int argc, char **argv, int k)
 				strcat(copies, COPY_NAME[c]);
 			}
 		if (json)
-			printf("%s{\"path\":\"%s\",\"sectors\":%llu,\"role\":\"%s\",\"channel\":%d,\"state\":\"%s\",\"copies\":\"%s\",\"wgam\":%d,\"mbr\":%d,\"md\":%d}",
-			       i ? "," : "", D[i].path, D[i].n, role, D[i].channel - 1, st, copies, D[i].wgam, D[i].mbr_ok, D[i].md);
+			printf("%s{\"path\":\"%s\",\"sectors\":%llu,\"role\":\"%s\",\"channel\":%d,\"state\":\"%s\",\"copies\":\"%s\",\"wgam\":%d,\"mbr\":%d}",
+			       i ? "," : "", D[i].path, D[i].n, role, D[i].channel - 1, st, copies, D[i].wgam, D[i].mbr_ok);
 		else
-			printf("XR_D%d='%s %llu %s %d %s %s %d %d %d'\n", i, D[i].path, D[i].n, *role ? role : "-",
-			       D[i].channel - 1, *st ? st : "-", *copies ? copies : "-", D[i].wgam, D[i].mbr_ok, D[i].md);
+			printf("XR_D%d='%s %llu %s %d %s %s %d %d'\n", i, D[i].path, D[i].n, *role ? role : "-",
+			       D[i].channel - 1, *st ? st : "-", *copies ? copies : "-", D[i].wgam, D[i].mbr_ok);
 	}
 	/* sections: start, usable sectors (bounded by V), level, initialised */
 	if (json) printf("],\"sections\":[");
@@ -1327,6 +1310,216 @@ static int smart(const char *path)
 	return 0;
 }
 
+/* ---------- RAIDiator md volumes (X-RAID off, "Flex-RAID") ----------
+ * With X-RAID switched off, RAIDiator builds ordinary md arrays (md0 root
+ * RAID 1, md1 swap, md2 and the next data volumes, RAID 0 or 1) on partitions
+ * of type 0xfd, with md 0.90 superblocks that its kernel stores in
+ * little-endian (x86) byte order (docs/XRAID-FORMAT.md §6). They are read here
+ * in either byte order, and one READ-ONLY dm table per array is printed for
+ * nas-raid: RAID 1 = linear on one in-sync member, RAID 0 = striped over the
+ * members in role order. md 0.90 keeps the data from sector 0 of the member
+ * and the superblock in its last 64 KiB. */
+#define MD_RES 128			/* MD_RESERVED_SECTORS (64 KiB) */
+#define MAXM   (MAXD * MAXP)
+#define MAXA   8
+
+struct mdm {
+	const char *path;
+	int part, le, role, grp;
+	u64 start, data, events;	/* partition start, sectors before the superblock */
+	unsigned uuid[4], version, level, size, raid_disks, minor, chunk, state, dstate;
+};
+
+static unsigned mw(const unsigned char *b, int le, int i) { return le ? le32(b + 4 * i) : be32(b + 4 * i); }
+
+static int md_read(int fd, const char *path, const struct part *p, struct mdm *m)
+{
+	unsigned char b[4096];
+	u64 off;
+	int le;
+	if (p->nb < 2 * MD_RES)
+		return 0;
+	off = ((u64)p->nb & ~(u64)(MD_RES - 1)) - MD_RES;	/* MD_NEW_SIZE_SECTORS */
+	if (read_at(fd, ((u64)p->start + off) * 512, b, sizeof(b)))
+		return 0;
+	if (le32(b) == MD_MAGIC)
+		le = 1;
+	else if (be32(b) == MD_MAGIC)
+		le = 0;
+	else
+		return 0;
+	memset(m, 0, sizeof(*m));
+	m->path = path; m->part = p->num; m->le = le;
+	m->start = p->start; m->data = off;
+	m->version = mw(b, le, 1) << 16 | mw(b, le, 2);	/* 0.90 = 90 */
+	m->uuid[0] = mw(b, le, 5); m->uuid[1] = mw(b, le, 13);
+	m->uuid[2] = mw(b, le, 14); m->uuid[3] = mw(b, le, 15);
+	m->level = mw(b, le, 7); m->size = mw(b, le, 8);
+	m->raid_disks = mw(b, le, 10); m->minor = mw(b, le, 11);
+	m->state = mw(b, le, 33);
+	/* events_lo/hi: words 39/40 in the x86 layout, 40/39 in the native SPARC one */
+	m->events = le ? (u64)mw(b, le, 40) << 32 | mw(b, le, 39) : (u64)mw(b, le, 39) << 32 | mw(b, le, 40);
+	m->chunk = mw(b, le, 65);
+	m->role = (int)mw(b, le, 992 + 3);	/* this_disk: raid_disk, state */
+	m->dstate = mw(b, le, 992 + 4);
+	return 1;
+}
+
+static const char *md_state(const struct mdm *m, u64 ev)
+{
+	if (m->events != ev) return "stale";
+	if (m->dstate & 1) return "faulty";
+	if ((m->dstate & 6) == 6) return "in_sync";
+	return "spare";
+}
+
+static void add_word(char *s, size_t n, const char *w)
+{
+	if (!strstr(s, w))
+		snprintf(s + strlen(s), n - strlen(s), "%s%s", *s ? " " : "", w);
+}
+
+static int flexraid(int argc, char **argv)
+{
+	static struct disk D[MAXD];
+	static struct mdm M[MAXM];
+	struct part P[MAXP];
+	int nd = argc, nm = 0, na = 0, i, j, a, np;
+
+	if (nd < 1 || nd > MAXD)
+		die("1 to %d disks", MAXD);
+	for (i = 0; i < nd; i++) {
+		open_disk(&D[i], argv[i]);
+		if (read_at(D[i].fd, 0, D[i].mbr, 512) || D[i].mbr[510] != 0x55 || D[i].mbr[511] != 0xAA)
+			continue;
+		np = read_parts(D[i].mbr, D[i].fd, P);
+		for (j = 0; j < np && nm < MAXM; j++)
+			if (md_read(D[i].fd, D[i].path, &P[j], &M[nm]))
+				nm++;
+	}
+	/* arrays = members sharing a set UUID, in order of appearance */
+	for (i = 0; i < nm; i++) {
+		M[i].grp = -1;
+		for (j = 0; j < i && M[i].grp < 0; j++)
+			if (!memcmp(M[i].uuid, M[j].uuid, sizeof(M[i].uuid)))
+				M[i].grp = M[j].grp;
+		if (M[i].grp < 0 && na < MAXA)
+			M[i].grp = na++;
+	}
+	if (json)
+		printf("{\"arrays\":[");
+	else
+		printf("FR_NR_ARRAYS=%d\n", na);
+	for (a = 0; a < na; a++) {
+		const struct mdm *r = NULL, *best = NULL, *by_role[MAXM];
+		char why[160] = "", table[512] = "", lvl[16];
+		u64 ev = 0, sectors = 0;
+		int usable = 0, insync = 0, stale = 0, dup = 0;
+		for (i = 0; i < nm; i++)
+			if (M[i].grp == a && (!r || M[i].events > ev))
+				r = &M[i], ev = M[i].events;
+		for (i = 0; i < nm; i++)
+			if (M[i].grp != a)
+				continue;
+			else if (M[i].events != ev)
+				stale = 1;
+			else if (M[i].level != r->level || M[i].raid_disks != r->raid_disks || M[i].chunk != r->chunk)
+				add_word(why, sizeof(why), "inconsistent");
+		for (i = 0; i < nm; i++)	/* two arrays claiming the same md minor */
+			if (M[i].grp >= 0 && M[i].grp < a && M[i].minor == r->minor)
+				dup = 1;
+		if ((int)r->level == 0) snprintf(lvl, sizeof(lvl), "raid0");
+		else if (r->level == 1) snprintf(lvl, sizeof(lvl), "raid1");
+		else if ((int)r->level == -1) snprintf(lvl, sizeof(lvl), "linear");
+		else snprintf(lvl, sizeof(lvl), "raid%d", (int)r->level);
+		if (r->version != 90)
+			add_word(why, sizeof(why), "version");
+		else if (dup)
+			add_word(why, sizeof(why), "same_minor");
+		else if (*why)
+			;
+		else if (r->level == 1) {
+			for (i = 0; i < nm; i++)
+				if (M[i].grp == a && !strcmp(md_state(&M[i], ev), "in_sync")) {
+					insync++;
+					if (!best || M[i].role < best->role)
+						best = &M[i];
+				}
+			sectors = (u64)r->size * 2;
+			if (!best)
+				add_word(why, sizeof(why), "no_member_in_sync");
+			else if (!sectors || sectors > best->data)
+				add_word(why, sizeof(why), "size");
+			else {
+				usable = 1;
+				snprintf(table, sizeof(table), "0 %llu linear %s %llu", sectors, best->path, best->start);
+			}
+			if (insync < (int)r->raid_disks)
+				add_word(why, sizeof(why), "degraded");
+		} else if ((int)r->level == 0) {
+			unsigned cs = r->chunk / 512, n = r->raid_disks, k;
+			u64 each = 0;
+			int ok = n >= 1 && n <= MAXM && cs >= 8 && !(cs & (cs - 1)) && !(r->chunk & 511);
+			if (!ok)
+				add_word(why, sizeof(why), "layout");
+			for (k = 0; ok && k < n; k++) {
+				by_role[k] = NULL;
+				for (i = 0; i < nm; i++)
+					if (M[i].grp == a && M[i].role == (int)k && !strcmp(md_state(&M[i], ev), "in_sync"))
+						by_role[k] = &M[i];
+				if (!by_role[k]) {
+					add_word(why, sizeof(why), "missing_member");
+					ok = 0;
+				} else if (k && (by_role[k]->data & ~(u64)(cs - 1)) != each) {
+					/* ponytail: md's multi-zone RAID 0 (members of different
+					 * sizes) is not mapped; RAIDiator partitions every disk
+					 * alike. Map the extra zones here if a real one shows up. */
+					add_word(why, sizeof(why), "sizes_differ");
+					ok = 0;
+				} else
+					each = by_role[k]->data & ~(u64)(cs - 1);
+			}
+			if (ok && each) {
+				int l;
+				usable = 1;
+				sectors = each * n;
+				l = snprintf(table, sizeof(table), "0 %llu striped %u %u", sectors, n, cs);
+				for (k = 0; k < n && l < (int)sizeof(table); k++)
+					l += snprintf(table + l, sizeof(table) - l, " %s %llu", by_role[k]->path, by_role[k]->start);
+				if (l >= (int)sizeof(table))
+					usable = 0, *table = 0, add_word(why, sizeof(why), "layout");
+			}
+		} else
+			add_word(why, sizeof(why), "level");
+		if (stale)
+			add_word(why, sizeof(why), "stale_member");
+		if (!(r->state & 1))
+			add_word(why, sizeof(why), "unclean");
+		if (json) {
+			char *w, *s;
+			printf("%s{\"minor\":%u,\"uuid\":\"%08x:%08x:%08x:%08x\",\"level\":\"%s\",\"raid_disks\":%u,\"chunk\":%u,\"sectors\":%llu,\"usable\":%d,\"clean\":%u,\"byte_order\":\"%s\",\"read\":\"%s\",\"members\":[",
+			       a ? "," : "", r->minor, r->uuid[0], r->uuid[1], r->uuid[2], r->uuid[3], lvl, r->raid_disks,
+			       r->chunk, usable ? sectors : 0, usable, r->state & 1, r->le ? "le" : "be",
+			       usable && best ? best->path : "");
+			for (i = 0, j = 0; i < nm; i++)
+				if (M[i].grp == a)
+					printf("%s{\"path\":\"%s\",\"part\":%d,\"role\":%d,\"state\":\"%s\",\"events\":%llu}",
+					       j++ ? "," : "", M[i].path, M[i].part, M[i].role, md_state(&M[i], ev), M[i].events);
+			printf("],\"reasons\":[");
+			for (s = why, j = 0; (w = strtok(s, " ")); s = NULL)
+				printf("%s\"%s\"", j++ ? "," : "", w);
+			printf("]}");
+		} else {
+			printf("FR_A%d='%u %s %d %llu'\n", a, r->minor, lvl, usable, usable ? sectors : 0);
+			printf("FR_A%d_TABLE='%s'\n", a, table);
+			printf("FR_A%d_REASONS='%s'\n", a, why);
+		}
+	}
+	if (json)
+		printf("]}\n");
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	int k = 0, list = 0;
@@ -1335,7 +1528,8 @@ int main(int argc, char **argv)
 	const char *cmd = "analyse";
 
 	argc--, argv++;
-	if (argc && (!strcmp(argv[0], "verify") || !strcmp(argv[0], "smart") || !strcmp(argv[0], "quick")))
+	if (argc && (!strcmp(argv[0], "verify") || !strcmp(argv[0], "smart") || !strcmp(argv[0], "quick")
+		     || !strcmp(argv[0], "flexraid")))
 		cmd = argv[0], argc--, argv++;
 	while (argc && argv[0][0] == '-' && argv[0][1] == '-') {
 		if (!strcmp(argv[0], "--json"))
@@ -1358,6 +1552,8 @@ int main(int argc, char **argv)
 		return verify(argc, argv, zone);
 	if (!strcmp(cmd, "quick"))
 		return quick(argc, argv, k, seed, list);
+	if (!strcmp(cmd, "flexraid"))
+		return flexraid(argc, argv);
 	if (!strcmp(cmd, "smart")) {
 		if (argc != 1)
 			die("smart: one disk");

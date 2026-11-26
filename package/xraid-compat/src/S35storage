@@ -1,6 +1,7 @@
 #!/bin/sh
 # Data volume /c: existing X-RAID (compatibility, rw or ro depending on the
-# safeguards) or an existing md RAID. Before S60nfs and S70ksmbd. See
+# safeguards) or RAIDiator md volumes (X-RAID off,
+# "Flex-RAID", read-only). Before S60nfs and S70ksmbd. See
 # docs/XRAID.md. While running, "nas-raid watch" every 30 s: a leg that fails
 # under a read-write X-RAID is recorded in the superblock and /c goes read-only.
 PID=/var/run/nas-raid.watch.pid

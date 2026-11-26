@@ -315,3 +315,34 @@ full list, with the new write paths, is in docs/XRAID.md §9:
    disk. This validates proposal 3.
 3. **After a Linux read-write session** (no superblock writer): boot
    RAIDiator and compare its view with the data written under Linux.
+
+## 6. RAIDiator with X-RAID off (md mode, "Flex-RAID")
+
+Reference for `xraid-info flexraid` and `nas-raid` (docs/XRAID.md §10).
+When the X-RAID function bit of the flash is 0, RAIDiator does not use the
+X-RAID sections at all: its `linuxrc` builds ordinary Linux md arrays
+[script][dec], sure.
+
+| Item | Value | Source, certainty |
+|---|---|---|
+| Partitions (factory install) | p1 [32, +4,096,000) root, p2 swap, p3 data, all type `0xfd`, same table on every disk | [script], sure |
+| Arrays (factory install) | `md0` root RAID 1, `md1` swap (RAID 1 on 2 disks), `md2` data: RAID 1 on 2 disks, RAID 0 on 1, RAID 5 on 3+ | [script], sure |
+| Chunk | `mdconfig … -c 16`: 16 KiB | [script], likely (unit of `-c` not checked) |
+| Data volume | LVM on `md2`: VG `c`, LV `c` (32 MiB extents), ext3 mounted on `/c` | [script], sure |
+| Other volumes | created later by Frontview (not by `linuxrc`): partitions, levels and VG names not seen; RAIDiator's fstab mounts each VG `x` (LV `x`) on `/x` | [script] for the fstab, **uncertain** for the rest |
+| md superblock | **0.90**, last 64 KiB of each member, data from sector 0 | [GPL], sure |
+| Byte order | **little-endian** (x86 layout): `md.c` calls `padre_NSPIO.init(padre_1_xm)` around every superblock read and write, which byte-swaps it (`swab_sb`) | [GPL][dec], likely; a PC assembles these arrays as they are |
+
+Consequences for the big-endian 6.18 kernel: it rejects these superblocks
+("invalid raid superblock magic", harmless at autodetect), and
+`mdadm --update=byteorder` would rewrite them big-endian, unreadable for
+RAIDiator. So `xraid-info flexraid` reads them itself in either byte order
+(the 32-bit words swapped; `events_lo`/`events_hi` are words 39/40 in the
+x86 layout, 40/39 in the native one) and `nas-raid` maps them with
+read-only dm targets, without md: RAID 1 = `linear` on one up-to-date,
+in-sync member; RAID 0 = `striped`, members in `raid_disk` order, chunk from
+the superblock. md's multi-zone RAID 0 (members of different sizes) is
+refused, not mapped: RAIDiator partitions every disk alike.
+
+To settle the uncertain points, `xraid-info flexraid --json`, `fdisk -l`,
+`pvs` and `lvs` of a real Flex-RAID Duo (all read-only).

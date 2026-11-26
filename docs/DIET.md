@@ -509,7 +509,7 @@ Metrics (prefix `readynas_`, base units):
 | `filesystem_size_bytes`, `filesystem_free_bytes` | gauge | `mountpoint` (/c) |
 | `disk_smart_passed`, `disk_{reallocated,pending,offline_uncorrectable}_sectors`, `disk_power_on_seconds`, `disk_power_cycles`, `disk_smart_temperature_celsius` (last reading of diet-hwmon, see [SMART](#smart)) | gauge | `device` |
 | `service_up` | gauge | `service` (ksmbd, web, ssh, ntpd, fan, hwmon, nfs) |
-| `storage_mode_info` (1) | gauge | `mode` (xraid-rw, xraid-ro, md…), `reasons` |
+| `storage_mode_info` (1) | gauge | `mode` (xraid-rw, xraid-ro, flexraid-ro, none), `reasons` |
 | `xraid_writable`, `xraid_superblock_clean`, `xraid_disks_online`, `xraid_disks_failed`, `xraid_sections`, `xraid_sections_synced` | gauge | |
 | `xraid_check_result` (1), `xraid_check_timestamp_seconds` | gauge | `check` (full, quick), `result` (ok, differences, errors, incomplete, confirm, accepted, running) |
 

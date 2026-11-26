@@ -559,14 +559,14 @@ check "svc_set smb 1: SVC_SMB=1, S70ksmbd start" '[ "$ST" = 200 ] && grep -q "^S
 api GET a=services
 check "services: smb on and running" "json 'j[\"smb\"]=={\"on\":1,\"run\":1}'"
 
-# ---------- storage: X-RAID (compatibility) and md, through nas-raid ----------
+# ---------- storage: X-RAID (compatibility) and Flex-RAID, through nas-raid ----------
 # real nas-raid and xraid-info built for the host, on fake X-RAID images
 XC=$HERE/../../xraid-compat
 cc -O2 -o "$R"/bin/xraid-info "$XC"/src/xraid-info.c && cc -O2 -o "$R"/bin/xraid-sb "$XC"/src/xraid-sb.c && ln -s "$XC"/src/nas-raid "$R"/bin/nas-raid
-for s in clean dirty degraded md; do python3 "$XC"/tests/make-images.py "$R/img/$s" $s > /dev/null; done
+for s in clean dirty degraded flexraid; do python3 "$XC"/tests/make-images.py "$R/img/$s" $s > /dev/null; done
 stk() {	# stk scenario "content of nas-raid.mode"
 	export NAS_RAID_DISKS="$(ls "$R/img/$1"/*.img | tr '\n' ' ')"
-	echo "$2" > "$R"/var/run/nas-raid.mode; rm -f "$R"/var/run/xraid.json
+	echo "$2" > "$R"/var/run/nas-raid.mode; rm -f "$R"/var/run/xraid.json "$R"/var/run/flexraid.json
 	api GET a=storage
 }
 stk clean xraid-rw
@@ -583,8 +583,10 @@ check "storage, dirty X-RAID: read-only, reason unclean_shutdown" "json 'j[\"mod
 stk degraded 'xraid-ro missing_disk'
 check "storage, degraded X-RAID: read-only, a single disk" "json 'j[\"xraid\"][\"mirror\"]==\"\" and j[\"xraid\"][\"reasons\"][0][\"code\"]==\"missing_disk\"'"
 check "storage layout, degraded: the bay without its disk is missing" "json '[m[\"state\"] for m in j[\"layout\"][\"members\"]].count(\"missing\")==1 and len(j[\"layout\"][\"members\"])==2'"
-stk md md
-check "storage md: mode md, no X-RAID layout" "json 'j[\"mode\"]==\"md\" and j[\"layout\"] is None'"
+echo "FR_DMS='fr-md2 fr-md3' FR_VGS='c d' FR_MNTS='/c /d'" > "$R"/var/run/flexraid.state
+stk flexraid 'flexraid-ro'
+check "storage Flex-RAID: mode flexraid-ro, mounted volumes, RAID 1 and RAID 0 arrays, no X-RAID layout" "json 'j[\"mode\"]==\"flexraid-ro\" and j[\"flexraid_mounts\"]==\"/c /d\" and [(a[\"minor\"],a[\"level\"],a[\"usable\"]) for a in j[\"flexraid\"][\"arrays\"]][2:]==[(2,\"raid1\",1),(3,\"raid0\",1)] and j[\"layout\"] is None'"
+rm -f "$R"/var/run/flexraid.state
 stk clean xraid-rw
 # md wizards: disabled for now (409), nas-raid not started
 : > "$R"/cmd.log
@@ -641,9 +643,9 @@ export NAS_RAID_DISKS="$(ls "$R/img/clean"/*.img | tr '\n' ' ')"; rm -f "$R"/var
 echo 'xraid-rw' > "$R"/var/run/nas-raid.mode
 api POST a=xraid_rw 'on=0'
 check "xraid_rw off: no heavy confirmation, XRAID_RW=no, remounted read-only (rw_disabled)" '[ "$ST" = 200 ] && grep -qx "XRAID_RW=no" "$R"/etc/nas-raid.conf && grep -qx "SAMPLES=8" "$R"/etc/nas-raid.conf && grep -q "xraid-ro rw_disabled" "$R"/var/run/nas-raid.mode'
-echo md > "$R"/var/run/nas-raid.mode
+echo flexraid-ro > "$R"/var/run/nas-raid.mode
 api POST a=xraid_rw 'on=1&confirm=WRITE&yes=1'
-check "xraid_rw: refused on an md volume (409)" '[ "$ST" = 409 ] && grep -qx "XRAID_RW=no" "$R"/etc/nas-raid.conf'
+check "xraid_rw: refused on Flex-RAID volumes (409)" '[ "$ST" = 409 ] && grep -qx "XRAID_RW=no" "$R"/etc/nas-raid.conf'
 api POST a=xraid_rw 'on=2'
 check "xraid_rw: invalid value refused" '[ "$ST" = 400 ]'
 echo 'xraid-rw' > "$R"/var/run/nas-raid.mode; rm -f "$R"/etc/nas-raid.conf "$R"/etc/nas-raid.conf.bak "$R"/var/lib/nas-raid/xraid-dirty
@@ -1203,7 +1205,7 @@ src = open(sys.argv[1], encoding='utf-8').read()
 keys = {k.replace('\\"', '"') for k in re.findall(r'^  "((?:[^"\\]|\\.)*)": \["[^"]+", "[^"]+"\]', src, re.M)}
 js = src[src.index('<script>'):]
 need = set(m.group(2) for m in re.finditer(r"\bt\((['\"])((?:(?!\1).)*)\1", js))
-for tb in re.finditer(r'const (?:XR|NR|XRM|BUSYT|MST) = \{(.*?)\};', js, re.S):
+for tb in re.finditer(r'const (?:XR|NR|FRR|XRM|BUSYT|MST) = \{(.*?)\};', js, re.S):
     need |= set(re.findall(r":\s*'([^']*)'", tb.group(1)))
 class P(html.parser.HTMLParser):
     skip = 0

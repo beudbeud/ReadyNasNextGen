@@ -78,7 +78,7 @@ cache (`status`, `all`, `storage`, …) stay cheap otherwise.
 |---|---|
 | `status` | host, version, model, IP, uptime, load, board temperature, fan, services, disks (temperature, SMART summary with the self-test state: `selftest` = last status nibble, 0 done or never run, 1 aborted, 2 interrupted, 3–8 failed, 15 running; `left` %, `short_min`/`long_min`; `null` without smart-lite), memory, `/c` usage, raw counters (CPU, network, disk), md arrays, `busy` (operations a restart would cut short) |
 | `all` | `{"status":…, "storage":…, "hist":"…"}` (what the page loads first) |
-| `storage` | X-RAID / md state from `nas-raid status --json`: mode, reasons, verify and quick check, superblock; plus `layout` (below) |
+| `storage` | X-RAID / md state from `nas-raid status --json`: mode, reasons, verify and quick check, superblock; Flex-RAID (mode `flexraid-ro`): `flexraid_mounts` and `flexraid.arrays` (docs/XRAID.md §10); plus `layout` (below) |
 | `config` | spin-down and fan curve |
 | `sys` | name, language, time zone, network, Telegram set, SSH, SMB3 encryption, `metrics` (0 off, 1 token, 2 open) |
 | `shares`, `users`, `nfs`, `services` | lists for the Shares page |
@@ -108,8 +108,8 @@ bays, for the page and for scripts; it is computed from the `xraid` object
   the superblock without a disk: `dev` and `role` empty).
 - `rebuild`: whole percentage of an md resync/recovery/reshape running in
   `/proc/mdstat`, otherwise `null`.
-- `layout` is `null` without an X-RAID superblock and for an md volume (its
-  arrays are in `status.md`).
+- `layout` is `null` without an X-RAID superblock and in Flex-RAID mode (its
+  arrays are in `storage.flexraid`).
 
 `status`, `all`, `storage`, `services`, `shares`, `nfs`, `sys`, `users` and
 `config` come from the collector cache when it is fresh (docs/DIET.md

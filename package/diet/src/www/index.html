@@ -648,7 +648,22 @@ const I18N = {
   "Start": ["Lancer", "Starten"],
   "X-RAID, read and write": ["X-RAID, lecture et écriture", "X-RAID, Lesen und Schreiben"],
   "X-RAID, read-only": ["X-RAID, lecture seule", "X-RAID, nur Lesen"],
-  "md RAID": ["RAID md", "RAID md"],
+  "Flex-RAID (md), read-only": ["Flex-RAID (md), lecture seule", "Flex-RAID (md), nur Lesen"],
+  "Volumes": ["Volumes", "Volumes"],
+  "readable": ["lisible", "lesbar"],
+  "RAIDiator md volumes found, none could be mounted": ["Volumes md de RAIDiator trouvés, aucun n’a pu être monté", "md-Volumes von RAIDiator gefunden, keines konnte eingehängt werden"],
+  "a member is missing or not in sync": ["un membre manque ou n’est pas synchronisé", "ein Mitglied fehlt oder ist nicht synchron"],
+  "a member is out of date": ["un membre n’est pas à jour", "ein Mitglied ist veraltet"],
+  "not cleanly stopped by RAIDiator": ["mal arrêté par RAIDiator", "von RAIDiator nicht sauber beendet"],
+  "a member is missing: not readable": ["un membre manque : illisible", "ein Mitglied fehlt: nicht lesbar"],
+  "members of different sizes: not readable": ["membres de tailles différentes : illisible", "Mitglieder unterschiedlicher Größe: nicht lesbar"],
+  "no member in sync: not readable": ["aucun membre synchronisé : illisible", "kein synchrones Mitglied: nicht lesbar"],
+  "RAID level not supported": ["niveau RAID non pris en charge", "RAID-Level nicht unterstützt"],
+  "layout not supported": ["disposition non prise en charge", "Anordnung nicht unterstützt"],
+  "md superblock version not supported": ["version de superbloc md non prise en charge", "md-Superblock-Version nicht unterstützt"],
+  "the superblocks of the members disagree": ["les superblocs des membres ne concordent pas", "die Superblöcke der Mitglieder stimmen nicht überein"],
+  "two arrays with the same md number": ["deux grappes avec le même numéro md", "zwei Verbünde mit derselben md-Nummer"],
+  "inconsistent size": ["taille incohérente", "inkonsistente Größe"],
   "no volume": ["aucun volume", "kein Volume"],
   "Section {0}": ["Section {0}", "Bereich {0}"],
   "in sync": ["synchronisée", "synchron"],
@@ -1015,8 +1030,14 @@ const XR = {version:'unknown superblock version (0.1.0 expected)', level:'level 
 // reasons added by nas-raid
 const NR = {rw_disabled:'writing disabled (switch “Allow writing on the X-RAID”)', unclean_shutdown_linux:'unclean shutdown under Linux: check the mirror',
   unclean_shutdown_verified:'unclean RAIDiator shutdown, mirror checked since', migration_in_progress:'migration to md in progress',
-  no_sb_writer:'superblock writer (xraid-sb) missing: read-only only', sb_write_failed:'the superblock could not be marked “in use”'};
-const XRM = {'xraid-rw':'X-RAID, read and write', 'xraid-ro':'X-RAID, read-only', 'md':'md RAID', 'none':'no volume'};
+  no_sb_writer:'superblock writer (xraid-sb) missing: read-only only', sb_write_failed:'the superblock could not be marked “in use”',
+  flexraid_failed:'RAIDiator md volumes found, none could be mounted'};
+// reasons of an md array of RAIDiator with X-RAID off (xraid-info flexraid)
+const FRR = {degraded:'a member is missing or not in sync', stale_member:'a member is out of date', unclean:'not cleanly stopped by RAIDiator',
+  missing_member:'a member is missing: not readable', sizes_differ:'members of different sizes: not readable',
+  no_member_in_sync:'no member in sync: not readable', level:'RAID level not supported', layout:'layout not supported',
+  version:'md superblock version not supported', inconsistent:'the superblocks of the members disagree', same_minor:'two arrays with the same md number', size:'inconsistent size'};
+const XRM = {'xraid-rw':'X-RAID, read and write', 'xraid-ro':'X-RAID, read-only', 'flexraid-ro':'Flex-RAID (md), read-only', 'none':'no volume'};
 // Storage health, on the dashboard and the storage page: degraded (a member failed
 // or missing, an md array not complete) > rebuilding (N %) > read-only > OK.
 // Member counts from storage.layout (X-RAID), otherwise from the disks of the status.
@@ -1032,7 +1053,7 @@ function health(){
   if(!last.c.size){ st = t('not mounted'); c = 'bad'; }
   else if(bad || mdBad){ st = t('Degraded'); c = 'bad'; }
   else if(rebuilding){ st = pct!=null && !isNaN(pct) ? t('Rebuilding {0} %', pct) : t('Rebuilding'); c = 'warn'; }
-  else if(stk && stk.mode==='xraid-ro'){ st = t('Read-only'); c = 'warn'; }
+  else if(stk && (stk.mode==='xraid-ro' || stk.mode==='flexraid-ro')){ st = t('Read-only'); c = 'warn'; }
   else { st = t('OK'); c = 'ok'; }
   const dsk = t('{0} disks in service / {1} failed', inUse, bad);
   for(const e of [$('#hst'), $('#vst')]){ e.textContent = st; e.style.color = 'var(--'+c+')'; }
@@ -1046,13 +1067,22 @@ async function loadStk(d){
   health();
   if(!stk || stk.mode==='absent'){ $('#xr').innerHTML=''; $('#xrb').innerHTML=''; $('#xrz').hidden = true; $('#xrtc').innerHTML=''; return; }
   const x = stk.xraid || {}, v = stk.verify || {}, lay = stk.layout;
-  const ok = stk.mode==='md' || stk.mode==='xraid-rw';
+  const ok = stk.mode==='xraid-rw';
   let h = `<div class="row"><span>${t('Mode')}</span><b style="color:var(--${ok?'ok':'warn'})">${esc(t(XRM[stk.mode]||stk.mode))}</b></div>`;
+  // Flex-RAID (RAIDiator md volumes, X-RAID off): mounted volumes, then one line per array and its reasons
+  const fr = stk.mode==='flexraid-ro';
+  if(fr){
+    h += `<div class="row"><span>${t('Volumes')}</span><span>${esc(stk.flexraid_mounts||'')}</span></div>`;
+    ((stk.flexraid||{}).arrays||[]).forEach(a=>{
+      const why = (a.reasons||[]).map(r=>t(FRR[r]||r)).join(', ');
+      h += `<div class="row"><span>md${a.minor} · RAID ${esc(a.level.replace(/^raid/, ''))}</span><span style="color:var(--${!a.usable?'bad':why?'warn':'ok'})">${esc(why || t('readable'))}</span></div>`;
+    });
+  }
   // reasons: xraid-info codes (English text, shown here in the page language), then the ones added by nas-raid
-  if(stk.mode!=='md') (x.reasons||[]).forEach(r=>{ h += `<div>· ${esc(XR[r.code] ? t(XR[r.code]) : r.text)}</div>`; });
+  if(!fr) (x.reasons||[]).forEach(r=>{ h += `<div>· ${esc(XR[r.code] ? t(XR[r.code]) : r.text)}</div>`; });
   // mode reasons: those of nas-raid, and xraid-info codes not in xraid.json (the
   // disk comparison, mirror_differs, only runs at a rw mount)
-  if(stk.mode!=='md'){ const shown = (x.reasons||[]).map(r=>r.code);
+  if(!fr){ const shown = (x.reasons||[]).map(r=>r.code);
     (stk.reasons||'').split(' ').filter(r=>NR[r] || (XR[r] && !shown.includes(r))).forEach(r=>{ h += `<div>· ${esc(t(NR[r] || XR[r]))}</div>`; }); }
   if(stk.xraid_rw==='yes' && stk.mode==='xraid-ro') h += `<div style="color:var(--warn)">${t('writing requested, refused by the safeguards above')}</div>`;
   // layout (API): level, then one line per bay with its generic role and its state
@@ -1102,13 +1132,13 @@ async function loadStk(d){
   // technical details: superblock as RAIDiator sees it (clean-stop bit, counters,
   // base and mirror roles of a RAID 1), sections
   let tc = '';
-  if(stk.mode!=='md' && x.version){
+  if(stk.mode!=='flexraid-ro' && x.version){
     tc += `<div class="row"><span>${t('Superblock')}</span><span style="color:var(--${x.clean?'ok':'warn'})">${esc(t(x.clean ? 'clean' : 'in use or unclean shutdown'))}</span></div>`;
     const r1 = !lay || lay.level==='raid1';
     (x.disks||[]).forEach(d=>{ tc += `<div class="row"><span>${esc(t('Bay {0}', d.channel+1))} · ${esc(d.path)}${r1 && d.role ? ' · '+esc(t(d.role)) : ''}</span><span style="color:var(--${d.state==='online'?'ok':'bad'})">${esc(t(d.state||'?'))}</span></div>`; });
     tc += `<div class="row"><span>${t('Disks')}</span><span>${esc(t('{0} working, {1} failed', x.working_disks, x.failed_disks))}</span></div>`;
   }
-  if(stk.mode!=='md') (x.sections||[]).forEach((s,i)=>{ tc += `<div class="row"><span>${t('Section {0}', i)}</span><span>${kb(s.sectors/2)} · ${s.init===0 ? t('sync unfinished') : t('in sync')}</span></div>`; });
+  if(stk.mode!=='flexraid-ro') (x.sections||[]).forEach((s,i)=>{ tc += `<div class="row"><span>${t('Section {0}', i)}</span><span>${kb(s.sectors/2)} · ${s.init===0 ? t('sync unfinished') : t('in sync')}</span></div>`; });
   $('#xrtc').innerHTML = tc;
   const b = [];
   if(x.base && x.mirror && !busy) b.push(`<button class="b" data-x="verify">${t('Check the volume consistency')}</button>`, `<button class="b" data-x="quick">${t('Quick check')}</button>`);

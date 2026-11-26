@@ -4,7 +4,8 @@ This document describes the `package/xraid-compat` package: read **and write** t
 X-RAID volume created by RAIDiator (ReadyNAS Duo v1, 2 mirrored disks) without
 converting it, keeping its superblock up to date the way RAIDiator does, so that
 RAIDiator can take the disks back at any time. **md (Linux software RAID) is
-disabled for now** (§6).
+disabled for now** (§6). The md volumes of a RAIDiator with X-RAID off
+("Flex-RAID", RAID 0/1) are mounted read-only (§10).
 
 **Status:** reading has been checked on the NAS (real superblocks, read-only
 mount). Writing, and the superblock updates that go with it, were only tried on
@@ -307,8 +308,7 @@ disabled for now: X-RAID only"), and so are the matching DIET actions. The
 former versions erased the end of the disks, the "WGam" mark included; without
 it RAIDiator's `linuxrc` reinstalls the NAS instead of reporting an error
 (docs/XRAID-FORMAT.md §1). A safer path that keeps section 0 is studied in
-docs/XRAID-MIGRATION.md (future work). An md volume made by an earlier version
-is still mounted.
+docs/XRAID-MIGRATION.md (future work).
 
 **Replacing a disk or expanding the volume** is left to RAIDiator, which knows
 how to rebuild and keeps its superblock consistent:
@@ -323,7 +323,7 @@ how to rebuild and keeps its superblock consistent:
 ## 7. DIET dashboard
 
 The "Storage /c" card shows the mode (X-RAID read-write, X-RAID
-read-only, md RAID), the reasons for a read-only mount, the superblock (clean,
+read-only, Flex-RAID read-only), the reasons for a read-only mount, the superblock (clean,
 or in use / unclean shutdown), each disk (bay, role, online/faulty/ready), the
 RAIDiator counters, the state of each section and the last mirror check. Buttons:
 "Check the mirror", "Quick check" (§5.1: state, progress, result, and
@@ -343,8 +343,9 @@ read-only with the reason (docs/DIET.md). API: `GET ?a=storage` (`nas-raid statu
 `tests/make-images.py` builds images as sparse files (750 GB
 apparent, a few MB real): superblock, copies, backup, "WGam", MBR on
 the base only, EBR, sections, made-up IDENTIFY data, with the clean, dirty,
-degraded, unfinished synchronisation, mismatched mirror, md disk, reinstall
-flag, failed-disk counters and torn superblock scenarios. The tests check
+degraded, unfinished synchronisation, mismatched mirror, reinstall
+flag, failed-disk counters and torn superblock scenarios, and Flex-RAID disks
+(RAID 1 + RAID 0, big-endian, one disk, stale member, leftover X-RAID superblock). The tests check
 detection, the JSON, the full check, the verdicts, the assembly
 commands (no table beyond V), the real `xraid-sb` on the images (byte for byte
 against the RAIDiator superblock: only the expected fields change, the four
@@ -404,6 +405,41 @@ after each one, read the four copies back with `dd` as above and compare with
    `nas-raid.mode` = `xraid-ro`, the base superblock shows the mirror
    `faulty`. Boot RAIDiator with the disk put back: it must take the base as
    reference and rebuild the mirror.
+
+## 10. RAIDiator md volumes (X-RAID off, "Flex-RAID"): read-only
+
+With X-RAID switched off in RAIDiator, the volumes are ordinary md arrays
+(RAID 1, RAID 0, several volumes on the same disks) whose md 0.90 superblocks
+RAIDiator stores little-endian (docs/XRAID-FORMAT.md §6). `nas-raid mount` looks
+for them **first**, before X-RAID: RAIDiator's md install erases only the start
+of the disks, so disks used in X-RAID before can keep an X-RAID superblock at
+their end (ignored then, with a line in the log), while X-RAID disks never hold
+md 0.90 superblocks in their partitions:
+
+1. `xraid-info flexraid` reads the md 0.90 superblock of every partition of
+   the SATA disks (either byte order, opened read-only), groups the members by
+   array UUID and keeps those with the newest event count.
+2. Each usable array becomes a **read-only** dm device `fr-md<N>` (N = md
+   number): RAID 1 = `linear` on one in-sync member (the RAID 1 volumes stay
+   readable with one disk); RAID 0 = `striped` over all its members in role
+   order (refused if one is missing or out of date: `missing_member`).
+3. LVM on top, metadata read-only, every VG in `read_only_volume_list`; VG
+   `c` is mounted on `/c`, any other one-letter VG `x` (LV `x`, RAIDiator's
+   naming) on `/x`; ext4 read-only (`noload` if a journal is left to replay).
+   Snapshots and other LVs are not mounted.
+
+Mode: `flexraid-ro` with the reasons of the arrays (`degraded`,
+`stale_member`, `unclean`, `missing_member`…), or `none flexraid_failed` if
+nothing could be mounted (everything undone). Nothing is ever written: no md,
+no md or LVM metadata, dm and ext4 read-only; writing is not offered (no
+switch). `nas-raid status --json` adds `flexraid` (the arrays, from
+`xraid-info flexraid --json`) and `flexraid_mounts`; the DIET card shows the
+mounted volumes and one line per array.
+
+Limits: only `/c` can hold shares (SMB, NFS, DLNA): other volumes are
+readable over SSH (rsync, scp) only. md's multi-zone RAID 0 (members of
+different sizes) and RAID 5 are refused. Checked on disk images only (§8),
+not yet on a real Flex-RAID NAS.
 
 ## Files
 

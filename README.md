@@ -32,7 +32,8 @@ touching the original firmware.
   WebDAV. Out of the box only SMB, the web interface and SSH run.
 - **Your existing X-RAID disks** are used as they are, read-only by default, and stay
   readable by RAIDiator (its superblock is kept up to date). Planned: switching to a
-  standard Linux RAID1 (md), disabled for now.
+  standard Linux RAID1 (md), disabled for now. Disks of a RAIDiator with X-RAID
+  switched off ("Flex-RAID": RAID 1 and/or RAID 0 volumes) are mounted read-only.
 - **Temperature-controlled fan**: the NAS stays quiet when idle.
 - **Hardware clock** read at boot, then kept accurate over the network (NTP).
 - The **original firmware stays intact**: without the USB stick, the NAS starts RAIDiator
@@ -189,6 +190,12 @@ synchronisation) and refuses when in doubt.
 Writing to an X-RAID volume (a switch in the Storage card of the web interface) is possible;
 it is described, with its precautions, in [docs/XRAID.md](docs/XRAID.md). Migrating to a
 standard Linux RAID1 is disabled for now ([docs/XRAID-MIGRATION.md](docs/XRAID-MIGRATION.md)).
+
+**Flex-RAID** (RAIDiator with X-RAID switched off: md volumes in RAID 1 or RAID 0, possibly
+several on the same disks): mounted **read-only**, volume `c` on `/c` and any other volume
+`x` on `/x`; nothing is written to the disks. Only `/c` can hold shares, the other volumes
+are reachable over SSH. Checked on disk images only so far
+([docs/XRAID.md §10](docs/XRAID.md#10-raidiator-md-volumes-x-raid-off-flex-raid-read-only)).
 
 ## Current limitations
 

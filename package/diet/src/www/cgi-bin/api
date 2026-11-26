@@ -1161,14 +1161,14 @@ rsync_pw() {
 storage_get() {
   command -v nas-raid >/dev/null 2>&1 || { echo '{"mode":"absent"}'; return; }
   J=$(nas-raid status --json 2>/dev/null) || { echo '{"mode":"error"}'; return; }
-  case $J in '{"mode":"md"'*'}') L2=null;; '{'*'}') L2=$(printf '%s\n' "$J" | layout_json);; *) echo '{"mode":"error"}'; return;; esac
+  case $J in '{"mode":"flexraid-ro"'*'}') L2=null;; '{'*'}') L2=$(printf '%s\n' "$J" | layout_json);; *) echo '{"mode":"error"}'; return;; esac
   [ -n "$L2" ] || L2=null	# never an empty value: it would break the whole answer
   printf '%s,"layout":%s}\n' "${J%\}}" "$L2"
 }
 # layout: the volume as the page draws it, whatever the number of bays
 # (docs/API.md): {"level":"raid1","members":[{"bay":1,"dev":"sda","role":"base",
 # "state":"online"}],"rebuild":null|percent}; null without an X-RAID superblock
-# and for an md volume (its arrays are in status.md).
+# and in Flex-RAID mode (its arrays are in storage.flexraid).
 # Read from the "xraid" object of nas-raid status (xraid-info, its last key):
 # bay = channel + 1; states online, failed (faulty or unknown), rebuilding
 # (spare, ready), missing (a channel below nr_disks without a disk). rebuild =
@@ -1287,7 +1287,7 @@ xraid_rw() {
     # refused (busy) or failed: old configuration back, volume mounted again if needed
     if [ -f "$NRCONF.bak" ]; then mv "$NRCONF.bak" "$NRCONF"; else rm -f "$NRCONF"; fi
     m=; read -r m _ 2>/dev/null < "$RUN/nas-raid.mode"
-    case "$m" in xraid-*|md) ;; *) nas-raid mount >/dev/null 2>&1;; esac
+    case "$m" in xraid-*|flexraid-*) ;; *) nas-raid mount >/dev/null 2>&1;; esac
   fi
   for s in S70ksmbd S60nfs S60minidlnad S61rsyncd S51webdav; do "$INITD/$s" start </dev/null >/dev/null 2>&1; done
   invalidate
@@ -1314,7 +1314,7 @@ auto_rw() {
   for s in $XRSVC; do "$INITD/$s" stop </dev/null >/dev/null 2>&1; done
   nas-raid remount >/dev/null 2>&1
   m=; read -r m _ 2>/dev/null < "$RUN/nas-raid.mode"
-  case "$m" in xraid-*|md) ;; *) nas-raid mount >/dev/null 2>&1;; esac	# refused (busy): mounted again
+  case "$m" in xraid-*|flexraid-*) ;; *) nas-raid mount >/dev/null 2>&1;; esac	# refused (busy): mounted again
   for s in S70ksmbd S60nfs S60minidlnad S61rsyncd S51webdav; do "$INITD/$s" start </dev/null >/dev/null 2>&1; done
   invalidate
   m=; read -r m _ 2>/dev/null < "$RUN/nas-raid.mode"; [ "$m" = xraid-rw ]
