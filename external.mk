@@ -9,6 +9,12 @@ include $(sort $(wildcard $(BR2_EXTERNAL_READYNAS_NG_PATH)/package/*/*.mk))
 LINUX_MAKE_ENV += KBUILD_BUILD_USER=readynasng KBUILD_BUILD_HOST=build
 # - sqlite3 shell: assert() messages carry __FILE__ (absolute path of shell.c)
 SQLITE_CFLAGS += -ffile-prefix-map=$(BASE_DIR)/=
+# - uClibc's getconf: GETCONF_DIR (where "getconf -v" looks for its specs) is
+#   the build folder; glibc's place instead (nothing is installed there)
+define READYNAS_NG_UCLIBC_GETCONF_DIR
+	sed -i "s|-DGETCONF_DIR='\"\$$(CURDIR)\"'|-DGETCONF_DIR='\"/usr/libexec/getconf\"'|" $(@D)/utils/Makefile.in
+endef
+UCLIBC_POST_PATCH_HOOKS += READYNAS_NG_UCLIBC_GETCONF_DIR
 # - ffmpeg: av*_configuration() return the configure command line, full of
 #   absolute paths of output/ (cross-prefix, sysroot, pkg-config): made relative
 define READYNAS_NG_FFMPEG_NO_PATHS
