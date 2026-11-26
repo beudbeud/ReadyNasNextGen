@@ -340,6 +340,27 @@ X-RAID sections at all: its `linuxrc` builds ordinary Linux md arrays
 | md superblock | **0.90**, last 64 KiB of each member, data from sector 0 | [GPL], sure |
 | Byte order | **mixed**, seen on the NAS's own kernel (tools/raidiator-bench/on-nas.sh): `md.c` calls `padre_NSPIO.init(padre_1_xm)` around every superblock read and write (`swab_sb`), which byte-swaps the 32-bit words of the generic sections and the disk descriptors **but keeps the SPARC word order** (`events_hi` in word 39, `events_lo` in word 40, where an x86 superblock has them the other way round) and **leaves the personality section big-endian** (`layout`, `chunk_size`: 16 KiB stored as `0x00004000` big-endian). A PC's md reads the magic, levels and sizes right but the chunk as 4096K: it assembles a RAIDiator RAID 1 correctly, **a RAID 0 wrongly**. `xraid-info flexraid` recognises the layout (word 39 = 0 while word 40 ≠ 0; `byte_order` `raidiator`) and reads the chunk big-endian | [bin][GPL][dec], sure |
 
+**Checksum and updates, seen on the NAS's own kernel** (tools/raidiator-bench):
+
+- `sb_csum` (word 38) = ones' complement sum (end-around carry) of the 1024
+  words of the superblock with word 38 counted as 0, each word **as RAIDiator's
+  kernel sees it**: little-endian, except words 42 (`cp_events_lo`) and 65
+  (`chunk_size`), stored unswapped (big-endian); 41 and 64 (`cp_events_hi`,
+  `layout`) are 0 on every superblock seen. Checked on 19 superblocks out of 19,
+  among them ones RAIDiator's kernel wrote at a stop. A word changed without
+  this correction: `md: invalid superblock checksum on sdX`, yet the array is
+  assembled anyway (a warning, not a refusal).
+- RAIDiator's md **does not mark a RAID 1 in use while it is written**: the
+  superblock on disk stays the same while the volume is mounted read-write and
+  written; at the stop it rewrites it: `utime`, events and `cp_events` + 6,
+  the members' device numbers (as found at this assembly), the checksum. A
+  superblock with the clean bit cleared and events ahead of `cp_events` does
+  not start a resync either (`sync_action` idle): after a crash, RAIDiator does
+  not resynchronise a mirror by itself.
+- The md driver of RAIDiator's kernel autodetects 0xfd partitions when they
+  appear (a USB key included): `mdconfig -a autorun` assembles them without
+  needing the device numbers recorded in the superblocks.
+
 Consequences for the big-endian 6.18 kernel: it rejects these superblocks
 ("invalid raid superblock magic", harmless at autodetect), and
 `mdadm --update=byteorder` would rewrite them big-endian, unreadable for

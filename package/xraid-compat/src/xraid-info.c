@@ -1443,6 +1443,7 @@ static int flexraid(int argc, char **argv)
 		const struct mdm *r = NULL, *best = NULL, *first = NULL, *by_role[MAXM];
 		const char *content = "";
 		char why[160] = "", table[512] = "", lvl[16];
+		int k;
 		u64 ev = 0, sectors = 0;
 		int usable = 0, insync = 0, stale = 0, dup = 0;
 		for (i = 0; i < nm; i++)
@@ -1554,6 +1555,16 @@ static int flexraid(int argc, char **argv)
 			printf("FR_A%d_TABLE='%s'\n", a, table);
 			printf("FR_A%d_REASONS='%s'\n", a, why);
 			printf("FR_A%d_CONTENT='%s'\n", a, content);
+			/* members for the superblock writer (flexraid-sb) and the RAID 1
+			 * read-write assembly: path:start:data:role:state, role order;
+			 * start = partition start, data = sectors before the superblock */
+			printf("FR_A%d_FORMAT='%s'\nFR_A%d_MEMBERS='", a, r->raidiator ? "raidiator" : r->le ? "le" : "be", a);
+			for (k = 0, j = 0; k < (int)MAXM; k++)
+				for (i = 0; i < nm; i++)
+					if (M[i].grp == a && M[i].role == k)
+						printf("%s%s:%llu:%llu:%d:%s", j++ ? " " : "", M[i].path, M[i].start, M[i].data,
+						       M[i].role, md_state(&M[i], ev));
+			printf("'\n");
 		}
 	}
 	if (json)
