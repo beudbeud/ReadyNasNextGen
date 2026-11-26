@@ -254,8 +254,8 @@ check "flexraid: X-RAID images hold no md 0.90 array" "[ \"\$(fr clean | head -n
 check "flexraid images: no X-RAID superblock" "[ \"\$(reasons flexraid)\" = no_xraid ]"
 check "flexraid: 4 arrays (root, swap, data RAID 1, data RAID 0), all usable" "fr flexraid | grep -qx FR_NR_ARRAYS=4 && [ \"\$(frv flexraid A2)\" = '2 raid1 1 1048448' ] && [ \"\$(frv flexraid A3)\" = '3 raid0 1 4357632' ]"
 check "flexraid: RAID 1 = linear on the first in-sync member, RAID 0 = striped in role order, 16 KiB chunk" "[ \"\$(frv flexraid A2_TABLE)\" = '0 1048448 linear $T/flexraid/sda.img 5144608' ] && [ \"\$(frv flexraid A3_TABLE)\" = '0 4357632 striped 2 32 $T/flexraid/sdb.img 6193192 $T/flexraid/sda.img 6193192' ]"
-check "flexraid: superblocks as a PC writes them (x86 layout) read alike" "[ \"\$(fr flexraid-x86 | sed 's/flexraid-x86/X/g')\" = \"\$(fr flexraid | sed 's/flexraid/X/g')\" ]"
-check "flexraid: big-endian superblocks read alike" "[ \"\$(fr flexraid-be | sed 's/flexraid-be/X/g')\" = \"\$(fr flexraid | sed 's/flexraid/X/g')\" ]"
+check "flexraid: superblocks as a PC writes them (x86 layout) read alike" "[ \"\$(fr flexraid-x86 | grep -v _FORMAT= | sed 's/flexraid-x86/X/g')\" = \"\$(fr flexraid | grep -v _FORMAT= | sed 's/flexraid/X/g')\" ]"
+check "flexraid: big-endian superblocks read alike" "[ \"\$(fr flexraid-be | grep -v _FORMAT= | sed 's/flexraid-be/X/g')\" = \"\$(fr flexraid | grep -v _FORMAT= | sed 's/flexraid/X/g')\" ]"
 # the dm tables, read back the way dm linear/striped map them, find what the images hold
 dmread() {	# dmread TABLE SECTOR LENGTH: bytes at SECTOR of the mapped device
 	python3 - "$@" <<'EOF'
