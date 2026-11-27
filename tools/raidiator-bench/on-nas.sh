@@ -253,6 +253,40 @@ sc_r5key() {
 	for n in 5 6 7 8; do echo "== $K$n" >> "$LOG"; mdc -a super -d "$K$n" || true; done
 	say "ok   md5 RAID 5 on ${K}5-8, rbc written (sha256 in $1/r5-random.sha256)"
 }
+# check5: r5key's RAID 5 after on-618.sh PHASE=r5w (md5 on its 4 members, no
+# resync) or PHASE=r5fail (md5 on roles 0-2, role 3 left out as stale), started
+# by RAIDiator's autorun; e2fsck -n, then the files of RAIDiator and of 6.18
+# (CHECK_DIR: on-618.sh's work folder, with its .sha256)
+sc_check5() {
+	C=${CHECK_DIR:?CHECK_DIR: the work folder of on-618.sh}
+	P=${PHASE:-r5w}
+	grep -q "^md5 " /proc/mdstat || mdc -a autorun
+	cat /proc/mdstat >> "$LOG"
+	grep -q "^md5 : active raid5" /proc/mdstat && say "ok   RAIDiator's kernel starts md5 (RAID 5)" || say "FAIL md5 not started"
+	if [ "$P" = r5fail ]; then
+		grep -A1 "^md5 :" /proc/mdstat | grep -q '\[4/3\] \[UUU_\]' && say "ok   md5 degraded: role 3, recorded as failed under 6.18, left out" || say "FAIL md5 not degraded on roles 0-2 (see $LOG)"
+	else
+		grep -A1 "^md5 :" /proc/mdstat | grep -q '\[4/4\] \[UUUU\]' && say "ok   md5 on its 4 members (written by 6.18)" || say "FAIL md5 not on its 4 members (see $LOG)"
+		sleep 5; grep -A2 "^md5 :" /proc/mdstat | grep -q 'resync\|recovery' && say "FAIL md5 resyncing (see $LOG)" || say "ok   md5: no resync started"
+	fi
+	echo rbc >> "$VGS"
+	lvm vgchange -ay rbc
+	tool e2fsck -n -f /dev/rbc/rbc && say "ok   RAIDiator's e2fsck -n: rbc (written by Linux 6.18) clean" || say "FAIL e2fsck -n on rbc (see $LOG)"
+	mkdir -p /tmp/rbmnt
+	run mount -t ext3 -o ro /dev/rbc/rbc /tmp/rbmnt
+	grep -q '^volume rbc' /tmp/rbmnt/hello.txt && say "ok   rbc: hello.txt (written by RAIDiator) still there" || say "FAIL rbc: hello.txt"
+	got=$(sha256sum < /tmp/rbmnt/r5-random.bin | cut -d' ' -f1)
+	if [ "$got" = "$(cat "$C/r5-random.sha256")" ]; then say "ok   rbc: r5-random.bin (RAIDiator's) intact"; else say "FAIL rbc: r5-random.bin sha256 $got"; fi
+	if [ "$P" = r5fail ]; then
+		got=$(sha256sum < /tmp/rbmnt/r5-after-fail.bin | cut -d' ' -f1)
+		if [ "$got" = "$(cat "$C/r5-after-fail.sha256")" ]; then say "ok   rbc: the file written after the failure, same sha256"; else say "FAIL rbc: r5-after-fail.bin sha256 $got"; fi
+	else
+		got=$(sha256sum < /tmp/rbmnt/r5-618.bin | cut -d' ' -f1)
+		if [ "$got" = "$(cat "$C/r5-618.sha256")" ]; then say "ok   rbc: r5-618.bin (written by 6.18), same sha256"; else say "FAIL rbc: r5-618.bin sha256 $got"; fi
+	fi
+	run umount /tmp/rbmnt
+	stop_all; NEXT=0
+}
 # delete: what mdconfig -a delete leaves on the members of a stopped array
 sc_delete() {
 	member "$1" d0p1 64; a=$L; member "$1" d1p1 64; c=$L

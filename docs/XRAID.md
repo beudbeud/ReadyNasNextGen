@@ -435,7 +435,7 @@ md 0.90 superblocks in their partitions:
    (`degraded`), two: `missing_member`. The kernel has `CONFIG_DM_RAID` for it
    and no `CONFIG_MD_AUTODETECT`: it never assembles an array itself (a RAID 5
    assembled by the kernel would resync, i.e. write, RAIDiator's disks).
-   RAID 5 stays read-only, even with `FLEXRAID_RW=yes`.
+   RAID 5 can be written too (below).
 3. LVM on top, metadata read-only, every VG in `read_only_volume_list`; VG
    `c` is mounted on `/c`, any other one-letter VG `x` (LV `x`, RAIDiator's
    naming) on `/x`; ext4 read-only (`noload` if a journal is left to replay).
@@ -461,6 +461,24 @@ active would corrupt the snapshot). The VG is left out of
 ext4 is mounted `errors=remount-ro`. Mode `flexraid-rw` as soon as one volume
 is writable.
 
+- RAID 5: the dm-raid table and its legs mapped without `--readonly`, with
+  the crash mark of a RAID 1 (below): `nosync` while it is absent; left by a
+  crash, the next read-write mount asks for `sync` (dm-raid without metadata
+  does not resync unless told, seen on the NAS) and md recomputes the parity
+  of the whole array (the write hole: a cut mid-stripe leaves a parity that no
+  longer matches the data; hours on big disks, the volume writable meanwhile).
+  Writing after any md sync (that resync, a check) needs the kernel patch
+  `linux/0032`: without it md never clears MD_SB_CHANGE_PENDING for a
+  dm-raid set without metadata and every later write hangs (seen on the NAS).
+  Health from `dmsetup status` (one letter per role: `A` in sync, `a` not yet,
+  `D` dead; the sync action): every role `A` and `idle` at the stop removes the
+  mark; one `D` is recorded on the other members by `flexraid-sb fail` (the
+  same words as for a RAID 1, events + 2); two `D` cannot be recorded (a RAID 5
+  outlives one failed member): the mark keeps them, read-only
+  (`failure_unrecorded`). Read-write also needs flexraid-sb to accept the
+  survivors of any member (`--dry-run`). Not covered: a power cut, then a disk
+  lost before the parity is recomputed (the stripes cut mid-write are rebuilt
+  wrong), and a power cut under RAIDiator.
 - RAID 0: the striped table, mapped without `--readonly`. Nothing to keep in
   sync, nothing written outside the file system.
 - RAID 1, 2 disks or more: each member's data area becomes a dm-linear leg
@@ -498,9 +516,7 @@ is writable.
 
 Limits: only `/c` can hold shares (SMB, NFS, DLNA): other volumes are reachable
 over SSH (rsync, scp) only. md's multi-zone RAID 0 (members of different sizes)
-are refused; RAID 5 is read-only (writing it means the write hole: a cut
-mid-stripe leaves a parity that no longer matches, to resync from metadata
-we do not have).
+are refused.
 
 Checked on the NAS (tools/raidiator-bench): arrays made by RAIDiator's own
 kernel and tools (RAID 1, RAID 0, failed, rebuilding, spare, single disk,

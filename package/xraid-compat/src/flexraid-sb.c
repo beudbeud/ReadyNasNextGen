@@ -1,8 +1,9 @@
 /*
- * flexraid-sb: records on the surviving members of a RAIDiator RAID 1 ("Flex-
- * RAID", X-RAID off) that the other members failed while Linux 6.18 wrote on
- * the mirror (docs/XRAID.md §10, docs/XRAID-FORMAT.md §6). Nothing else: a
- * healthy mirror written under 6.18 keeps its superblocks as they were.
+ * flexraid-sb: records on the surviving members of a RAIDiator RAID 1 or RAID 5
+ * ("Flex-RAID", X-RAID off) that the other members failed while Linux 6.18
+ * wrote on the array (RAID 5: exactly one) (docs/XRAID.md §10,
+ * docs/XRAID-FORMAT.md §6). Nothing else: a healthy array written under 6.18
+ * keeps its superblocks as they were.
  *
  *   flexraid-sb [--dry-run] fail SURVIVOR...
  *
@@ -17,7 +18,7 @@
  * two behind it leaves it out (degraded), and xraid-info finds it stale.
  * Every survivor is read and checked before anything is written: md 0.90 in
  * RAIDiator's layout (little-endian words in the SPARC word order), the same
- * RAID 1 of 2 to 27 disks, each one healthy (all members active, in sync) at
+ * RAID 1 of 2 to 27 disks (or RAID 5 of 3 to 27, md's same generic words), each one healthy (all members active, in sync) at
  * the same event count, or already holding this failure two events above (a
  * call stopped halfway: the rest is written). Refuses otherwise (exit 1).
  * The checksum is corrected by the difference of each word changed, in ones'
@@ -121,8 +122,8 @@ static int load(struct member *m, const char *arg)
 		return refuse(p, "not an md 0.90 superblock");
 	if (!(w(m, W_EV_HI) == 0 && w(m, W_EV_LO) != 0))
 		return refuse(p, "not RAIDiator's layout (events_hi in word 39)");
-	if (w(m, 7) != 1 || w(m, 10) < 2 || w(m, 10) > MAXR || w(m, 992) >= w(m, 10))
-		return refuse(p, "not a RAID 1 of 2 or more disks");
+	if (!((w(m, 7) == 1 && w(m, 10) >= 2) || (w(m, 7) == 5 && w(m, 10) >= 3)) || w(m, 10) > MAXR || w(m, 992) >= w(m, 10))
+		return refuse(p, "not a RAID 1 of 2 or more disks nor a RAID 5 of 3 or more");
 	if (w(m, W_EV_LO) >= 0xfffffffdu)
 		return refuse(p, "event count at its limit");
 	return 0;
@@ -201,7 +202,7 @@ int main(int argc, char **argv)
 	n = w(&m[0], 10);
 	memset(f, 1, sizeof(f));
 	for (i = 0; i < ns; i++) {
-		if (w(&m[i], 10) != n || memcmp(m[i].sb + 4 * 5, m[0].sb + 4 * 5, 4)
+		if (w(&m[i], 10) != n || w(&m[i], 7) != w(&m[0], 7) || memcmp(m[i].sb + 4 * 5, m[0].sb + 4 * 5, 4)
 		    || memcmp(m[i].sb + 4 * 13, m[0].sb + 4 * 13, 12))
 			return refuse(m[i].path, "not a member of the same array as the first survivor");
 		if (!f[w(&m[i], 992)])
@@ -210,6 +211,8 @@ int main(int argc, char **argv)
 	}
 	if ((unsigned)ns >= n)
 		return refuse(m[0].path, "no member left out: nothing failed");
+	if (w(&m[0], 7) == 5 && (unsigned)ns != n - 1)
+		return refuse(m[0].path, "a RAID 5 outlives one failed member, not more");
 	/* healthy survivors at one event count, already recorded ones (an
 	 * earlier call stopped halfway) two above it */
 	for (i = 0; i < ns; i++) {

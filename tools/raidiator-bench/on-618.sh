@@ -11,14 +11,19 @@
 # writing, the stop records it on role 0 (flexraid-sb fail). PHASE=r5: on-nas.sh
 # r5key's RAID 5 of 4 members (KEY5-8, RAIDiator's) read through dm-raid, read
 # only, whole then with KEY8 unreadable (degraded: read through the parity),
-# nothing on the key written (R5_SHA = its r5-random.sha256). The 6.18 kernel
+# nothing on the key written (R5_SHA = its r5-random.sha256). PHASE=r5w: the
+# same RAID 5 written with FLEXRAID_RW=yes (parity checked by md, superblocks
+# unchanged), then 16 KiB of role 3's parity altered: md's check finds it, a
+# crash mark makes the next mount recompute the parity, checked again.
+# PHASE=r5fail (after RAIDiator checked r5w): role 3's leg turned into a dm
+# error target while writing, the stop records it on roles 0-2. The 6.18 kernel
 # has no loop driver: the members are partitions of a USB key (type 0xfd,
 # sized as the members), each fake disk a dm device made of the key's
 # partition 1 (the fake disks' MBR) and two member partitions. RAIDiator's
 # kernel then finds the same partitions (on-nas.sh check618: autorun, as at
 # its boot).
 #
-#   [PHASE=write|fail|r5] [R5_SHA=FILE] sh on-618.sh BIN_DIR KEY WORK_DIR
+#   [PHASE=write|fail|r5|r5w|r5fail] [R5_SHA=FILE] sh on-618.sh BIN_DIR KEY WORK_DIR
 #
 # BIN_DIR: nas-raid, xraid-info and flexraid-sb (SPARC build) of this version.
 # KEY: the test USB key (e.g. /dev/sdd): KEY1 the fake disks' MBR, KEY5 KEY6
@@ -28,8 +33,8 @@
 # rbd: never the NAS's disks nor its X-RAID or VG "c".
 set -eu
 B=$1; KEY=$2; W=$3; PHASE=${PHASE:-write}
-case $PHASE in write|fail|r5) ;; *) echo "PHASE: write, fail or r5"; exit 1;; esac
-if [ "$PHASE" = r5 ]; then [ -r "${R5_SHA:-}" ] || { echo "R5_SHA: on-nas.sh r5key's r5-random.sha256"; exit 1; }; fi
+case $PHASE in write|fail|r5|r5w|r5fail) ;; *) echo "PHASE: write, fail, r5, r5w or r5fail"; exit 1;; esac
+case $PHASE in r5*) [ -r "${R5_SHA:-}" ] || { echo "R5_SHA: on-nas.sh r5key's r5-random.sha256"; exit 1; };; esac
 LOG=$W/618.log
 OK=0; KO=0
 say() { echo "$*"; echo "$*" >> "$LOG"; }
@@ -161,6 +166,71 @@ check "md superblocks of the 4 members unchanged" test "$(sbsum)" = "$SB0"
 check "data areas of the 4 members unchanged" test "$(for n in 5 6 7 8; do datasum $KEY$n; done)" = "$D0"
 fi
 
+# dm-raid's status: 0 LEN raid TYPE N HEALTH RATIO ACTION MISMATCH ...
+r5st() { dmsetup status fr-md5 | cut -d' ' -f"$1"; }
+r5idle() { n=0; while [ "$(r5st 8)" != idle ] && [ $n -lt 1800 ]; do sleep 2; n=$((n + 2)); done; }
+r5check() { dmsetup message fr-md5 0 check; sleep 2; r5idle; r5st 9; }	# mismatched sectors
+r5sha() { [ "$(sha256sum < "$1" | cut -d' ' -f1)" = "$(cat "$2")" ]; }
+
+if [ "$PHASE" = r5w ]; then
+# E. RAID 5 written (FLEXRAID_RW=yes), parity checked, then a crash of ours replayed
+rwmount
+check "RAID 5, FLEXRAID_RW=yes: mode flexraid-rw (got: $mode${reasons:+ $reasons})" test "$mode" = flexraid-rw
+check "fr-md5 writable, nosync, crash mark set" sh -c "dmsetup table fr-md5 | grep -q ' raid raid5_la 2 32 nosync 4 ' && ! dmsetup info fr-md5 | grep -q READ-ONLY && [ -e '$W/state/flexraid-dirty-md5' ]"
+{
+	echo "written on the RAID 5 under Linux 6.18 $(date)" > "$W/mnt/rbc/r5-618.txt"
+	dd if=/dev/urandom of="$W/mnt/rbc/r5-618.bin" bs=1048576 count=16 2> /dev/null
+	sha256sum < "$W/mnt/rbc/r5-618.bin" | cut -d' ' -f1 > "$W/r5-618.sha256"
+	sync
+} >> "$LOG" 2>&1 || true
+check "rbc (RAID 5) written" test -s "$W/mnt/rbc/r5-618.bin"
+mm=$(r5check 2>> "$LOG")
+check "md's check after the writes: parity consistent (mismatch $mm)" test "$mm" = 0
+$NR unmount >> "$LOG" 2>&1
+check "clean stop: no fr-md/frl-md left, crash mark removed" sh -c "! dmsetup ls | grep -q '^fr-md\|^frl-md' && [ ! -e '$W/state/flexraid-dirty-md5' ]"
+check "md superblocks of the 4 members unchanged by the writes" test "$(sbsum)" = "$SB0"
+# 16 KiB of role 3's parity altered: stripe 100 (left-asymmetric: parity on role 3 - 100 mod 4 = 3), 3200 sectors in
+dd if=/dev/urandom of=${KEY}8 bs=512 seek=3200 count=32 conv=notrunc 2>> "$LOG" || true
+rwmount
+mm=$(r5check 2>> "$LOG")
+check "parity altered by hand: md's check finds it (mismatch $mm)" sh -c "[ '$mm' -gt 0 ]"
+$NR unmount >> "$LOG" 2>&1
+date +%s > "$W/state/flexraid-dirty-md5"
+rwmount
+check "after a crash (mark left): sync, the parity recomputed" sh -c "grep -q 'parity of the whole array recomputed' '$W/state/log' && dmsetup table fr-md5 | grep -q ' 2 32 sync 4 '"
+r5idle
+check "resync over ($(r5st 6), $(r5st 8))" sh -c "[ \"\$(dmsetup status fr-md5 | cut -d' ' -f6)\" = AAAA ]"
+mm=$(r5check 2>> "$LOG")
+check "md's check after the resync: parity consistent again (mismatch $mm)" test "$mm" = 0
+$NR unmount >> "$LOG" 2>&1
+check "mark removed, md superblocks still unchanged" sh -c "[ ! -e '$W/state/flexraid-dirty-md5' ] && [ \"$(sbsum)\" = \"$SB0\" ]"
+romount
+check "read-only again: RAIDiator's file and the one written by 6.18, same sha256" sh -c "$(command -v sha256sum) < '$W/mnt/rbc/r5-random.bin' | grep -q \"\$(cat '$R5_SHA')\" && $(command -v sha256sum) < '$W/mnt/rbc/r5-618.bin' | grep -q \"\$(cat '$W/r5-618.sha256')\""
+$NR unmount >> "$LOG" 2>&1
+fi
+
+if [ "$PHASE" = r5fail ]; then
+# F. role 3 fails while the RAID 5 is written: recorded on roles 0-2 at the stop
+rwmount
+check "RAID 5, FLEXRAID_RW=yes: mode flexraid-rw (got: $mode${reasons:+ $reasons})" test "$mode" = flexraid-rw
+n3=$(dmsetup table frl-md5-3 | cut -d' ' -f2)
+{ dmsetup suspend frl-md5-3 && echo "0 $n3 error" | dmsetup load frl-md5-3 && dmsetup resume frl-md5-3; } >> "$LOG" 2>&1 || true
+{
+	echo "written on the RAID 5 after role 3 failed $(date)" > "$W/mnt/rbc/r5-after-fail.txt"
+	dd if=/dev/urandom of="$W/mnt/rbc/r5-after-fail.bin" bs=1048576 count=4 2> /dev/null
+	sha256sum < "$W/mnt/rbc/r5-after-fail.bin" | cut -d' ' -f1 > "$W/r5-after-fail.sha256"
+	sync
+} >> "$LOG" 2>&1 || true
+check "role 3 dead for md (health $(r5st 6))" sh -c "dmsetup status fr-md5 | cut -d' ' -f6 | grep -q '^AAAD\$'"
+$NR unmount >> "$LOG" 2>&1
+check "role 3 failed: recorded on roles 0-2 (flexraid-sb fail), mark removed" sh -c "grep -q 'role 3 failed, recording it on role 0,1,2' '$W/state/log' && [ ! -e '$W/state/flexraid-dirty-md5' ]"
+check "xraid-info: md5 degraded, role 3 stale" sh -c "$B/xraid-info flexraid $NAS_RAID_DISKS | grep -qx \"FR_A[0-9]*_REASONS='degraded stale_member'\""
+romount
+check "read-only next time, degraded: the files written after the failure there" sh -c "grep -q '^written on the RAID 5 after role 3' '$W/mnt/rbc/r5-after-fail.txt' && $(command -v sha256sum) < '$W/mnt/rbc/r5-after-fail.bin' | grep -q \"\$(cat '$W/r5-after-fail.sha256')\""
+check "rbc read-only (stale member)" sh -c "! touch '$W/mnt/rbc/.w' 2>/dev/null"
+$NR unmount >> "$LOG" 2>&1
+fi
+
 if [ "$PHASE" = fail ]; then
 # C. rbc's role 1 fails while writing: recorded on role 0 at the stop
 rwmount
@@ -180,5 +250,6 @@ fi
 cleanup; trap - EXIT
 sync
 if [ "$PHASE" = r5 ]; then say "$OK ok, $KO failed (log: $LOG); nothing written on the key"
+elif [ "$PHASE" = r5w ] || [ "$PHASE" = r5fail ]; then say "$OK ok, $KO failed (log: $LOG; keep $W/*.sha256); next: boot RAIDiator, PHASE=$PHASE CHECK_DIR=$W sh on-nas.sh TOOLS WORK check5"
 else say "$OK ok, $KO failed (log: $LOG; keep $W/*.sha256); next: boot DIET/RAIDiator, PHASE=$PHASE CHECK_DIR=<folder with the .sha256 of the write phase> sh on-nas.sh TOOLS WORK check618"; fi
 [ "$KO" = 0 ]

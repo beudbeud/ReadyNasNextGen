@@ -298,8 +298,12 @@ sb_dirty() {
 # VG lies on arrays that are complete and up to date (no reason at all), hold
 # LVM2 and carry no snapshot. Nothing is written outside the file system (no md
 # superblock, LVM metadata read-only): RAIDiator finds its arrays as they were.
-# A RAID 5 is always read-only: dm-raid without metadata over read-only legs
-# (FR_A<a>_LEGS from xraid-info), nosync, removed after it at the unmount.
+# A RAID 5 is dm-raid without metadata over legs (FR_A<a>_LEGS from
+# xraid-info), removed after it at the unmount; read-only (legs too) unless
+# writable as above. Written, it has the same crash mark as a RAID 1: while it
+# is there, the next read-write mount asks for sync and md recomputes the parity
+# of the whole array (a cut mid-stripe leaves a parity that no longer matches:
+# the write hole); its health comes from dm-raid's status (dmsetup status).
 # A RAID 0 has nothing to keep in sync. A RAID 1 is a mirror without metadata
 # ("mdadm --build", role 0 first) of its members' data areas (legs frl-md<m>-0,
 # -1..., outside the LVM filter), fr-md<m> on top. RAIDiator never marks a
@@ -339,6 +343,41 @@ fr_mirror() {
 	[ -n "$DRY_RUN" ] || sync
 	FR_R1="$FR_R1${FR_R1:+ }$m=$(echo "$@" | tr ' ' ,)"
 }
+# fr_raid5 MINOR MEMBER0 MEMBER1...: RAID 5 read-write; sets r5 (MINOR=MEMBERS)
+# and turns nosync into sync in t after a crash. A failure must be recordable on the
+# survivors of any member (flexraid-sb --dry-run, every member but one).
+fr_raid5() {
+	m=$1; shift
+	command -v flexraid-sb >/dev/null 2>&1 || { why="${why:+$why }no_sb_writer"; return 1; }
+	for o in "$@"; do
+		sv=; for s in "$@"; do [ "$s" = "$o" ] || sv="$sv $s"; done
+		x flexraid-sb --dry-run fail $sv >/dev/null 2>&1 || { why="${why:+$why }sb_not_writable"; return 1; }
+	done
+	mk=$STATE/flexraid-dirty-md$m
+	if grep -q '^failed' "$mk" 2>/dev/null; then
+		log "Flex-RAID md$m: a failed member could not be recorded on the disks ($(cat "$mk")): read-only; delete $mk once the disks are checked"
+		why="${why:+$why }failure_unrecorded"; return 1
+	fi
+	if [ -e "$mk" ]; then
+		t=$(echo "$t" | sed 's/ nosync / sync /')	# dm-raid without metadata resyncs only when told (seen on the NAS)
+		log "Flex-RAID md$m: Linux stopped without a clean unmount, the parity of the whole array recomputed"
+	fi
+	write "$mk" "$(date +%s)" || { why="${why:+$why }mark_write_failed"; return 1; }
+	[ -n "$DRY_RUN" ] || sync
+	r5="$m=$(echo "$@" | tr ' ' ,)"
+}
+# fr_health5 MINOR: fr_health's answers for the dm-raid fr-md<MINOR>, from its
+# status "0 LEN raid TYPE N HEALTH RATIO ACTION ...": HEALTH one letter per
+# role (A in sync, a not yet, D dead)
+fr_health5() {
+	set -- $(dmsetup status "fr-md$1" 2>/dev/null)
+	[ "$3" = raid ] || { echo busy; return; }
+	case $6 in
+	*D*) echo "failed $(echo "$6" | awk '{ for (i = 1; i <= length($0); i++) if (substr($0, i, 1) == "D") o = o (o == "" ? "" : ",") (i - 1); print o }')" ;;
+	*a*) echo busy ;;
+	*) if [ "$8" = idle ]; then echo ok; else echo busy; fi ;;
+	esac
+}
 fr_mirror_undo() {	# fr_mirror_undo MINOR LEGS; 1 = the md could not be stopped
 	if grep -q "^md$((100 + $1)) :" "$R/proc/mdstat" 2>/dev/null; then x mdadm --stop "/dev/md$((100 + $1))" || return 1; fi
 	k=0; while [ $k -lt "$2" ]; do dmsetup info "frl-md$1-$k" >/dev/null 2>&1 && x_ dmsetup remove "frl-md$1-$k"; k=$((k + 1)); done
@@ -351,7 +390,7 @@ flexraid_mount() {	# 1 = no RAIDiator md array at all
 	output=$(xraid-info flexraid "$@") || { log "xraid-info flexraid failed"; return 1; }
 	eval "$output"
 	[ "$FR_NR_ARRAYS" -gt 0 ] || return 1
-	dms=; why=; rwmd=; FR_R1=; frlegs=; i=0
+	dms=; why=; rwmd=; FR_R1=; FR_R5=; r5=; frlegs=; i=0
 	while [ $i -lt "$FR_NR_ARRAYS" ]; do
 		eval "set -- \$FR_A$i; t=\$FR_A${i}_TABLE; r=\$FR_A${i}_REASONS; c=\$FR_A${i}_CONTENT; mem=\$FR_A${i}_MEMBERS; l5=\$FR_A${i}_LEGS"	# minor level usable sectors
 		for w in $r; do case " $why " in *" $w "*) ;; *) why="$why${why:+ }$w";; esac; done
@@ -362,15 +401,23 @@ flexraid_mount() {	# 1 = no RAIDiator md array at all
 			raid1) if fr_mirror "$1" "$4" $mem; then
 					t="0 $4 linear /dev/md$((100 + $1)) 0"; ro=; rwmd="$rwmd fr-md$1"
 				fi ;;
+			raid5) rw0=$rwmd; if fr_raid5 "$1" $mem; then ro=; rwmd="$rwmd fr-md$1"; fi ;;
 			esac
 		fi
-		if [ "$3" = 1 ] && [ -n "$l5" ]; then	# RAID 5: read-only legs under dm-raid (role:path:start:sectors)
+		if [ "$3" = 1 ] && [ -n "$l5" ]; then	# RAID 5: legs under dm-raid (role:path:start:sectors)
 			for g in $l5; do
 				k=${g%%:*}; g=${g#*:}; p=${g%%:*}; g=${g#*:}
-				x dmsetup create "frl-md$1-$k" --readonly --table "0 ${g#*:} linear $p ${g%%:*}" && frlegs="$frlegs${frlegs:+ }frl-md$1-$k"
+				x dmsetup create "frl-md$1-$k" $ro --table "0 ${g#*:} linear $p ${g%%:*}" && frlegs="$frlegs${frlegs:+ }frl-md$1-$k"
 			done
 		fi
-		[ "$3" = 1 ] && x dmsetup create "fr-md$1" $ro --table "$t" && dms="$dms${dms:+ }fr-md$1"
+		if [ "$3" = 1 ] && x dmsetup create "fr-md$1" $ro --table "$t"; then
+			dms="$dms${dms:+ }fr-md$1"
+			[ -n "$r5" ] && FR_R5="$FR_R5${FR_R5:+ }$r5"
+		elif [ -n "$r5" ]; then	# a written RAID 5 never mapped: nothing written
+			[ -n "$DRY_RUN" ] || rm -f "$STATE/flexraid-dirty-md$1"
+			rwmd=$rw0
+		fi
+		r5=
 		i=$((i + 1))
 	done
 	log "Flex-RAID: arrays mapped: ${dms:-none}${rwmd:+ (writable:$rwmd)}${why:+ ($why)}"
@@ -423,7 +470,8 @@ flexraid_mount() {	# 1 = no RAIDiator md array at all
 			mnts="$mnts${mnts:+ }$m"
 		fi
 	done
-	write "$FR_STATE" "FR_DMS='$dms' FR_VGS='$vgs' FR_MNTS='$mnts' FR_RW='$rwm' FR_R1='$FR_R1' FR_LEGS='$frlegs'"
+	write "$FR_STATE" "FR_DMS='$dms' FR_VGS='$vgs' FR_MNTS='$mnts' FR_RW='$rwm' FR_R1='$FR_R1' FR_R5='$FR_R5' FR_LEGS='$frlegs'"
+	fr_sync_note
 	if [ -n "$mnts" ]; then
 		log "Flex-RAID: mounted: $mnts${rwm:+ (read-write: $rwm)}"
 		if [ -n "$rwm" ]; then write "$RUN/nas-raid.mode" "flexraid-rw $why"
@@ -437,13 +485,29 @@ flexraid_mount() {	# 1 = no RAIDiator md array at all
 }
 
 flexraid_unmount() {
-	FR_DMS=; FR_VGS=; FR_MNTS=; FR_RW=; FR_R1=; FR_LEGS=
+	FR_DMS=; FR_VGS=; FR_MNTS=; FR_RW=; FR_R1=; FR_R5=; FR_LEGS=
 	[ -r "$FR_STATE" ] && . "$FR_STATE"
 	[ -n "$FR_RW" ] && [ -z "$DRY_RUN" ] && sync
 	stopped=1
 	for m in $FR_MNTS; do mounted "$m" && { x umount "$m" || { log "(failure ignored: umount $m)"; stopped=; }; }; done
 	[ -n "$FR_VGS" ] && x_ lvm vgchange -an --config "$LVM_FR" $FR_VGS
-	for d in $FR_DMS $FR_LEGS; do x_ dmsetup remove "$d"; done	# RAID 5 legs after the arrays on them
+	# written RAID 5: health read while dm-raid runs; one not removed is still in use
+	h5=; b5=
+	for e in $FR_R5; do h5="$h5 ${e%%=*}=$(fr_health5 "${e%%=*}" | tr ' ' :)"; done
+	for d in $FR_DMS; do
+		case " $FR_R5" in
+		*" ${d#fr-md}="*) x dmsetup remove "$d" || { log "(failure: dmsetup remove $d)"; b5="$b5 ${d#fr-md}"; } ;;
+		*) x_ dmsetup remove "$d" ;;
+		esac
+	done
+	for d in $FR_LEGS; do x_ dmsetup remove "$d"; done	# RAID 5 legs after the arrays on them
+	for e in $FR_R5; do
+		m=${e%%=*}; h=busy
+		for v in $h5; do [ "${v%%=*}" = "$m" ] && h=$(echo "${v#*=}" | tr : ' '); done
+		case " $b5 " in *" $m "*) [ "$h" = ok ] && h=busy ;; esac
+		[ -n "$stopped" ] || [ "$h" != ok ] || h=busy	# still in use: the mark stays
+		fr_sb_after "$m" "$h" "${e#*=}"
+	done
 	# read-write mirrors: health read before the stop, then the crash mark
 	# removed (every leg healthy) or the failed legs recorded on the survivors
 	for e in $FR_R1; do
@@ -453,7 +517,7 @@ flexraid_unmount() {
 		[ -n "$stopped" ] || [ "$h" != ok ] || h=busy	# still in use: the mark stays
 		fr_sb_after "$m" "$h" "$mem"
 	done
-	[ -n "$DRY_RUN" ] || rm -f "$FR_STATE"
+	[ -n "$DRY_RUN" ] || rm -f "$FR_STATE" "$FR_SYNC"
 }
 
 # fr_health mdN: ok | busy (missing, resync running) | failed ROLES (the
@@ -598,14 +662,37 @@ watch() {
 # Read-write Flex-RAID RAID 1 with a failed leg: recorded at once on the
 # survivor (the legs end before the superblock: md never writes there), then
 # every volume remounted (the failed member is now stale: read-only).
+# fr_sync_note: the written RAID 5 as dm-raid sees them now, for the page and
+# the API's protections (dm-raid arrays are not in /proc/mdstat): one line
+# "MINOR HEALTH ACTION PERCENT" each in $FR_SYNC, at the mount and every watch
+FR_SYNC=$RUN/flexraid.sync
+fr_sync_note() {
+	o=
+	for e in $FR_R5; do
+		set -- $(dmsetup status "fr-md${e%%=*}" 2>/dev/null)
+		[ "$3" = raid ] || continue
+		o="$o${o:+
+}${e%%=*} $6 $8 $(echo "$7" | awk -F/ '{ print ($2 > 0 ? int($1 * 100 / $2) : 0) }')"
+	done
+	if [ -n "$o" ]; then write "$FR_SYNC" "$o"; else [ -n "$DRY_RUN" ] || rm -f "$FR_SYNC"; fi
+}
 fr_watch() {
-	awk '/^md1[0-9][0-9] :/ { n = 1; next } n && /blocks/ { if ($NF ~ /_/) f = 1; n = 0 } END { exit !f }' "$R/proc/mdstat" 2>/dev/null || return 0
+	FR_R5=; [ -r "$FR_STATE" ] && . "$FR_STATE"
+	fr_sync_note
+	n=; for e in $FR_R5; do case $(fr_health5 "${e%%=*}") in failed*) n=1 ;; esac; done
+	[ -n "$n" ] || awk '/^md1[0-9][0-9] :/ { n = 1; next } n && /blocks/ { if ($NF ~ /_/) f = 1; n = 0 } END { exit !f }' "$R/proc/mdstat" 2>/dev/null || return 0
 	lock
-	FR_R1=; FR_MNTS=; [ -r "$FR_STATE" ] && . "$FR_STATE"
+	FR_R1=; FR_R5=; FR_MNTS=; [ -r "$FR_STATE" ] && . "$FR_STATE"
 	for e in $FR_R1; do
 		h=$(fr_health "md$((100 + ${e%%=*}))")
 		case $h in ok|busy) continue ;; esac
 		log "Flex-RAID: md$((100 + ${e%%=*})) degraded while writing ($h): going read-only"
+		fr_sb_after "${e%%=*}" "$h" "${e#*=}"
+	done
+	for e in $FR_R5; do
+		h=$(fr_health5 "${e%%=*}")
+		case $h in failed*) ;; *) continue ;; esac
+		log "Flex-RAID: md${e%%=*} (RAID 5) degraded while writing ($h): going read-only"
 		fr_sb_after "${e%%=*}" "$h" "${e#*=}"
 	done
 	services stop
@@ -772,7 +859,8 @@ status() {
 			"$m" "$reasons" "$xrw" "$sbw" "$dirty" "$v" "${vd:-0}" "${prog:-null}" "$zones"
 		printf '"quick":{"state":"%s","date":%s,"progress":%s,"accept":%d,"result":%s},' "$q" "${qd:-0}" "${qprog:-null}" "$qok" "$qres"
 		case $FLEXRAID_RW in yes) frw=yes;; *) frw=no;; esac
-		printf '"flexraid_rw":"%s","flexraid_mounts":"%s","flexraid_rw_mounts":"%s","flexraid":%s,"xraid":%s}\n' "$frw" "$FR_MNTS" "$FR_RW" "$fr" "$xr"
+		fs=$(awk 'NF == 4 { printf "%s{\"minor\":%d,\"health\":\"%s\",\"action\":\"%s\",\"percent\":%d}", n++ ? "," : "", $1, $2, $3, $4 }' "$FR_SYNC" 2>/dev/null)
+		printf '"flexraid_rw":"%s","flexraid_mounts":"%s","flexraid_rw_mounts":"%s","flexraid_sync":[%s],"flexraid":%s,"xraid":%s}\n' "$frw" "$FR_MNTS" "$FR_RW" "$fs" "$fr" "$xr"
 	else
 		echo "mode: $m${reasons:+ ($reasons)}"
 		echo "unfinished write mark: $dirty; superblock writer: $sbw"

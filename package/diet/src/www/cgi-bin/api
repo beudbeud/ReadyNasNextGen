@@ -1227,6 +1227,10 @@ busyops() {
   [ -r "$R/proc/mdstat" ] && while read -r l; do
     case $l in *resync*%*|*recovery*%*|*reshape*%*|*check*%*|*repair*%*) BUSY="$BUSY${BUSY:+ }sync"; break;; esac
   done < "$R/proc/mdstat"
+  # a written Flex-RAID RAID 5 (dm-raid, not in /proc/mdstat): nas-raid's note
+  case " $BUSY " in *" sync "*) ;; *) [ -r "$RUN/flexraid.sync" ] && while read -r _ _ a _; do
+    case $a in ''|idle) ;; *) BUSY="$BUSY${BUSY:+ }sync"; break;; esac
+  done < "$RUN/flexraid.sync";; esac
   :
 }
 # guard: reboot, poweroff, update_switch refused (409) while busyops finds

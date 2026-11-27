@@ -936,6 +936,13 @@ check "poweroff during a RAID resync/repair: 409" '[ "$ST" = 409 ] && case "$OUT
 api POST a=reboot 'force=1&confirm=FORCE'
 check "reboot force=1&confirm=FORCE during a resync: 200" '[ "$ST" = 200 ]'
 cp "$R"/mdstat.save "$R"/proc/mdstat
+echo "5 aaaa resync 12" > "$R"/var/run/flexraid.sync
+api POST a=reboot
+check "reboot while a written Flex-RAID RAID 5 recomputes its parity (dm-raid, nas-raid's note): 409" '[ "$ST" = 409 ] && case "$OUT" in *"resync or repair"*) true;; *) false;; esac'
+echo "5 AAAA idle 100" > "$R"/var/run/flexraid.sync
+api GET a=status
+check "status: a RAID 5 idle is not busy" "json 'j[\"busy\"]==[]'"
+rm -f "$R"/var/run/flexraid.sync
 for f in verify quick; do [ -e "$NR/$f.state.save" ] && mv "$NR/$f.state.save" "$NR/$f.state"; done
 sleep 3	# the reboot/poweroff stubs run 2 s after the answer
 check "protections: forced actions really ran (stubs called)" 'grep -q "^reboot" "$R"/cmd.log && grep -q "^poweroff" "$R"/cmd.log'

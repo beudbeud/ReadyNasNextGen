@@ -372,7 +372,7 @@ DISKS="$T/flexraid-r5/sda.img $T/flexraid-r5/sdb.img $T/flexraid-r5/sdc.img"; h=
 cp "$R/etc/nas-raid.conf" "$T/nrconf.r5" 2>/dev/null; echo FLEXRAID_RW=yes > "$R/etc/nas-raid.conf"
 : > "$T/cmd.log"; : > "$R/proc/mounts"; nr mount 2>/dev/null >/dev/null
 check "Flex-RAID RAID 5 mount: read-only legs first, then fr-md2 read-only on them, never md nor flexraid-sb" "[ \"\$(grep -n '^dmsetup create frl-md2-\|^dmsetup create fr-md2 ' '$T/cmd.log' | cut -d: -f2- | cut -d' ' -f3-5 | tr '\\n' '|')\" = 'frl-md2-0 --readonly --table|frl-md2-1 --readonly --table|frl-md2-2 --readonly --table|fr-md2 --readonly --table|' ] && grep -q '^dmsetup create frl-md2-2 --readonly --table 0 1048448 linear $T/flexraid-r5/sdc.img 5144608\$' '$T/cmd.log' && grep -q '^dmsetup create fr-md2 --readonly --table 0 2096896 raid raid5_la ' '$T/cmd.log' && ! grep -q '^mdadm\|^flexraid-sb' '$T/cmd.log'"
-check "Flex-RAID RAID 5 with FLEXRAID_RW=yes: c (RAID 5) read-only, d (3-disk RAID 0) writable" "grep -q 'mount -t ext4 -o ro,noatime /dev/mapper/c-c /c' '$T/cmd.log' && grep -q 'errors=remount-ro,noatime /dev/mapper/d-d /d' '$T/cmd.log'"
+check "Flex-RAID RAID 5 with FLEXRAID_RW=yes but no flexraid-sb: c (RAID 5) read-only, d (3-disk RAID 0) writable" "grep -q 'mount -t ext4 -o ro,noatime /dev/mapper/c-c /c' '$T/cmd.log' && grep -q 'errors=remount-ro,noatime /dev/mapper/d-d /d' '$T/cmd.log'"
 : > "$T/cmd.log"; nr unmount 2>/dev/null >/dev/null
 check "Flex-RAID RAID 5 unmount: fr-md2 removed before its legs, images never written" "[ \"\$(grep -n '^dmsetup remove fr-md2\$\|^dmsetup remove frl-md2-' '$T/cmd.log' | cut -d: -f2- | tr '\\n' '|')\" = 'dmsetup remove fr-md2|dmsetup remove frl-md2-0|dmsetup remove frl-md2-1|dmsetup remove frl-md2-2|' ] && [ \"\$(md5sum '$T'/flexraid-r5/*.img)\" = \"$h\" ]"
 if [ -e "$T/nrconf.r5" ]; then mv "$T/nrconf.r5" "$R/etc/nas-raid.conf"; else rm -f "$R/etc/nas-raid.conf"; fi
@@ -462,6 +462,42 @@ rm -rf "$FR3"; cp -r "$T/flexraid-3" "$FR3"; fr3stat '[UUU]'
 nr mount 2>/dev/null >/dev/null; fr3stat '[___]'; : > "$T/cmd.log"; nr unmount 2>/dev/null >/dev/null
 check "RAID 1, 3 disks, every leg failed: nothing written, mark kept" "! grep -q '^flexraid-sb fail' '$T/cmd.log' && [ -e '$MK' ]"
 rm -f "$MK"
+# RAID 5 read-write: dm-raid on writable legs, the crash mark, its health from dmsetup status
+dst() { echo "0 2096896 raid raid5_la 3 $1 1048448/1048448 $2 0 0 -" > "$R/dmst-fr-md2"; }
+stub dmsetup 'case "$1" in status) cat "'"$R"'/dmst-$2" 2>/dev/null;; esac'
+FR5=$T/fr-rw5; cp -r "$T/flexraid-r5" "$FR5"; DISKS="$FR5/sda.img $FR5/sdb.img $FR5/sdc.img"; h=$(md5sum "$FR5"/*.img)
+mdstat '[UU]'; dst AAA idle; : > "$T/cmd.log"; : > "$R/proc/mounts"; nr mount 2>/dev/null >/dev/null
+check "RAID 5 rw: legs and fr-md2 writable, nosync (no resync), c mounted read-write, crash mark set" "grep -q '^dmsetup create frl-md2-0 --table 0 1048448 linear $FR5/sda.img 5144608\$' '$T/cmd.log' && grep -q '^dmsetup create fr-md2 --table 0 2096896 raid raid5_la 2 32 nosync 3 ' '$T/cmd.log' && grep -q 'errors=remount-ro,noatime /dev/mapper/c-c /c' '$T/cmd.log' && [ -e '$MK' ] && [ \"\$(mode_of)\" = flexraid-rw ]"
+check "RAID 5 rw: a failure checked recordable for every member (dry run, the other two)" "[ \$(grep -c '^flexraid-sb --dry-run fail [^ ]* [^ ]*\$' '$T/cmd.log') = 3 ]"
+dst aaa resync; nr watch 2>/dev/null >/dev/null; nr status --json > "$T/fr5s"
+check "RAID 5 rw: its live state noted (dm-raid is not in /proc/mdstat), in status --json" "[ \"\$(cat '$R/var/run/flexraid.sync')\" = '2 aaa resync 100' ] && python3 -c \"import json; j=json.load(open('$T/fr5s')); assert j['flexraid_sync']==[{'minor':2,'health':'aaa','action':'resync','percent':100}] and list(j)[-1]=='xraid'\""
+dst AAA idle
+: > "$T/cmd.log"; nr unmount 2>/dev/null >/dev/null
+check "RAID 5 clean stop: the live note removed" "[ ! -e '$R/var/run/flexraid.sync' ]"
+check "RAID 5 clean stop: fr-md2 then its legs removed, mark removed, superblocks untouched" "[ \"\$(grep -n '^dmsetup remove fr-md2\$\|^dmsetup remove frl-md2-0' '$T/cmd.log' | cut -d: -f2- | tr '\\n' '|')\" = 'dmsetup remove fr-md2|dmsetup remove frl-md2-0|' ] && [ ! -e '$MK' ] && ! grep -q '^flexraid-sb fail' '$T/cmd.log' && [ \"\$(md5sum '$FR5'/*.img)\" = \"$h\" ]"
+echo 1 > "$MK"; : > "$T/cmd.log"; nr mount 2>/dev/null >/dev/null
+check "RAID 5 after a Linux crash (mark left): sync instead of nosync, md recomputes the whole parity" "grep -q '^dmsetup create fr-md2 --table 0 2096896 raid raid5_la 2 32 sync 3 - ' '$T/cmd.log' && grep -q 'parity of the whole array recomputed' '$S/log'"
+dst aaa resync; nr unmount 2>/dev/null >/dev/null
+check "RAID 5 stopped while resyncing: mark kept, nothing written" "[ -e '$MK' ] && ! grep -q '^flexraid-sb fail' '$T/cmd.log' && [ \"\$(md5sum '$FR5'/*.img)\" = \"$h\" ]"
+rm -f "$MK"; dst AAA idle; nr mount 2>/dev/null >/dev/null; dst ADA idle; : > "$T/cmd.log"; nr unmount 2>/dev/null >/dev/null
+check "RAID 5 role 1 failed at stop: recorded on roles 0 and 2, mark removed, role 1 stale and its slot '- -' next time" "grep -q '^flexraid-sb fail $FR5/sda.img:5144608:1048448:0:in_sync $FR5/sdc.img:5144608:1048448:2:in_sync\$' '$T/cmd.log' && grep -q 'role 1 failed, recording it on role 0,2' '$S/log' && [ ! -e '$MK' ] && [ \"\$(frv fr-rw5 A2_REASONS)\" = 'degraded stale_member' ] && frv fr-rw5 A2_TABLE | grep -q 'frl-md2-0 - - - '"
+dst AAA idle; : > "$T/cmd.log"; nr mount 2>/dev/null >/dev/null
+check "RAID 5 with a stale member: read-only, degraded through the parity" "grep -q '^dmsetup create fr-md2 --readonly --table' '$T/cmd.log' && grep -q 'mount -t ext4 -o ro,noatime /dev/mapper/c-c /c' '$T/cmd.log'"
+nr unmount 2>/dev/null >/dev/null
+rm -rf "$FR5"; cp -r "$T/flexraid-r5" "$FR5"; h=$(md5sum "$FR5"/*.img); dst AAA idle; : > "$R/proc/mounts"
+nr mount 2>/dev/null >/dev/null; dst DDA idle; : > "$T/cmd.log"; nr unmount 2>/dev/null >/dev/null
+check "RAID 5, two members failed: not recordable (flexraid-sb refuses), mark 'failed role 0,1', nothing written" "grep -q '^failed role 0,1' '$MK' && [ \"\$(md5sum '$FR5'/*.img)\" = \"$h\" ]"
+dst AAA idle; : > "$T/cmd.log"; nr mount 2>/dev/null >/dev/null
+check "RAID 5 after an unrecorded failure: read-only (failure_unrecorded)" "grep -q failure_unrecorded '$R/var/run/nas-raid.mode' && grep -q '^dmsetup create fr-md2 --readonly' '$T/cmd.log'"
+nr unmount 2>/dev/null >/dev/null; rm -f "$MK"
+stub dmsetup 'case "$1" in status) cat "'"$R"'/dmst-$2" 2>/dev/null;; remove) [ "$2" = fr-md2 ] && exit 1;; esac'
+nr mount 2>/dev/null >/dev/null; nr unmount 2>/dev/null >/dev/null
+check "RAID 5 still in use at the stop (fr-md2 not removed): crash mark kept" "[ -e '$MK' ]"
+stub dmsetup 'case "$1" in status) cat "'"$R"'/dmst-$2" 2>/dev/null;; esac'; rm -f "$MK"; : > "$R/proc/mounts"
+nr mount 2>/dev/null >/dev/null; dst AAD idle; : > "$T/cmd.log"
+printf '/dev/mapper/c-c /c ext4 rw 0 0\n/dev/mapper/d-d /d ext4 rw 0 0\n' > "$R/proc/mounts"; nr watch 2>/dev/null >/dev/null
+check "watch: RAID 5 role 2 failed while writing: recorded on roles 0 and 1, volumes remounted, c read-only" "grep -q '^flexraid-sb fail $FR5/sda.img:5144608:1048448:0:in_sync $FR5/sdb.img:5144608:1048448:1:in_sync\$' '$T/cmd.log' && grep -q '^umount /c' '$T/cmd.log' && grep -q '^dmsetup create fr-md2 --readonly' '$T/cmd.log'"
+dst AAA idle; nr unmount 2>/dev/null >/dev/null; : > "$R/proc/mounts"; rm -f "$MK"; stub dmsetup
 stub umount; : > "$R/proc/mounts"; rm -f "$MK" "$R/bin/flexraid-sb"; mdstat '[UU]'
 cp "$T/nrconf.bak" "$R/etc/nas-raid.conf"
 stub lvm 'case "$1" in lvs) printf "  c c owi-a-----\n  c snap swi-a-s---\n  d d -wi-a-----\n";; pvs) printf "  /dev/mapper/fr-md2 c\n  /dev/mapper/fr-md3 d\n";; esac'

@@ -1528,7 +1528,8 @@ static int flexraid(int argc, char **argv)
 			/* dm-raid without metadata devices (nothing on the disks is
 			 * read or written but the data), over read-only legs
 			 * frl-md<m>-<role> (nas-raid creates them from FR_A<a>_LEGS);
-			 * nosync: md never resyncs. One member missing or stale: "-",
+			 * nosync: md does not resync (nas-raid drops it after a crash
+			 * of a written RAID 5). One member missing or stale: "-",
 			 * read degraded (parity). md's layouts 0-3 = dm-raid's names. */
 			static const char *alg[] = { "raid5_la", "raid5_ra", "raid5_ls", "raid5_rs" };
 			unsigned cs = r->chunk / 512, n = r->raid_disks, k, miss = 0;

@@ -141,7 +141,7 @@ bays, for the page and for scripts; it is computed from the `xraid` object
 | `raid_verify`, `raid_quick` | none (start a mirror check) |
 | `raid_quick_accept` | `confirm=ACCEPT`, `yes=1` |
 | `xraid_rw` | `on=0`, or `on=1&confirm=WRITE&yes=1` |
-| `flexraid_rw` | the same for `FLEXRAID_RW` (Flex-RAID RAID 1 and RAID 0 volumes, docs/XRAID.md §10); 409 outside the Flex-RAID modes |
+| `flexraid_rw` | the same for `FLEXRAID_RW` (Flex-RAID RAID 1, RAID 5 and RAID 0 volumes, docs/XRAID.md §10); 409 outside the Flex-RAID modes |
 | `update_upload` | the update package as the raw body |
 | `update_url` | `url`, `sha` (SHA-256 of the package) |
 | `update_switch` | none; `force=1&confirm=FORCE` to override a 409 (below) |
