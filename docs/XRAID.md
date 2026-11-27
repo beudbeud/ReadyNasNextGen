@@ -539,6 +539,14 @@ left-asymmetric, chunk 16 KiB), read under 6.18 through dm-raid (on-618.sh
 PHASE=r5, 12/12): the files with RAIDiator's sha256, read-only even with
 FLEXRAID_RW=yes, then one member unreadable: mounted degraded, the file rebuilt
 from the parity identical; superblocks and data of the members unchanged.
+Then written (PHASE=r5w, 12/12, with kernel patch 0032): files written, md's
+check finds the parity consistent, the superblocks unchanged; 16 KiB of
+parity altered by hand, found by the check, recomputed after a crash mark
+(sync), consistent again. Back under RAIDiator (on-nas.sh check5, 7/7):
+md5 on its 4 members without a resync, e2fsck 1.40 clean, the files of both
+systems identical. A member failed while writing (PHASE=r5fail, 6/6:
+recorded on the 3 others), then RAIDiator (check5, 6/6): "kicking non-fresh
+sda8", md5 [4/3] [UUU_], the file written after the failure identical.
 
 ## Files
 

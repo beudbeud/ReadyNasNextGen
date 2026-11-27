@@ -139,3 +139,21 @@ hello.txt and the random file read back with RAIDiator's sha256, still
 read-only with FLEXRAID_RW=yes; with KEY8 unreadable (dm error target) "3 out
 of 4 devices", mounted `degraded`, the file rebuilt from the parity with the
 same sha256; md superblocks and data areas of the 4 members unchanged.
+
+RAID 5 written, with kernel patch 0032 (`linux/0032`: without it every write
+hung after the first md sync):
+
+    PHASE=r5w R5_SHA=… sh on-618.sh BIN /dev/sdY WORK3      # under 6.18
+    PHASE=r5w CHECK_DIR=… sh on-nas.sh TOOLS WORK check5     # under RAIDiator
+    PHASE=r5fail R5_SHA=… sh on-618.sh BIN /dev/sdY WORK4   # under 6.18
+    PHASE=r5fail CHECK_DIR=… sh on-nas.sh TOOLS WORK check5  # under RAIDiator
+
+CHECK_DIR holds r5-random.sha256 (r5key) and the .sha256 of the 6.18 run.
+Seen on the NAS:
+- r5w 12/12: written, parity consistent, superblocks unchanged; parity
+  altered by hand found by md's check (32 sectors), recomputed after a crash
+  mark in 235-240 s, consistent again.
+- check5 7/7: md5 [4/4] without a resync, e2fsck clean, files identical.
+- r5fail 6/6: role 3 dead (AAAD), recorded on roles 0-2.
+- check5 6/6: "kicking non-fresh sda8", md5 [4/3] [UUU_], the file written
+  after the failure identical.
