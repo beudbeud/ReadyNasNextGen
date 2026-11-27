@@ -1,0 +1,28 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 31/31] sparc32: show the stack of other tasks
+
+show_stack() got no stack pointer for a task other than the current one
+(sched_show_task() passes NULL), took it for a bogus frame and printed
+nothing: sysrq-w and hung tasks came without any call trace. Start from
+the saved ksp instead, and bound the walk by THREAD_SIZE (one 16 KiB page
+with patch 0020, not PAGE_SIZE << 1).
+---
+--- a/arch/sparc/kernel/process_32.c
++++ b/arch/sparc/kernel/process_32.c
+@@ -169,13 +169,15 @@
+ 
+ 	if (tsk == current && !_ksp)
+ 		__asm__ __volatile__("mov	%%fp, %0" : "=r" (_ksp));
++	else if (!_ksp)		/* another task: from its saved stack pointer */
++		_ksp = (unsigned long *) task_thread_info(tsk)->ksp;
+ 
+ 	task_base = (unsigned long) task_stack_page(tsk);
+ 	fp = (unsigned long) _ksp;
+ 	do {
+ 		/* Bogus frame pointer? */
+ 		if (fp < (task_base + sizeof(struct thread_info)) ||
+-		    fp >= (task_base + (PAGE_SIZE << 1)))
++		    fp >= (task_base + THREAD_SIZE))
+ 			break;
+ 		rw = (struct reg_window32 *) fp;
+ 		pc = rw->ins[7];

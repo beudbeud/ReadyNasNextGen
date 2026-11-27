@@ -103,3 +103,6 @@ CONFIG_PAGE_BLOCK_MAX_ORDER=8
 # NAND flash backup (padre_nand, patches-shelved/linux/) shelved: not built, see
 # docs/DEVELOPMENT.md "NAND flash" (reading it while the system runs from the USB
 # stick loses the stick)
+# a task stuck in D state for 120 s prints its call trace (patch 0031: sparc32
+# shows the stack of other tasks)
+CONFIG_DETECT_HUNG_TASK=y

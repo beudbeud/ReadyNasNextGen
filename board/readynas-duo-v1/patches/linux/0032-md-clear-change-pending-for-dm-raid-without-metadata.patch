@@ -1,0 +1,28 @@
+From: ReadyNAS NG <readynasng@build>
+Subject: [PATCH 32/32] md: clear CHANGE_PENDING for dm-raid without metadata
+
+A dm-raid set without metadata devices is non-persistent and external
+(dm-raid.c), and md_update_sb() only clears MD_SB_CHANGE_PENDING for a
+non-persistent array that is not external (an external one has its
+metadata handler, mdmon, do it). md_do_sync() sets that flag at the end
+of every sync (resync, check, repair): nothing ever cleared it, raid5d
+stopped at the top of its loop for good, and every write submitted to
+the RAID 4/5/6 afterwards hung, reads still working. Seen on the NAS
+with a dm-raid raid5_la, no metadata: the first write after "sync" or
+"check" never completed (jbd2 and sync in D state, raid5d asleep).
+Clear it for a dm array too: there is nobody else to.
+---
+--- a/drivers/md/md.c
++++ b/drivers/md/md.c
+@@ -2842,7 +2842,10 @@
+ 	if (!mddev->persistent) {
+ 		clear_bit(MD_SB_CHANGE_CLEAN, &mddev->sb_flags);
+ 		clear_bit(MD_SB_CHANGE_DEVS, &mddev->sb_flags);
+-		if (!mddev->external) {
++		/* dm-raid without metadata devices is external too, but has no
++		 * metadata handler to clear CHANGE_PENDING (set by md_do_sync()
++		 * at the end of every sync): raid5d would wait for it forever */
++		if (!mddev->external || mddev_is_dm(mddev)) {
+ 			clear_bit(MD_SB_CHANGE_PENDING, &mddev->sb_flags);
+ 			rdev_for_each(rdev, mddev) {
+ 				if (rdev->badblocks.changed) {
