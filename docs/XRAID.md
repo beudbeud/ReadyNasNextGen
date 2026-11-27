@@ -151,15 +151,16 @@ nothing is written.
 | `XRAID_RW` ≠ `yes` (default) | read-only (reason `rw_disabled`) |
 | Superblock missing, version ≠ 0.1.0, inconsistent sections, two "base" disks | nothing is mounted |
 | Current superblock missing (backup only) or different from one disk to the other | read-only |
-| **Unclean shutdown** recorded by RAIDiator (bit 0 of 0x84 at 0) | read-only, until a successful full check (§4) |
+| **Unclean shutdown** recorded by RAIDiator (bit 0 of 0x84 at 0) | with `XRAID_RW=yes`: read-write, the mirror resynchronised from the base (§4); otherwise read-only, until a successful full check |
 | **A disk is missing** or single-disk configuration | read-only on the present disk |
-| **Section not in sync** (`inited` 0: left "in use" by Linux or RAIDiator, disk rebuilding/spare) | read-only, until a successful full check |
+| **Section not in sync** (`inited` 0: left "in use" by Linux or RAIDiator) | as an unclean shutdown; a disk rebuilding or spare: read-only |
 | RAIDiator counters show a failed disk, disk not present, `superblock_torn`, `inconsistent_superblock`, `reinstall_pending` (docs/XRAID-FORMAT.md §5) | read-only |
 | `xraid-sb` missing or the "in use" mark cannot be written | read-only (`no_sb_writer`, `sb_write_failed`) |
 | Section that is not a mirror (NV+ RAID 4) | read-only |
 | **Mismatched samples** at the same LBAs (compared only before a rw mount, §2.1) | read-only (`mirror_differs`) |
 | Partition that overflows the sections or V | read-only |
-| Crash **under Linux** (marker `/var/lib/nas-raid/xraid-dirty` left behind) | read-only, until a successful full check or quick check (§5.1) |
+| Crash **under Linux** (marker `/var/lib/nas-raid/xraid-dirty` left behind) | as an unclean shutdown; with `XRAID_RESYNC=no`: read-only, until a successful full check or quick check (§5.1) |
+| The base failed during such a resync (marker `xraid-resync` = `base_failed`) | read-only (`resync_base_failed`): nothing is recorded on the incomplete mirror; delete the marker once the disks are checked |
 | A leg fails while writing | failure recorded on the survivor, read-only (§2.2) |
 
 Always: `xraid-info` opens the disks read-only only; the protected area is only
@@ -175,12 +176,27 @@ Only one `nas-raid` action at a time (lock).
 
 ## 4. Risks and limits
 
-- **No partial resynchronisation**: a power cut during a write leaves the
-  superblock "in use" (and the `xraid-dirty` marker on the USB stick): read-only
-  until `nas-raid verify` (several hours) puts it back clean (or a quick
-  check, §5.1, accepted with its residual risk), or RAIDiator
-  copies the whole sections base → mirror at its next start (as it does after
-  its own crashes). There is no write-intent bitmap, in RAIDiator either.
+- **Resynchronisation after an unclean stop, as RAIDiator does**: a power
+  cut during a write leaves the superblock "in use" (and the `xraid-dirty`
+  marker on the USB stick). With `XRAID_RW=yes` and `XRAID_RESYNC=yes` (the
+  default), when this is the only doubt (both disks online, superblocks
+  agreeing, no other reason), the next mount is read-write and md copies the
+  whole sections base → mirror while the volume is in use (assembled without
+  `--assume-clean`, base first; reads of a region not copied yet come from
+  the base; mode reason `resync_after_unclean_stop`, progress in the Storage
+  card, a restart refused meanwhile). The superblock goes back to clean only
+  at a stop with both legs `[UU]` and idle. A stop before the end leaves it
+  "in use": the next mount copies everything again. There is no write-intent
+  bitmap, in RAIDiator either: several hours on big disks. While it runs
+  (marker `/var/lib/nas-raid/xraid-resync`), the mirror is incomplete: if the
+  base fails then, nothing is recorded on the mirror and the volume stays
+  read-only (`resync_base_failed`). With `XRAID_RESYNC=no`, the volume stays
+  read-only until `nas-raid verify` (several hours) or a quick check (§5.1,
+  accepted with its residual risk) puts it back clean, or RAIDiator copies the
+  sections at its next start. Checked on the NAS on a small X-RAID made on the
+  test key (tools/raidiator-bench/on-618-xraid.sh, 15/15): resync after a
+  crash, the legs identical and the superblock clean after it, the base
+  failed during a resync left read-only with nothing recorded.
 - The superblock writes have only been tried on disk images (§9 lists the
   experiments that validate them on the NAS).
 - Disk replacement and vertical expansion are left to RAIDiator (§6).

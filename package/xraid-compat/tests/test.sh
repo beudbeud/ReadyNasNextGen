@@ -181,7 +181,8 @@ DISKS="$T/big/sda.img $T/big/sdb.img"; : > "$T/cmd.log"; : > "$T/xi.log"; nr mou
 check "XRAID_RW=no (default): read-only even when healthy" "grep -q 'xraid-ro rw_disabled' '$R/var/run/nas-raid.mode' && ! grep -q 'mdadm\|xraid-sb' '$T/cmd.log'"
 check "read-only mount: no disk comparison (xraid-info --samples 0 only)" "grep -q -- '--samples 0' '$T/xi.log' && ! sampled"
 nr unmount 2>/dev/null >/dev/null
-echo XRAID_RW=yes > "$R/etc/nas-raid.conf"
+# the read-only safeguards first (XRAID_RESYNC=no); the resync after an unclean stop below
+printf 'XRAID_RW=yes\nXRAID_RESYNC=no\n' > "$R/etc/nas-raid.conf"
 # every dm table on an image must end before V (protected zone untouched)
 within_v() {
 	awk -v v="$1" '/^dmsetup create/ { for (i = 1; i <= NF; i++) if ($i == "linear" && $(i+1) ~ /\.img$/) { gsub(/'"'"'/, "", $(i+2)); if ($(i+2) + $(i-1) > v) bad = 1 } } END { exit bad }' "$T/cmd.log"
@@ -217,6 +218,26 @@ nr mount 2>/dev/null >/dev/null
 check "small images, dirty superblock left by Linux: read-only" "[ \"\$(mode_of)\" = xraid-ro ]"
 nr unmount 2>/dev/null >/dev/null; nr verify 2>/dev/null >/dev/null; nr mount 2>/dev/null >/dev/null
 check "verify after power loss: superblock clean again, mark removed, rw" "[ \"\$(mode_of)\" = xraid-rw ] && grep -q '^ok ' '$R/var/lib/nas-raid/verify.state'"
+# XRAID_RESYNC=yes (the default): an unclean stop is resynchronised base -> mirror under 6.18, as RAIDiator does
+nr unmount 2>/dev/null >/dev/null; echo XRAID_RW=yes > "$R/etc/nas-raid.conf"
+nr mount 2>/dev/null >/dev/null; echo repair > "$R/sys/block/md11/md/sync_action"; nr unmount 2>/dev/null >/dev/null
+echo idle > "$R/sys/block/md11/md/sync_action"; : > "$T/cmd.log"; : > "$T/xi.log"; nr mount 2>/dev/null >/dev/null
+check "unclean stop, XRAID_RESYNC=yes: rw (resync_after_unclean_stop), no sample comparison" "grep -qx 'xraid-rw resync_after_unclean_stop' '$R/var/run/nas-raid.mode' && ! sampled"
+check "unclean stop: the mirror resynchronised from the base (built without --assume-clean, base first), resync mark set" "grep -q '^mdadm --build /dev/md11 --level=1 --raid-devices=2 /dev/mapper/xr-a-s1 /dev/mapper/xr-b-s1\$' '$T/cmd.log' && [ -e '$R/var/lib/nas-raid/xraid-resync' ] && grep -q 'resynchronised from the base while in use' '$R/var/lib/nas-raid/log'"
+echo resync > "$R/sys/block/md11/md/sync_action"; : > "$T/cmd.log"; nr unmount 2>/dev/null >/dev/null
+check "stopped during the resync: superblock dirty, both marks kept (resync again next time)" "! grep -q 'xraid-sb clean' '$T/cmd.log' && [ -e '$R/var/lib/nas-raid/xraid-dirty' ] && [ -e '$R/var/lib/nas-raid/xraid-resync' ]"
+echo idle > "$R/sys/block/md11/md/sync_action"; nr mount 2>/dev/null >/dev/null; : > "$T/cmd.log"; nr unmount 2>/dev/null >/dev/null
+check "resync over at the stop: superblock clean, both marks removed" "grep -q 'xraid-sb clean' '$T/cmd.log' && [ ! -e '$R/var/lib/nas-raid/xraid-dirty' ] && [ ! -e '$R/var/lib/nas-raid/xraid-resync' ]"
+: > "$T/cmd.log"; nr mount 2>/dev/null >/dev/null
+check "clean again: an ordinary rw mount (--assume-clean)" "[ \"\$(mode_of)\" = xraid-rw ] && grep -q 'mdadm --build /dev/md11 --level=1 --raid-devices=2 --assume-clean' '$T/cmd.log'"
+echo repair > "$R/sys/block/md11/md/sync_action"; nr unmount 2>/dev/null >/dev/null; echo idle > "$R/sys/block/md11/md/sync_action"
+nr mount 2>/dev/null >/dev/null; mdstat '[_U]'; : > "$T/cmd.log"
+echo "/dev/mapper/c-c /c ext4 rw 0 0" > "$R/proc/mounts"; nr watch 2>/dev/null >/dev/null; mdstat '[UU]'; : > "$R/proc/mounts"
+check "base fails during the resync: nothing recorded on the incomplete mirror, read-only" "! grep -q 'xraid-sb fail' '$T/cmd.log' && grep -q 'base failed during the resync' '$R/var/lib/nas-raid/log' && [ \"\$(mode_of)\" = xraid-ro ]"
+nr unmount 2>/dev/null >/dev/null
+check "base failed during the resync, at the stop too: nothing recorded" "! grep -q 'xraid-sb fail' '$T/cmd.log'"
+rm -f "$R/var/lib/nas-raid/xraid-resync" "$R/var/lib/nas-raid/xraid-dirty"; nr verify 2>/dev/null >/dev/null
+printf 'XRAID_RW=yes\nXRAID_RESYNC=no\n' > "$R/etc/nas-raid.conf"; nr mount 2>/dev/null >/dev/null
 # a leg fails while writing: watch records it on the survivor and goes read-only
 mdstat '[U_]'; : > "$T/cmd.log"
 nr watch 2>/dev/null >/dev/null; mdstat '[UU]'

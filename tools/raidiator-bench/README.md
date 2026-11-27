@@ -157,3 +157,24 @@ Seen on the NAS:
 - r5fail 6/6: role 3 dead (AAAD), recorded on roles 0-2.
 - check5 6/6: "kicking non-fresh sda8", md5 [4/3] [UUU_], the file written
   after the failure identical.
+
+## X-RAID resync after an unclean stop (on-618-xraid.sh)
+
+A small X-RAID on the test key: `mkxraid-key.py` writes the blocks of two
+1.5 GiB disks (MBR, EBR, the four superblock copies, each filling its 24
+sectors, "WGam"); on the NAS the fake disks are raw areas of the key after its
+partitions (base at 4 GiB, mirror right after), LVM and ext3 are made on the
+base and the sections copied to the mirror. The test X-RAID has the NAS's own
+names (md10, md11, xr-*, VG c, /c): the NAS's /c is taken offline (services
+stopped, clean nas-raid unmount) and mounted again at the end, whatever
+happens (the real nas-raid is called without the test's NAS_RAID_* variables).
+
+    python3 mkxraid-key.py BLOCKS 3145728                  # on the PC
+    sh on-618-xraid.sh BIN /dev/sdX WORK BLOCKS             # under 6.18 (BIN: nas-raid, xraid-info, xraid-sb)
+
+Seen on the NAS, 15/15: rw mount, a crash replayed (64 KiB of the mirror
+altered), the next mount rw with the mirror resynchronised from the base
+(214 s for 1.5 GiB), the file read during the resync, at the stop the
+superblock clean and the legs identical, then an ordinary rw mount; another
+crash with the base failed during the resync: nothing recorded on the mirror,
+read-only (`resync_base_failed`); the NAS's /c back read-write.

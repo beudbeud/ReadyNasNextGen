@@ -114,10 +114,10 @@ This needs the relay add-on 1.1 or later. Details:
 - **Some disk operations still need RAIDiator**: replacing a disk and rebuilding the
   array, expanding a volume, and creating arrays. Start RAIDiator once for them
   ([docs/XRAID.md §6](docs/XRAID.md#6-md-disabled-for-now-replacement-and-expansion)).
-- **X-RAID after an unclean stop** (power cut, forced restart while writing): `/c` comes
-  back read-only. It becomes writable again after a quick check you accept, a full check
-  of several hours, or a resynchronisation by RAIDiator. A disk pulled while writing has
-  not been tested yet.
+- **X-RAID after an unclean stop** (power cut, forced restart while writing): with writing
+  switched on, `/c` comes back read-write and its mirror is copied again from the base
+  disk, as RAIDiator does. This takes several hours on big disks, and starts over if the
+  NAS stops before the end. A disk pulled while writing has not been tested yet.
 - **Flex-RAID**:
   - Only `/c` can hold shares; the other volumes are reachable over SSH.
   - A RAID 5 with a disk missing is readable, but read-only.

@@ -59,6 +59,7 @@ XRAID_LV=c
 EXT4_OPTS=noatime			# options of the kernel mount of /c
 XRAID_RW=no				# "yes": X-RAID writable if all safeguards pass
 FLEXRAID_RW=no				# "yes": RAIDiator RAID 0 and RAID 1 volumes writable (docs/XRAID.md §10)
+XRAID_RESYNC=yes			# with XRAID_RW=yes: after an unclean stop, mount rw and copy base -> mirror (as RAIDiator); "no": read-only until a check
 SAMPLES=256				# 64 KiB blocks compared per section before a rw mount (0 = none)
 QUICK_SAMPLES=512			# random 64 KiB blocks per section in quick-verify (~70 ms each on the NAS)
 CONF=${NAS_RAID_CONF:-$R/etc/nas-raid.conf}
@@ -176,7 +177,26 @@ decide() {
 	if [ "$MODE" = rw ] && [ -e "$STATE/migration" ]; then
 		MODE=ro; WHY="${WHY:+$WHY }migration_in_progress"
 	fi
+	# RAIDiator's own answer to an unclean stop: copy base -> mirror while the
+	# volume is in use. Only when the unclean stop is the only doubt (both
+	# disks online, superblocks agreeing): the volume is mounted rw and md
+	# resyncs the mirror from the base (assembled without --assume-clean).
+	RESYNC=
+	# the base failed during such a resync: the mirror is incomplete, never
+	# written again until the disks are checked (delete the mark by hand)
+	if grep -q '^base_failed' "$RESYNC_MARK" 2>/dev/null; then
+		MODE=ro; WHY="${WHY:+$WHY }resync_base_failed"; return
+	fi
+	if [ "$MODE" = ro ] && [ "$XRAID_RW" = yes ] && [ "$XRAID_RESYNC" = yes ] && [ -n "$XR_MIRROR" ] && [ -n "$WHY" ]; then
+		only=1
+		for r in $WHY; do case $r in unclean_shutdown|sync_in_progress|unclean_shutdown_linux) ;; *) only= ;; esac; done
+		if [ -n "$only" ]; then MODE=rw; RESYNC=1; WHY=resync_after_unclean_stop; fi
+	fi
 }
+RESYNC=
+# while it is there, the mirror is not a full copy of the base yet (resync
+# after an unclean stop): a failed base is never recorded on it
+RESYNC_MARK=$STATE/xraid-resync
 
 # ---------- X-RAID assembly ----------
 assemble_xraid() {	# $1 = rw | ro
@@ -184,13 +204,16 @@ assemble_xraid() {	# $1 = rw | ro
 	[ -n "$DRY_RUN" ] || mkdir -p "$MOUNTPOINT"
 	if [ $m = rw ]; then
 		[ -n "$DRY_RUN" ] || rm -f "$QUICK_OK"
-		write "$DIRTY" "$(date +%s)"; [ -n "$DRY_RUN" ] || sync
+		write "$DIRTY" "$(date +%s)"
+		clean=--assume-clean
+		if [ -n "$RESYNC" ]; then clean=; write "$RESYNC_MARK" "$(date +%s)"; log "X-RAID: unclean stop: the mirror is resynchronised from the base while in use"; fi
+		[ -n "$DRY_RUN" ] || sync
 		while [ $i -lt "$XR_NR_SECTIONS" ]; do
 			eval "set -- \$XR_S$i"
 			x dmsetup create "xr-a-s$i" --table "0 $2 linear $XR_BASE $1" || return 1
 			x dmsetup create "xr-b-s$i" --table "0 $2 linear $XR_MIRROR $1" || return 1
 			# base first: source of a "repair"
-			x mdadm --build "/dev/md1$i" --level=1 --raid-devices=2 --assume-clean \
+			x mdadm --build "/dev/md1$i" --level=1 --raid-devices=2 $clean \
 				"/dev/mapper/xr-a-s$i" "/dev/mapper/xr-b-s$i" || return 1
 			i=$((i + 1))
 		done
@@ -272,10 +295,13 @@ md_health() {
 sb_after_rw() {
 	case "$HEALTH" in
 	ok) if [ -z "$NOCLEAN" ] && x xraid-sb clean "$XR_BASE" "$XR_MIRROR"; then
-		[ -n "$DRY_RUN" ] || rm -f "$DIRTY"
+		[ -n "$DRY_RUN" ] || rm -f "$DIRTY" "$RESYNC_MARK"
 	    else log "X-RAID superblock left dirty: rw refused at next mount"; fi ;;
 	mirror_failed) log "X-RAID: mirror leg failed, recorded on the base"; x_ xraid-sb fail "$XR_BASE" ;;
-	base_failed) log "X-RAID: base leg failed, recorded on the mirror"; x_ xraid-sb fail "$XR_MIRROR" ;;
+	base_failed) if [ -e "$RESYNC_MARK" ]; then
+		log "X-RAID: base leg failed while the mirror was being resynchronised: nothing recorded (the mirror is incomplete), superblock left dirty"
+		write "$RESYNC_MARK" "base_failed $(date +%s)"
+	    else log "X-RAID: base leg failed, recorded on the mirror"; x_ xraid-sb fail "$XR_MIRROR"; fi ;;
 	*) log "X-RAID md $HEALTH at shutdown: superblock left dirty, rw refused at next mount" ;;
 	esac
 	return 0
@@ -585,7 +611,7 @@ do_mount() {
 	if [ "$MODE" = rw ] && ! command -v xraid-sb >/dev/null 2>&1; then
 		MODE=ro; WHY="${WHY:+$WHY }no_sb_writer"
 	fi
-	if [ "$MODE" = rw ] && [ "$SAMPLES" -gt 0 ] 2>/dev/null; then
+	if [ "$MODE" = rw ] && [ -z "$RESYNC" ] && [ "$SAMPLES" -gt 0 ] 2>/dev/null; then
 		log "X-RAID: comparing $SAMPLES samples per section before allowing writes"
 		SMP=$SAMPLES; analyse; decide	# a difference gives ro, reason mirror_differs
 	fi
@@ -648,7 +674,9 @@ watch() {
 	log "X-RAID: md degraded while writing ($HEALTH): going read-only"
 	case "$HEALTH" in
 	mirror_failed) x_ xraid-sb fail "$XR_BASE" ;;
-	base_failed) x_ xraid-sb fail "$XR_MIRROR" ;;
+	base_failed) if [ -e "$RESYNC_MARK" ]; then log "X-RAID: base failed during the resync: the mirror is incomplete, nothing recorded"
+			write "$RESYNC_MARK" "base_failed $(date +%s)"
+		else x_ xraid-sb fail "$XR_MIRROR"; fi ;;
 	esac
 	services stop
 	if mounted "$DATA" && ! x umount "$DATA"; then

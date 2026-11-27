@@ -612,7 +612,7 @@ for i in 0 1; do mkdir -p "$R/sys/block/md1$i/md"; echo idle > "$R/sys/block/md1
 i=0; while [ $i -lt 30 ] && grep -qs '^running' "$R"/var/lib/nas-raid/verify.state; do sleep 1; i=$((i + 1)); done
 rm -f "$R"/var/lib/nas-raid/xraid-dirty
 export NAS_RAID_DISKS="$(ls "$R/img/clean"/*.img | tr '\n' ' ')"
-printf '# local settings\nSAMPLES=8\nVERIFY_MAX_DAYS=3\n' > "$R"/etc/nas-raid.conf
+printf '# local settings\nSAMPLES=8\nVERIFY_MAX_DAYS=3\nXRAID_RESYNC=no\n' > "$R"/etc/nas-raid.conf
 echo 'xraid-ro rw_disabled' > "$R"/var/run/nas-raid.mode
 api GET a=storage
 check "xraid_rw: state read from nas-raid.conf (no), X-RAID read-only" "json 'j[\"xraid_rw\"]==\"no\" and j[\"mode\"]==\"xraid-ro\"'"
@@ -691,9 +691,10 @@ check "after a check, writing off: DIET_REMOUNT leaves /c read-only" '! grep -q 
 echo XRAID_RW=yes > "$R"/etc/nas-raid.conf; : > "$R"/cmd.log
 DIET_REMOUNT=1 $SH "$SRC"/www/cgi-bin/api
 check "after a check, writing on and safeguards lifted: DIET_REMOUNT remounts read-write" 'grep -q "umount /c" "$R"/cmd.log && grep -q "^xraid-rw" "$R"/var/run/nas-raid.mode'
+printf 'XRAID_RW=yes\nXRAID_RESYNC=no\n' > "$R"/etc/nas-raid.conf	# with the resync (default), a dirty mark is mounted rw
 echo 'xraid-ro unclean_shutdown_linux' > "$R"/var/run/nas-raid.mode; date +%s > "$R"/var/lib/nas-raid/xraid-dirty; : > "$R"/cmd.log
 DIET_REMOUNT=1 $SH "$SRC"/www/cgi-bin/api
-check "after a check, a safeguard still there (dirty mark): nothing remounted" '! grep -q "umount /c" "$R"/cmd.log && ! grep -q "S70ksmbd stop" "$R"/cmd.log'
+check "after a check, a safeguard still there (dirty mark, XRAID_RESYNC=no): nothing remounted" '! grep -q "umount /c" "$R"/cmd.log && ! grep -q "S70ksmbd stop" "$R"/cmd.log'
 rm -f "$R"/var/lib/nas-raid/xraid-dirty "$R"/etc/nas-raid.conf; echo 'xraid-rw' > "$R"/var/run/nas-raid.mode
 api POST a=raid_quick_accept 'confirm=ACCEPT&yes=1'
 check "raid_quick_accept again: refused by nas-raid (409, nothing to accept)" '[ "$ST" = 409 ]'

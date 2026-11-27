@@ -429,6 +429,9 @@ const I18N = {
   "Read-only": ["Lecture seule", "Nur lesen"],
   "Rebuilding": ["Reconstruction", "Wiederaufbau"],
   "Rebuilding {0} %": ["Reconstruction {0} %", "Wiederaufbau {0} %"],
+  "unclean stop: the mirror is being resynchronised from the base disk (as RAIDiator does)": ["arrêt brutal : le miroir est resynchronisé depuis le disque de base (comme le fait RAIDiator)", "unsauberes Herunterfahren: der Spiegel wird von der Basisplatte neu synchronisiert (wie RAIDiator)"],
+  "the base disk failed while the mirror was being resynchronised: read-only, check the disks": ["le disque de base est tombé pendant la resynchronisation du miroir : lecture seule, vérifier les disques", "die Basisplatte ist während der Spiegel-Synchronisation ausgefallen: nur Lesen, Platten prüfen"],
+  "Mirror resynchronisation": ["Resynchronisation du miroir", "Spiegel-Synchronisation"],
   "parity being recomputed {0} %": ["parité en cours de recalcul {0} %", "Parität wird neu berechnet {0} %"],
   "a member failed: going read-only": ["un membre est en panne : passage en lecture seule", "ein Mitglied ist ausgefallen: Wechsel zu nur Lesen"],
   "{0} disks in service / {1} failed": ["{0} disques en service / {1} en panne", "{0} Platten in Betrieb / {1} ausgefallen"],
@@ -1046,7 +1049,9 @@ const NR = {rw_disabled:'writing disabled (switch “Allow writing on the X-RAID
   no_sb_writer:'superblock writer (xraid-sb, flexraid-sb) missing: read-only only', sb_write_failed:'the superblock could not be marked “in use”',
   flexraid_failed:'RAIDiator md volumes found, none could be mounted', snapshot:'a volume has a snapshot: it stays read-only',
   failure_unrecorded:'a failed disk could not be recorded: read-only until checked', sb_not_writable:'the md superblocks could not take a disk failure: read-only',
-  mark_write_failed:'the crash mark could not be written: read-only'};
+  mark_write_failed:'the crash mark could not be written: read-only',
+  resync_after_unclean_stop:'unclean stop: the mirror is being resynchronised from the base disk (as RAIDiator does)',
+  resync_base_failed:'the base disk failed while the mirror was being resynchronised: read-only, check the disks'};
 // reasons of an md array of RAIDiator with X-RAID off (xraid-info flexraid)
 const FRR = {degraded:'a member is missing or not in sync', stale_member:'a member is out of date', unclean:'not cleanly stopped by RAIDiator',
   missing_member:'a member is missing: not readable', sizes_differ:'members of different sizes: not readable',
@@ -1105,7 +1110,8 @@ async function loadStk(d){
     });
   }
   // reasons: xraid-info codes (English text, shown here in the page language), then the ones added by nas-raid
-  if(!fr) (x.reasons||[]).forEach(r=>{ h += `<div>· ${esc(XR[r.code] ? t(XR[r.code]) : r.text)}</div>`; });
+  // (read-write: the superblock is "in use" by design, its reasons are not news; one line per code)
+  if(!fr && stk.mode!=='xraid-rw') [...new Map((x.reasons||[]).map(r=>[r.code, r])).values()].forEach(r=>{ h += `<div>· ${esc(XR[r.code] ? t(XR[r.code]) : r.text)}</div>`; });
   // mode reasons: those of nas-raid, and xraid-info codes not in xraid.json (the
   // disk comparison, mirror_differs, only runs at a rw mount)
   if(!fr){ const shown = (x.reasons||[]).map(r=>r.code);
@@ -1115,7 +1121,7 @@ async function loadStk(d){
   if(lay){
     h += `<div class="row" style="margin-top:6px"><span>${t('Level')}</span><span>RAID ${esc(lay.level.replace(/^raid/, ''))}</span></div>`;
     lay.members.forEach(m=>{ h += `<div class="row"><span>${esc(t('Bay {0}', m.bay))}${m.dev ? ' · '+esc(m.dev) : ''} · ${t('member disk')}</span><span style="color:var(--${m.state==='online'?'ok':m.state==='rebuilding'?'warn':'bad'})">${esc(t(MST[m.state]||m.state))}</span></div>`; });
-    if(lay.rebuild!=null) h += progress(lay.rebuild);
+    if(lay.rebuild!=null) h += `<div class="row" style="margin-top:6px"><span>${t('Mirror resynchronisation')}</span><span style="color:var(--warn)">${lay.rebuild} %</span></div>` + progress(lay.rebuild);
   }
   if(x.mirror || v.state!=='never'){
     const d = v.date ? new Date(v.date*1000).toLocaleDateString(LANG) : '';
