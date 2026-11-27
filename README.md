@@ -3,257 +3,151 @@
 [![tests](https://github.com/beudbeud/ReadyNasNextGen/actions/workflows/tests.yml/badge.svg)](https://github.com/beudbeud/ReadyNasNextGen/actions/workflows/tests.yml)
 
 A modern system to bring the **NETGEAR ReadyNAS Duo v1** back to life: Linux 6.18, file
-sharing for Windows/macOS (SMB) and Linux (NFS), and a web administration interface, without
-touching the original firmware.
+sharing for Windows/macOS (SMB) and Linux (NFS), and a web administration interface,
+without touching the original firmware.
 
 > **Experimental project.** It boots on its own from a USB stick through the original
-> firmware and serves files (see [Current limitations](#current-limitations)). Keep a backup
-> of your data.
+> firmware and serves files (see [Limitations](#limitations)). Keep a backup of your data.
 
-## What you get
+## Features
 
-- **Network shares**: SMB 3 (Windows, macOS, Linux, through ksmbd), and NFS v3/v4.
-  Measured on 0.1.4, NAS wired to the box at 1000 Mbit/s, PC on Wi-Fi, 500 MiB files compared
-  byte for byte:
-
-  | | read | write |
-  |---|---|---|
-  | SMB 3, unsigned (Linux clients) | 28–39 MiB/s | 12–14 MiB/s |
-  | SMB 3, signed (Windows and macOS sign by default) | 4.1 MiB/s | 3.2 MiB/s |
-  | NFS v3 | 30 MiB/s | 11 MiB/s |
-
-  Reads are limited by the Wi-Fi of the PC (the NAS stays around 50–60 % busy), writes and
-  signed transfers by the CPU of the NAS ([details](docs/DEVELOPMENT.md#smb-writes)).
-- **Web interface** over HTTPS (French, German, English), derived from
+- **Network shares**: SMB 3 (Windows, macOS, Linux, through ksmbd) and NFS v3/v4. Reads
+  reach about 30 MiB/s, writes about 12 MiB/s; signed SMB (Windows and macOS by default)
+  is slower, about 4 MiB/s ([measurements](docs/DEVELOPMENT.md#measured-throughput)).
+- **Web interface** over HTTPS (English, French, German), derived from
   [DIET](https://github.com/mfe-/ReadyNASDuoSparc): NAS status, disks, shares, users,
-  services, logs, SMART reports and self-tests of the disks.
+  services, logs, SMART reports and disk self-tests.
 - **Optional services**, each switched on from the web interface: NFS, MiniDLNA (TVs,
-  media players), automatic discovery on the network (`<name>.local`), per-user rsync and
-  WebDAV. Out of the box only SMB, the web interface and SSH run.
-- **Your existing X-RAID disks** are used as they are, read-only by default, and stay
-  readable by RAIDiator (its superblock is kept up to date). Planned: switching to a
-  standard Linux RAID1 (md), disabled for now. Disks of a RAIDiator with X-RAID
-  switched off ("Flex-RAID": RAID 1 and/or RAID 0 volumes) are mounted read-only, or
-  read-write behind a switch; a RAID 5 (NV+, 3 disks or more) is read-only.
-- **Temperature-controlled fan**: the NAS stays quiet when idle.
-- **Hardware clock** read at boot, then kept accurate over the network (NTP).
-- The **original firmware stays intact**: without the USB stick, the NAS starts RAIDiator
+  media players), network discovery (`<name>.local`), per-user rsync and WebDAV. Out of
+  the box, only SMB, the web interface and SSH run.
+- **Your existing disks**, used as RAIDiator left them:
+  - **X-RAID**: mounted read-only by default, or read-write behind a switch. RAIDiator's
+    superblock is kept up to date, so RAIDiator can still read the disks.
+  - **Flex-RAID** (X-RAID switched off): RAID 1, RAID 0 and RAID 5 volumes. They are
+    read-only by default, or read-write behind a switch. A RAID 1 or RAID 5 is
+    resynchronised after a power cut, and a failed disk is recorded the way RAIDiator does
+    it.
+
+  Details: [docs/XRAID.md](docs/XRAID.md).
+- **System updates from the web interface**, with a trial boot and a way back to the
+  previous version.
+- **Temperature-controlled fan**, and the hardware clock kept accurate over the network
+  (NTP).
+- **The original firmware stays intact**: without the USB stick, the NAS starts RAIDiator
   again.
 
-## Required hardware
+## Requirements
 
-- A **ReadyNAS Duo v1** (Infrant SPARC processor; the Duo v2 is different hardware).
+- A **ReadyNAS Duo v1** (Infrant SPARC processor). The Duo v2 is different hardware.
+- The NAS running its original firmware, **RAIDiator 4.1.x**. DIET installed on top of it
+  also works.
 - A **USB stick** of at least 1 GB, plugged into the NAS.
-- The NAS running its original firmware, **RAIDiator 4.1.x** (DIET installed on top of it
-  also works).
-- A **Linux PC** to build the system and prepare the stick (see
-  [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#build), ~15 GB free; Docker for the relay module).
-- For development only: a **3.3 V USB-to-serial adapter** on the NAS internal serial header
-  (9600 baud) and a TFTP server on the PC.
+- A PC to write the stick image. Building the system yourself needs a Linux PC
+  ([docs/INSTALL.md](docs/INSTALL.md#building-it-yourself)).
 
 ## Installation
 
-The NAS keeps booting its original firmware from flash; on the system disk, the **relay**
-(a RAIDiator add-on) hands the NAS over to Linux 6.18 on the USB stick (details in
-[board/readynas-duo-v1/relay/](board/readynas-duo-v1/relay/README.md)). Without the stick, or
-if 6.18 failed to boot last time, RAIDiator starts as usual.
-
-### Quick install: release image
-
 1. **Download** from the [releases](https://github.com/beudbeud/ReadyNasNextGen/releases)
-   page `readynasng-stick-<version>.img.xz` and `ReadyNasNextGen_relay_<version>.bin`
-   (check them against `SHA256SUMS`).
-2. **Write the image** to a USB stick of 1 GB or more, with
-   [Etcher](https://etcher.balena.io/) or on Linux (replace `sdX` with the stick: every
-   byte on it is lost):
+   page `readynasng-stick-<version>.img.xz` and `ReadyNasNextGen_relay_<version>.bin`,
+   and check them against `SHA256SUMS`.
+2. **Write the image** to the USB stick, with [Etcher](https://etcher.balena.io/) or on
+   Linux. Replace `sdX` with the stick: every byte on it is lost.
    ```sh
    xzcat readynasng-stick-<version>.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync
    ```
-   The image holds one ext3 partition (label `usbroot`) of about 1 GB; on a bigger stick it
-   can be grown from Linux: `sudo growpart /dev/sdX 1` (or `parted /dev/sdX resizepart 1
-   100%`), then `sudo e2fsck -f /dev/sdX1 && sudo resize2fs /dev/sdX1`. It must stay ext3.
-3. **Install the relay add-on** on the NAS, as in step 3 below.
-4. **Plug the stick into the NAS and restart it**, then [First access](#first-access).
+3. **Install the relay add-on** `ReadyNasNextGen_relay_<version>.bin` on the NAS. It hands
+   the NAS over from the original kernel to Linux 6.18 on the stick. Either way:
+   - in RAIDiator's web interface (Frontview): **System → Update → Local**, **Upload and
+     verify image**, then **Perform System Update** and restart. RAIDiator warns that the
+     add-on is not signed by NETGEAR: this is expected. Recent browsers no longer connect
+     to Frontview (TLS 1.0).
+   - or from the PC: `sh tools/frontview-upload.sh <NAS-IP> ReadyNasNextGen_relay_<version>.bin`.
 
-`make stick-image` builds the same image from your own build (`output-rapide/images`, no
-root needed; `VERSION=…`, `SIZE_MB=…`).
+   After the restart, RAIDiator installs the add-on and restarts once more by itself,
+   about 2 minutes later. Wait for both restarts.
+4. **Plug the stick into the NAS and restart it.** The original kernel starts, then
+   Linux 6.18 from the stick.
 
-### Building it yourself
+Building the system yourself, preparing the stick by hand, booting by TFTP, more on the
+relay add-on: [docs/INSTALL.md](docs/INSTALL.md).
 
-1. **Build the system and the relay add-ons** on the PC:
-   ```sh
-   git clone --recursive https://github.com/beudbeud/ReadyNasNextGen.git
-   cd ReadyNasNextGen
-   make rapide        # downloads the prebuilt toolchain, then builds
-   make relay         # relay module for the original kernel (Docker + QEMU, ~10 min)
-   make relay-addon   # RAIDiator add-ons, checked on the PC
-   ```
-   Output: `output-rapide/images/vmlinux.bin` (the kernel), `rootfs.tar` (the system), and
-   the add-ons `output-relay/ReadyNasNextGen_relay_<version>.bin` and
-   `ReadyNasNextGen_relay_remove_<version>.bin`.
+## First boot
 
-2. **Prepare the USB stick** on the PC: one **ext3** partition (the original kernel cannot
-   read ext4, and the relay reads the stick), then, as root:
-   ```sh
-   mkfs.ext3 -I 128 -L usbroot /dev/sdX1
-   mount /dev/sdX1 /mnt
-   mkdir /mnt/rootfs-6.18 /mnt/boot
-   tar -xpf output-rapide/images/rootfs.tar -C /mnt/rootfs-6.18
-   cp output-rapide/images/vmlinux.bin /mnt/boot/
-   (cd /mnt/boot && md5sum vmlinux.bin > vmlinux.bin.md5)
-   umount /mnt
-   ```
-   To update later, use the web interface (below); by hand, extract into a new empty
-   `rootfs-6.18` rather than over the previous system, and copy the new `vmlinux.bin`
-   (and its `.md5`).
+The system ships with no password and no key. The NAS creates its SSH host keys and its
+HTTPS certificate at first boot.
+1. Open `https://<NAS-IP>/` from your local network and accept the self-signed
+   certificate.
+2. While no administrator exists, the interface shows a **First setup** page, without
+   login. On it, set:
+   - the **administrator password** of the web interface (user `admin`) and the NAS name;
+   - optionally, for **SSH** (user `root`), a root password and/or your public key, for
+     example the contents of `~/.ssh/id_ed25519.pub`. SSH refuses root until one of the
+     two is set. Both can also be set later, in **System → SSH access**.
+3. The page answers only once: as soon as the administrator password is saved, the whole
+   interface asks for the password. Do this right after the first boot, from a network
+   you trust. The interface only answers private addresses.
 
-3. **Install the relay add-on** `ReadyNasNextGen_relay_<version>.bin`, in either of two ways:
+Other ways in (serial console, an SSH key copied to the stick):
+[docs/INSTALL.md](docs/INSTALL.md#other-first-access-methods).
 
-   - **From RAIDiator's web interface (Frontview)**: **System → Update → Local**, select the
-     `.bin`, **Upload and verify image** (RAIDiator warns that the add-on is not signed by
-     NETGEAR: expected), then **Perform System Update**, and restart the NAS when asked.
-     Frontview only speaks TLS 1.0 with an old cipher: recent browsers refuse to connect, so
-     you may need an old browser, or the script below.
-   - **From the PC with the script** (no browser needed):
-     ```sh
-     sh tools/frontview-upload.sh <NAS-IP> ReadyNasNextGen_relay_<version>.bin
-     ```
-     It asks for the Frontview `admin` password, uploads and verifies the add-on, asks
-     before performing the update, then restarts the NAS as Frontview's **System → Shutdown**
-     page would. Without a terminal, set `FRONTVIEW_PASSWORD=…` and `FRONTVIEW_YES=1`;
-     `FRONTVIEW_NO_REBOOT=1` skips the restart (do it yourself: power button or Frontview).
+## Updating
 
-   RAIDiator does not restart by itself after **Perform System Update**. On the next boot it
-   installs the add-on, then the NAS restarts once more by itself about 2 minutes later: wait
-   for both restarts, without powering it off. Install log on the NAS: `/var/log/relay-install.log`. (With DIET installed, start
-   RAIDiator once from DIET to reach Frontview; the relay then starts before DIET's own boot
-   switch.)
+1. Download `readynasng-update-<version>.tar` from the releases, or build it with
+   `make update-package`.
+2. In the web interface, open **System → System update**. Upload the file, or give its
+   GitHub release address and SHA-256.
+3. Click **Restart to try it**.
 
-4. **Plug the stick into the NAS and restart it.** The original kernel starts, then Linux 6.18
-   from the stick. Without the stick, RAIDiator (or DIET) starts as before.
-
-5. **First access**: see below.
-
-### First access
-
-The system ships with no password and no key, and the SSH host keys and HTTPS certificate are
-created by the NAS at first boot. Open `https://<NAS-IP>/` from your local network (accept
-the self-signed certificate): while no administrator exists, the interface shows a **First
-setup** page, without login, to choose:
-
-- the **administrator password** of the web interface (user `admin`) and the NAS name;
-- optionally, for **SSH** (user `root`): a root password and/or your public key (for example
-  the contents of `~/.ssh/id_ed25519.pub`). SSH refuses root as long as it has neither (its
-  password is empty and dropbear refuses empty passwords). Both can be set later in
-  **System → SSH access**.
-
-The page answers only once: as soon as the administrator password is saved, it is gone and
-the whole interface asks for the password. Set it up right after the first boot, and only
-from a network you trust (the interface only answers private addresses). Other ways: the
-serial console (root, no password: `passwd`, then `diet-webpass` for the web password), or an
-SSH key copied to the stick from a Linux PC before the first boot:
-```sh
-sudo mount /dev/sdX1 /mnt
-sudo install -d -m 700 /mnt/rootfs-6.18/root/.ssh
-sudo install -m 600 ~/.ssh/id_ed25519.pub /mnt/rootfs-6.18/root/.ssh/authorized_keys
-sudo umount /mnt
-```
-
-### Updating
-
-`make update-package` builds `readynasng-update-<version>.tar` (and its `.sha256`) from
-`output-rapide/images`. In the web interface, **System → System update**: upload it (or
-give its GitHub release address and SHA-256), then **Restart to try it**. The new version
-goes into the second system slot of the stick with the settings of this NAS; if it does not
-start completely (cut the power if it hangs), the next power-on goes back to the current
-version. **Switch to the other version** goes back to the previous one. Needs the relay
-add-on 1.1 or later (`make relay-addon`, installed like step 3). Details:
+The new version goes into the second system slot of the stick, with this NAS's settings.
+If it does not start completely, the next power-on goes back to the current version (cut
+the power if it hangs). **Switch to the other version** goes back to the previous one.
+This needs the relay add-on 1.1 or later. Details:
 [docs/DIET.md](docs/DIET.md#system-update-settings-page).
 
-### Development: booting by TFTP
+## Limitations
 
-Without the relay, 6.18 can be started from the PC: start the TFTP server
-(`tools/tftp-server.sh output-rapide/images`), open the serial console, power on the NAS and
-interrupt `iboot` during boot. At the `iboot>` prompt:
-```
-tftp <NAS-MAC> <NAS-IP> <PC-IP> vmlinux.k3 0x80004000
-go 0x80004000
-```
-`tools/iboot-cmd.py` does these steps automatically. The stick may then also be ext4.
+- **ReadyNAS Duo v1 only, validated on one NAS.** The 4-bay NV+ v1 (same processor) is
+  not supported yet.
+- **Boot through the original firmware**: the NAS boots RAIDiator's 2.6.17 kernel first,
+  and the relay then hands over to 6.18. The stick must stay ext3. Not tested yet: the
+  fallback after a power cut during a 6.18 boot.
+- **Some disk operations still need RAIDiator**: replacing a disk and rebuilding the
+  array, expanding a volume, and creating arrays. Start RAIDiator once for them
+  ([docs/XRAID.md §6](docs/XRAID.md#6-md-disabled-for-now-replacement-and-expansion)).
+- **X-RAID after an unclean stop** (power cut, forced restart while writing): `/c` comes
+  back read-only. It becomes writable again after a quick check you accept, a full check
+  of several hours, or a resynchronisation by RAIDiator. A disk pulled while writing has
+  not been tested yet.
+- **Flex-RAID**:
+  - Only `/c` can hold shares; the other volumes are reachable over SSH.
+  - A RAID 5 with a disk missing is readable, but read-only.
+  - After a power cut, a RAID 5 recomputes its parity: this takes hours on big disks.
+  - A power cut under RAIDiator itself goes unnoticed.
+- **Writing is new**: keep a backup of your data before switching it on, on X-RAID as well
+  as on Flex-RAID.
 
-## Your data (X-RAID)
+## Documentation
 
-Disks formatted by the original firmware (X-RAID) are detected and mounted on `/c`
-**read-only** by default: nothing is written to your data. Before any mount, the system
-checks the mirror state (failed disk, unclean shutdown, mismatched superblocks, unfinished
-synchronisation) and refuses when in doubt.
-
-Writing to an X-RAID volume (a switch in the Storage card of the web interface) is possible;
-it is described, with its precautions, in [docs/XRAID.md](docs/XRAID.md). Migrating to a
-standard Linux RAID1 is disabled for now ([docs/XRAID-MIGRATION.md](docs/XRAID-MIGRATION.md)).
-
-**Flex-RAID** (RAIDiator with X-RAID switched off: md volumes in RAID 1 or RAID 0, possibly
-several on the same disks, RAID 5 on a 4-bay NV+ with 3 disks or more): mounted
-**read-only**, volume `c` on `/c` and any other volume
-`x` on `/x`. They can be made writable (a switch in the Storage card; nothing is written
-outside the file system; a RAID 1, of 2 disks or more, is resynchronised after a power cut
-under 6.18, a failed disk recorded as RAIDiator does; a RAID 5 always stays read-only, also
-with one disk missing, read through the parity). Only `/c` can hold
-shares, the other volumes are reachable over SSH. Checked on the NAS: arrays made by
-RAIDiator's own kernel and tools read under 6.18; a RAID 1 and a RAID 0 written under 6.18
-then read back and checked clean by RAIDiator, a RAID 1 disk failed under 6.18 left out
-by RAIDiator, and a 4-member RAID 5 made by RAIDiator read under 6.18, whole and with one
-member missing
-([docs/XRAID.md §10](docs/XRAID.md#10-raidiator-md-volumes-x-raid-off-flex-raid)).
-
-## Current limitations
-
-- **Validated on one NAS only.**
-- **Boot through the original firmware**: the NAS boots RAIDiator's 2.6.17 kernel first, then
-  the relay hands over to 6.18 (the stick must be ext3). Validated on that NAS: relay add-on
-  1.1 installed from Frontview, boots of 6.18, system updates by slots with their trial boot.
-  Not tested yet: the fallback after a power cut during a 6.18 boot (the next power-on should
-  start RAIDiator, or the previous slot during an update trial).
-- **Writing to an X-RAID volume** (Storage card switch): validated on that NAS, first through
-  fuse2fs then with the kernel ext4 driver and disk DMA: the RAIDiator superblock goes dirty
-  while mounted and clean after a clean unmount, and RAIDiator and DIET read the written data
-  back identical. Not tested yet: a power cut while writing, a disk pulled while writing. Keep
-  a backup of your data before enabling it.
-
-## Going back to the original system
-
-Unplug the stick and restart: RAIDiator starts. With the stick plugged in, RAIDiator once:
-`touch /.relay_skip_once` in 6.18. Never relay again: `touch /relay/disabled` on the system
-volume (from RAIDiator over SSH), or install `ReadyNasNextGen_relay_remove_<version>.bin` the
-same way as the relay add-on: it puts the previous `/sbin/init` back and deletes `/relay`.
-The flash memory, where the original firmware lives, is never modified: **the flash is never
-written**. A read-only backup of it from Linux 6.18 is shelved for now
-([docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#nand-flash-read-only-backup-shelved)).
-
-**Never write to the flash** (`iboot` NAND write commands, `/dev/mtd*`): a corrupted flash
-makes the NAS unusable without recovery hardware.
-
-## Further reading
-
-Detailed documentation:
-
-- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md): build, toolchain, detailed porting status,
-  kernel parameters, source tree.
+- [docs/INSTALL.md](docs/INSTALL.md): building, preparing the stick by hand, the relay
+  add-on, TFTP boot, going back to the original system.
+- [docs/XRAID.md](docs/XRAID.md): X-RAID and Flex-RAID disks, writing, safeguards.
 - [docs/DIET.md](docs/DIET.md): the web interface and its differences from DIET.
-- [docs/XRAID.md](docs/XRAID.md): using X-RAID disks, writing (migrating to md: disabled).
-- [board/readynas-duo-v1/relay/](board/readynas-duo-v1/relay/README.md): the relay (boot
-  from the original kernel), its build and its add-ons.
+- [docs/API.md](docs/API.md): the web interface's API.
+- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md): toolchain, porting status, kernel patches,
+  measurements.
+- [board/readynas-duo-v1/relay/](board/readynas-duo-v1/relay/README.md): the relay
+  (booting from the original kernel) and its add-ons.
 - [FEASIBILITY.md](FEASIBILITY.md): initial study.
 
 ## Credits and licences
 
-- Kernel, drivers, relay module and scripts: **GPL-2.0** (see `LICENSE`), written from the
-  GPL sources of the 2.6.17 kernel published by NETGEAR; the LP coprocessor firmware
-  (`arch/sparc/kernel/padre_lpram.c`) comes from the same GPL sources.
+- Kernel, drivers, relay module and scripts: **GPL-2.0** (see `LICENSE`). They are written
+  from the GPL sources of the 2.6.17 kernel published by NETGEAR. The LP coprocessor
+  firmware (`arch/sparc/kernel/padre_lpram.c`) comes from the same GPL sources.
 - Web interface: derived from [DIET](https://github.com/mfe-/ReadyNASDuoSparc) by davemmi
   (Duo v1 support: [mfe-/ReadyNASDuoSparc#16](https://github.com/mfe-/ReadyNASDuoSparc/pull/16)).
-  The original repository declares no licence, so this code is **not** under this repository's
-  GPL-2.0 (see [docs/DIET.md](docs/DIET.md#origin-and-licence)).
+  The original repository declares no licence, so this code is **not** under this
+  repository's GPL-2.0 (see [docs/DIET.md](docs/DIET.md#origin-and-licence)).
 - `readynas_crypto`: GPL-2.0+ (Henrik Nordström); `des.c`: LGPL-2.1 (Christophe Devine).
 - Buildroot, Linux and the built packages keep their own licences.
 

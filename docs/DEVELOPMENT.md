@@ -29,6 +29,8 @@ two SATA disks.
 | Ethernet transmit checksum by the engine, scatter-gather (`patches/linux/0023`) | works, on by default: loopback experiment as expected, TCP/SSH/SMB transfers byte for byte, no checksum error on the peer; see [Transmit checksum](#transmit-checksum-by-the-engine-patcheslinux0023) |
 | Ethernet TCP segmentation by the engine, TSO (`patches/linux/0029`) | works, **on by default** since 0.1.4 (`padre_gmac.tso=0` to turn it off): loopback experiment as expected, segments captured on the PC (checksums, IP ids, flags), raw TCP `sendfile()` and `write()`, SSH and NFS reads byte for byte; NAS CPU per MiB sent halved (TCP 34 → 45 MiB/s, NFS reads 24 → 30 MiB/s on a direct gigabit link); SMB reads not compared yet; see [TSO](#tcp-segmentation-by-the-engine-patcheslinux0029) |
 | Ethernet jumbo frames, MTU up to 8980 (`patches/linux/0030`) | implemented, not tested end to end (no jumbo host on the test network, PC on Wi-Fi); MTU 1500 unchanged, switching up and back works; see [Jumbo frames](#jumbo-frames-patcheslinux0030) |
+| Call traces of other tasks on SPARC 32 (`patches/linux/0031`) and hung-task detector | works: sysrq-w and "blocked for more than 120 seconds" now print the call trace (show_stack() got no stack pointer for another task and printed nothing) |
+| dm-raid RAID 5 without metadata (`patches/linux/0032`, Flex-RAID RAID 5 of RAIDiator) | works: without it, every write hung after the first md sync (resync, check): md_do_sync() sets MD_SB_CHANGE_PENDING and nothing clears it for a dm-raid set without metadata (non-persistent and external), so raid5d stops for good; seen on the NAS, fixed and checked there (writes after a 240 s resync) |
 | SMB reads without copy (`patches/linux/0026`, ksmbd `zerocopy_read`) | works, on by default: SMB reads 17–20 MiB/s instead of 5–7 (Wi-Fi), system time ÷ 10; see [SMB](#smb-zero-copy-reads-and-signing) |
 | SMB signing, AES-CMAC for SPARC v7 (`patches/linux/0024`) | works: `cmac-aes-sparc32` passes the kernel self-tests; signed reads 3.4–3.6 MiB/s instead of 2.2–2.3 |
 | USB EHCI (VIA VT6212) | works: AHB arbitration from 2.6.17 restored; the VT6212 never re-reads the horizontal link of the head QH once the CPU has rewritten it, so a permanent dummy QH follows the head and the real QHs are chained after it |
@@ -40,6 +42,20 @@ two SATA disks.
 | NAND flash, read only (`padre_nand`, `patches-shelved/linux/`, not built; kernel modules: `patches/linux/0021`) | **shelved** (2026-11-18): chip read fine (ID `ec 76`, bad block table, ECC, `mtd0` read twice identical), but reading while the system runs from the USB stick loses the stick, with or without pausing EHCI; see [below](#nand-flash-read-only-backup-shelved) |
 | ksmbd, NFS v3/v4, mdadm | ksmbd and md RAID 1 in daily use (see [SMB](#smb-zero-copy-reads-and-signing)); NFS v3 and v4.2 work: reads 9.2–9.8 MiB/s on 0.1.3, 16.5–18 MiB/s with 4 MiB pageblocks (see [NFS reads](#nfs-reads-where-the-cpu-goes)); writes ~5 MiB/s (see [NFS](#nfs-measures)) |
 | [DIET](DIET.md) web dashboard (lighttpd HTTPS) | works on the NAS (system updates, X-RAID write switch); every action tested in simulation (`test-api.sh`) |
+
+## Measured throughput
+
+Measured on 0.1.4, with the NAS wired to the box at 1000 Mbit/s and the PC on Wi-Fi.
+The test files are 500 MiB each, compared byte for byte afterwards.
+
+| | read | write |
+|---|---|---|
+| SMB 3, unsigned (Linux clients) | 28–39 MiB/s | 12–14 MiB/s |
+| SMB 3, signed (Windows and macOS sign by default) | 4.1 MiB/s | 3.2 MiB/s |
+| NFS v3 | 30 MiB/s | 11 MiB/s |
+
+- Reads are limited by the PC's Wi-Fi: the NAS stays around 50–60 % busy.
+- Writes and signed transfers are limited by the NAS's CPU ([SMB: writes](#smb-writes)).
 
 ## Build
 
